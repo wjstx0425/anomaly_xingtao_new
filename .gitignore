@@ -1,8 +1,10 @@
 # Project related
 datasets
+dataset/
 !src/anomalib/data/datasets
 pre_trained
 results
+hik_images/
 openvino_cache
 
 # Test-related files and directories
