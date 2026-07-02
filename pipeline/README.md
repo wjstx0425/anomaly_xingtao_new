@@ -18,6 +18,7 @@ uv sync
 3_train_model.py    预处理、训练、评估
 4_inference.py      离线推理并输出复核图
 5_demo_inspection.py 现场双面演示
+6_compare_models.py 自动跑 PatchCore、EfficientAD、AnomalyDINO 并生成对比表
 ```
 
 最常用流程：
@@ -364,6 +365,17 @@ FX11 no_hand/bottom：
 | `--image-size` | 输入尺寸，格式 `高,宽` |
 | `--accelerator gpu` | 使用 GPU |
 | `--eval-batch-size` | 评估 batch size |
+| `--deploy-fpr` | 用 `normal_test` 定部署阈值时允许的误报率，如 `0.05` 表示约 5% |
+
+默认 `--deploy-fpr 0.0`，阈值会取 `normal_test` 的最高分，尽量不误报。
+如果想提高缺陷召回率，可以在训练评估或单独 `evaluate` 时加：
+
+```bash
+--deploy-fpr 0.05
+```
+
+报表里的分数直方图只画 `normal_test` 和 `defect`，训练集 `normal`
+不参与阈值判断，也不会再画到直方图里。
 
 显存紧张时，AnomalyDINO 可以保留：
 
@@ -387,6 +399,76 @@ EfficientAD 需要本地 teacher 权重和 ImageNette 数据；资源不全时�
 
 ```bash
 --skip-missing-efficientad-assets
+```
+
+## 3.1 自动比较多个模型
+
+想一次性跑 PatchCore、EfficientAD、AnomalyDINO，并生成统一对比表，可以用：
+
+```bash
+.venv/bin/python pipeline/6_compare_models.py \
+  --data-root dataset/fx11_100_parts \
+  --output-root results/fx11_100/no_hand_top_parts_compare \
+  --views no_hand_top \
+  --skip-blue-removal \
+  --roi full \
+  --image-size 256,1152 \
+  --eval-batch-size 1 \
+  --deploy-fpr 0.05 \
+  --accelerator gpu
+```
+
+脚本默认使用比较保守的显存参数：
+
+```text
+PatchCore: layer2, float16, coreset=0.1
+EfficientAD: batch=1, epochs=20
+AnomalyDINO: batch=1, coreset=0.03
+```
+
+EfficientAD 要求特征图不能小于内部 `8x8` 卷积核。FX11 的 `224,1008`
+高度太小，脚本会自动等比例放大到 `256,1152`；你也可以直接显式传
+`--image-size 256,1152`。
+
+如果 EfficientAD 的 teacher weights 或 ImageNette 数据不存在，脚本默认会跳过
+EfficientAD，继续比较另外两个模型。想让资源缺失时直接报错，加：
+
+```bash
+--require-efficientad-assets
+```
+
+如果已经 preprocess 好了，想复用预处理结果：
+
+```bash
+.venv/bin/python pipeline/6_compare_models.py \
+  --data-root dataset/fx11_100_parts \
+  --output-root results/fx11_100/no_hand_top_parts_compare \
+  --views no_hand_top \
+  --skip-preprocess \
+  --skip-blue-removal \
+  --roi full \
+  --image-size 256,1152 \
+  --eval-batch-size 1 \
+  --deploy-fpr 0.05 \
+  --accelerator gpu
+```
+
+如果模型已经训练完，只想按新的阈值重新生成报表：
+
+```bash
+.venv/bin/python pipeline/6_compare_models.py \
+  --data-root dataset/fx11_100_parts \
+  --output-root results/fx11_100/no_hand_top_parts_compare \
+  --views no_hand_top \
+  --evaluate-only \
+  --deploy-fpr 0.05 \
+  --accelerator gpu
+```
+
+对比表会写到：
+
+```text
+<output-root>/reports/model_comparison.md
 ```
 
 ## 4. 推理
@@ -433,6 +515,81 @@ review/FN
 | `--input-is-preprocessed` | 输入已经是单零件 crop 时使用 |
 | `--visualize` | 额外保存可视化图 |
 
+### Valid-region mask 计分
+
+C789 stress normal 误报较高时，可以在推理阶段只让有效零件区域参与
+部署判定，排除背景、夹具、孔洞和 inpaint 区域：
+
+```bash
+.venv/bin/python pipeline/4_inference.py dataset/c789_stress_normal_parts/left/top \
+  --output-root results/c789_stress_normal/left_top_anomaly_dino \
+  --output-dir results/c789_stress_normal/left_top_anomaly_dino/stress_valid_region \
+  --view left_top \
+  --model anomaly_dino \
+  --ckpt-path results/c789_100/left_top_parts_anomalydino/runs/left_top/anomaly_dino/AnomalyDINO/zs32_left_top/left_top/v3/weights/lightning/model.ckpt \
+  --input-is-preprocessed \
+  --threshold 0.5 \
+  --valid-region-mask-preset c789_left_top_3x2 \
+  --valid-region-score-mode deploy \
+  --valid-region-score-method masked_max \
+  --accelerator gpu
+```
+
+`pred_score` 会保留模型原始分数；CSV 额外写入
+`valid_region_score`、`valid_region_coverage` 和 `deploy_score_source`。
+上线前不要只看 stress normal，还必须同时检查 locked real defects。
+
+## 4.1 Stress normal 鲁棒性数据
+
+stress normal 需要按 group 固定拆成 train/locked。locked 部分只用于验收，
+不能混进训练或调阈值。
+
+```bash
+.venv/bin/python pipeline/9_split_stress_normal.py \
+  --input-root dataset/c789_stress_normal_parts \
+  --output-root dataset/c789_stress_normal_group_split \
+  --hand left \
+  --position top \
+  --train-ratio 0.7 \
+  --link-mode symlink \
+  --overwrite
+```
+
+把 clean 数据和 stress train normal 合成训练数据集：
+
+```bash
+.venv/bin/python pipeline/10_build_hardened_dataset.py \
+  --clean-root dataset/c789_100_left_top_parts \
+  --stress-split-root dataset/c789_stress_normal_group_split \
+  --output-root dataset/c789_100_left_top_hardened_parts \
+  --hand left \
+  --position top \
+  --link-mode symlink \
+  --overwrite
+```
+
+然后用 hardened 数据重建正常分布：
+
+```bash
+.venv/bin/python pipeline/3_train_model.py \
+  --data-root dataset/c789_100_left_top_hardened_parts \
+  --output-root results/c789_100_hardened/left_top_anomaly_dino \
+  --views left_top \
+  --models anomaly_dino \
+  --skip-blue-removal \
+  --roi full \
+  --image-size 392,784 \
+  --anomaly-dino-batch-size 1 \
+  --eval-batch-size 1 \
+  --anomaly-dino-encoder dinov2_vit_small_14 \
+  --anomaly-dino-neighbors 1 \
+  --accelerator gpu
+```
+
+locked stress normal 验收用 `pipeline/4_inference.py` 单独跑
+`dataset/c789_stress_normal_group_split/locked/left/top`；locked real defects
+也用同一个 ckpt 单独跑，两个结果都通过才算稳。
+
 ## 5. 现场双面演示
 
 启动现场演示：
@@ -453,6 +610,25 @@ review/FN
   --part-profile c789 \
   --device 0 \
   --accelerator gpu
+```
+
+同时指定 C789 和 FX11 的权重，界面里按 `1`/`2` 切换时会重新加载对应模型：
+
+```bash
+.venv/bin/python pipeline/5_demo_inspection.py \
+  --part-profile c789 \
+  --c789-top-output-root /home/yunjing/anomalib/results/c789_100/left_top_parts_anomalydino \
+  --c789-top-ckpt-path /home/yunjing/anomalib/results/c789_100/left_top_parts_anomalydino/runs/left_top/anomaly_dino/AnomalyDINO/zs32_left_top/left_top/v3/weights/lightning/model.ckpt \
+  --c789-bottom-output-root /home/yunjing/anomalib/c789_bottom \
+  --c789-bottom-ckpt-path /home/yunjing/anomalib/c789_bottom/ckpt_015/model.ckpt \
+  --fx11-top-output-root /home/yunjing/anomalib/results/fx11_100/no_hand_top_parts_anomalydino \
+  --fx11-top-ckpt-path /home/yunjing/anomalib/results/fx11_100/no_hand_top_parts_anomalydino/runs/no_hand_top/anomaly_dino/AnomalyDINO/zs32_no_hand_top/no_hand_top/v1/weights/lightning/model.ckpt \
+  --fx11-bottom-output-root /home/yunjing/anomalib/results/fx11_100/no_hand_bottom_parts_anomalydino \
+  --fx11-bottom-ckpt-path /home/yunjing/anomalib/results/fx11_100/no_hand_bottom_parts_anomalydino/runs/no_hand_bottom/anomaly_dino/AnomalyDINO/zs32_no_hand_bottom/no_hand_bottom/v1/weights/lightning/model.ckpt \
+  --device 0 \
+  --accelerator gpu \
+  --predict-batch-size 1 \
+  --quality-gate warn
 ```
 
 无相机调界面：
@@ -489,6 +665,8 @@ q      退出
 | `--device` | 相机编号 |
 | `--threshold-profile` | `demo` 使用现场阈值，`report` 使用训练报告阈值 |
 | `--top-threshold` / `--bottom-threshold` | 临时覆盖阈值 |
+| `--c789-top-ckpt-path` / `--fx11-top-ckpt-path` | 指定某个零件某一面的 ckpt |
+| `--c789-top-threshold` / `--fx11-top-threshold` | 指定某个零件某一面的阈值 |
 | `--quality-gate` | `warn` 告警继续，`fail` 异常阻断 |
 | `--predict-batch-size` | 推理 batch size，现场建议 `1` |
 | `--diagnostics` | 打印亮度、清晰度、crop 分布诊断信息 |
@@ -545,3 +723,78 @@ INFER_ARGS='dataset/c789_left_top_parts/left/top
 - `left_bottom` 的 workflow 目录是 `left/bottom_ZS32`。
 - 指标好不代表能上线，建议再采一批新正常件和新缺陷件做独立验证。
 - EfficientAD 可能需要额外本地资源；没有资源时先用 AnomalyDINO 或 PatchCore。
+
+## C789 手工几何模板
+
+C789 top 的 less/more/corner 缺陷建议走人工核验的几何模板流程。先导出 review pack：
+
+```bash
+.venv/bin/python pipeline/13_export_geometry_review_pack.py \
+  --normal-root dataset/c789_100_left_top_hardened_parts/left/top/normal \
+  --stress-root dataset/c789_stress_normal_group_split/locked/left/top \
+  --defect-root dataset/c789_100_left_top_parts/left/top/defect \
+  --template-dir results/c789_100_hardened/left_top_geometry/templates \
+  --output-dir results/c789_100_hardened/left_top_geometry/manual_review_pack \
+  --preset c789_left_top_3x2 \
+  --samples-per-split 2
+```
+
+人工检查 `manual_review_pack/sheets/slotXX_review_sheet.png`，然后编辑
+`manual_review_pack/manual_masks/` 里的四类 PNG：
+
+```text
+slotXX_expected.png    零件必须存在的标准区域
+slotXX_allowed.png     正常扰动允许出现的区域
+slotXX_ignore.png      孔洞、inpaint、夹具、强反光等忽略区
+slotXX_watch_edge.png  真正用于 less/more 判断的边界区域
+```
+
+### 可视化编辑器
+
+也可以用可视化编辑器直接打开同一个 review pack：
+
+```bash
+.venv/bin/python pipeline/15_edit_geometry_masks.py \
+  --review-pack results/c789_100_hardened/left_top_geometry/manual_review_pack \
+  --template-dir results/c789_100_hardened/left_top_geometry/manual_templates \
+  --stress-root dataset/c789_stress_normal_group_split/locked/left/top \
+  --defect-root dataset/c789_100_left_top_parts/left/top/defect \
+  --anomaly-predictions results/c789_100_hardened/left_top_anomaly_dino/reports/predictions.csv \
+  --stress-output-dir results/c789_100_hardened/left_top_geometry/manual_stress_locked \
+  --defect-output-dir results/c789_100_hardened/left_top_geometry/manual_defect_fused
+```
+
+常用快捷键：`1`-`6` 切换 slot，`e`/`a`/`i`/`w` 切换
+`expected`/`allowed`/`ignore`/`watch_edge`，`[`/`]` 调笔刷大小，`u`/`r`
+撤销/重做，`s` 保存，`v` 编译模板并运行 locked stress + defect 验证，`q`
+退出。必须使用 `.venv/bin/python` 启动；mask 只能是纯黑/纯白，
+不要使用灰阶、半透明或抗锯齿笔刷。保存会先备份原 PNG，再写入新 mask。
+
+编辑完成后编译手工模板：
+
+```bash
+.venv/bin/python pipeline/14_build_manual_geometry_templates.py \
+  --mask-dir results/c789_100_hardened/left_top_geometry/manual_review_pack/manual_masks \
+  --output-dir results/c789_100_hardened/left_top_geometry/manual_templates
+```
+
+再用 locked stress normal 校准阈值：
+
+```bash
+.venv/bin/python pipeline/12_geometry_eval.py \
+  --data-root dataset/c789_stress_normal_group_split/locked/left/top \
+  --template-dir results/c789_100_hardened/left_top_geometry/manual_templates \
+  --output-dir results/c789_100_hardened/left_top_geometry/manual_stress_locked \
+  --calibrate-thresholds
+```
+
+最后跑 defect + AnomalyDINO 融合验收：
+
+```bash
+.venv/bin/python pipeline/12_geometry_eval.py \
+  --data-root dataset/c789_100_left_top_parts/left/top/defect \
+  --template-dir results/c789_100_hardened/left_top_geometry/manual_templates \
+  --thresholds results/c789_100_hardened/left_top_geometry/manual_stress_locked/geometry_thresholds.csv \
+  --anomaly-predictions results/c789_100_hardened/left_top_anomaly_dino/reports/predictions.csv \
+  --output-dir results/c789_100_hardened/left_top_geometry/manual_defect_fused
+```

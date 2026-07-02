@@ -124,13 +124,22 @@ class ViewSpec:
 
     name: str
     raw_parts: tuple[str, str]
+    fallback_raw_parts: tuple[tuple[str, str], ...] = ()
 
 
 VIEW_SPECS = {
     "left_top": ViewSpec(name="left_top", raw_parts=("left", "top")),
-    "left_bottom": ViewSpec(name="left_bottom", raw_parts=("left", "bottom_ZS32")),
+    "left_bottom": ViewSpec(
+        name="left_bottom",
+        raw_parts=("left", "bottom_ZS32"),
+        fallback_raw_parts=(("left", "bottom"),),
+    ),
     "right_top": ViewSpec(name="right_top", raw_parts=("right", "top")),
-    "right_bottom": ViewSpec(name="right_bottom", raw_parts=("right", "bottom_ZS32")),
+    "right_bottom": ViewSpec(
+        name="right_bottom",
+        raw_parts=("right", "bottom_ZS32"),
+        fallback_raw_parts=(("right", "bottom"),),
+    ),
     "no_hand_top": ViewSpec(name="no_hand_top", raw_parts=("no_hand", "top")),
     "no_hand_bottom": ViewSpec(name="no_hand_bottom", raw_parts=("no_hand", "bottom")),
 }
@@ -203,6 +212,51 @@ def _parse_field_size(value: str) -> tuple[int, int]:
     return width, height
 
 
+def _parse_deploy_fpr(value: str) -> float:
+    """Parse the allowed normal_test false-positive rate for deployment."""
+    try:
+        false_positive_rate = float(value)
+    except ValueError as error:
+        msg = "Deployment false-positive rate must be a number between 0 and 1."
+        raise argparse.ArgumentTypeError(msg) from error
+    if false_positive_rate < 0 or false_positive_rate >= 1:
+        msg = "Deployment false-positive rate must satisfy 0 <= value < 1."
+        raise argparse.ArgumentTypeError(msg)
+    return false_positive_rate
+
+
+def _parse_sampling_ratio(value: str) -> float:
+    """Parse a sampling ratio in the open-closed range (0, 1]."""
+    try:
+        sampling_ratio = float(value)
+    except ValueError as error:
+        msg = "Sampling ratio must be a number between 0 and 1."
+        raise argparse.ArgumentTypeError(msg) from error
+    if sampling_ratio <= 0 or sampling_ratio > 1:
+        msg = "Sampling ratio must satisfy 0 < value <= 1."
+        raise argparse.ArgumentTypeError(msg)
+    return sampling_ratio
+
+
+def _parse_run_suffix(value: str) -> str:
+    """Parse a safe run suffix used in generated run names."""
+    if not value:
+        return ""
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", value):
+        msg = "Run suffix may contain only letters, numbers, underscore, dash, and dot."
+        raise argparse.ArgumentTypeError(msg)
+    return value
+
+
+def _parse_reports_dir_name(value: str) -> Path:
+    """Parse a relative reports directory name."""
+    path = Path(value)
+    if path.is_absolute() or ".." in path.parts:
+        msg = "Reports directory name must be a relative path without '..'."
+        raise argparse.ArgumentTypeError(msg)
+    return path
+
+
 def _visualizer_field_size(image_size: tuple[int, int], args: argparse.Namespace) -> tuple[int, int]:
     """Return visualization field size as width,height."""
     if args.visualizer_field_size is not None:
@@ -270,14 +324,18 @@ def _log_efficientad_asset_help(args: argparse.Namespace) -> None:
 def _looks_like_network_error(error: BaseException) -> bool:
     """Return whether an exception chain looks like a download/network failure."""
     current: BaseException | None = error
+    error_text_parts = []
     while current is not None:
         if isinstance(current, urllib.error.URLError | socket.gaierror | TimeoutError | ConnectionError):
             return True
+        error_text_parts.append(str(current).lower())
         current = current.__cause__ or current.__context__
-    error_text = str(error).lower()
+    error_text = "\n".join(error_text_parts)
     return any(
         fragment in error_text
         for fragment in [
+            "cannot send a request",
+            "client has been closed",
             "temporary failure in name resolution",
             "name resolution",
             "urlopen error",
@@ -287,10 +345,52 @@ def _looks_like_network_error(error: BaseException) -> bool:
     )
 
 
+def _raise_if_pretrained_resource_error(model_name: str, args: argparse.Namespace, error: BaseException) -> None:
+    """Raise a clearer error when model setup needs unavailable pretrained resources."""
+    if not _looks_like_network_error(error):
+        return
+
+    if model_name == "efficient_ad":
+        _log_efficientad_asset_help(args)
+        msg = (
+            "EfficientAd tried to download required assets but the network/DNS lookup failed. "
+            "Fix DNS/network access, place the assets in the paths above, or rerun with "
+            "`--models patchcore` / `--skip-missing-efficientad-assets`."
+        )
+        raise RuntimeError(msg) from None
+
+    msg = (
+        f"{model_name} tried to download a pretrained resource but the network/DNS lookup failed. "
+        "Fix network access or cache the required pretrained files before rerunning."
+    )
+    if model_name == "patchcore":
+        msg += f" PatchCore needs cached timm/HuggingFace weights for `{args.patchcore_backbone}`."
+    raise RuntimeError(msg) from None
+
+
 def _raw_view_dir(data_root: Path, view: str) -> Path:
-    """Return the raw directory for one view."""
+    """Return the primary raw directory for one view."""
     spec = VIEW_SPECS[view]
     return data_root / spec.raw_parts[0] / spec.raw_parts[1]
+
+
+def _raw_view_dirs(data_root: Path, view: str) -> list[Path]:
+    """Return primary and fallback raw directories for one view."""
+    spec = VIEW_SPECS[view]
+    raw_parts = (spec.raw_parts, *spec.fallback_raw_parts)
+    view_dirs = []
+    seen = set()
+    for hand, position in raw_parts:
+        view_dir = data_root / hand / position
+        if view_dir not in seen:
+            view_dirs.append(view_dir)
+            seen.add(view_dir)
+    return view_dirs
+
+
+def _raw_label_dirs(data_root: Path, view: str, label: str) -> list[Path]:
+    """Return candidate raw label directories for one view."""
+    return [view_dir / label for view_dir in _raw_view_dirs(data_root, view)]
 
 
 def _processed_view_dir(output_root: Path, view: str) -> Path:
@@ -333,12 +433,16 @@ def _extract_frame_id(image_path: Path) -> str:
 
 def _iter_raw_images(data_root: Path, view: str, label: str) -> Iterable[Path]:
     """Yield raw images for one view and label."""
-    label_dir = _raw_view_dir(data_root, view) / label
-    nested_images = sorted(label_dir.glob("*/images/*.png"))
-    if nested_images:
-        yield from nested_images
-        return
-    yield from sorted(path for path in label_dir.glob("*.png") if path.is_file())
+    for label_dir in _raw_label_dirs(data_root, view, label):
+        nested_images = sorted(label_dir.glob("*/images/*.png"))
+        if nested_images:
+            yield from nested_images
+            return
+
+        flat_images = sorted(path for path in label_dir.glob("*.png") if path.is_file())
+        if flat_images:
+            yield from flat_images
+            return
 
 
 def _raw_sample_id(image_path: Path) -> str:
@@ -427,7 +531,8 @@ def preprocess_dataset(args: argparse.Namespace) -> Path:
         for label in LABELS:
             image_paths = list(_iter_raw_images(data_root, view, label))
             if not image_paths:
-                _log(f"Warning: no images found for {view}/{label} under {_repo_relative(data_root)}.")
+                checked_dirs = ", ".join(_repo_relative(path) for path in _raw_label_dirs(data_root, view, label))
+                _log(f"Warning: no images found for {view}/{label}; checked: {checked_dirs}.")
                 continue
 
             _log(f"  {view}/{label}: {len(image_paths)} images")
@@ -506,6 +611,19 @@ def _log_preprocessing_config(manifest: pd.DataFrame) -> None:
             _log(f"Preprocessed blue mark removal: {', '.join(blue_values)}")
 
 
+def _sample_train_data(datamodule: Any, sampling_ratio: float, seed: int) -> None:
+    """Keep a deterministic fraction of training normal images."""
+    if sampling_ratio >= 1:
+        return
+
+    samples = datamodule.train_data.samples
+    sample_count = max(1, int(np.ceil(len(samples) * sampling_ratio)))
+    sampled = samples.sample(n=sample_count, random_state=seed).reset_index(drop=True)
+    sampled.attrs = samples.attrs.copy()
+    datamodule.train_data.samples = sampled
+    _log(f"Train sampling ratio: {sampling_ratio:g} ({sample_count}/{len(samples)} normal images).")
+
+
 def _build_datamodule(
     output_root: Path,
     view: str,
@@ -539,6 +657,9 @@ def _build_datamodule(
         seed=args.seed,
     )
     datamodule.category = view
+    datamodule.setup()
+    _sample_train_data(datamodule, args.train_sampling_ratio, args.seed)
+    datamodule._is_setup = True  # noqa: SLF001
     return datamodule
 
 
@@ -626,9 +747,15 @@ def _json_safe(value: Any) -> Any:
     return value
 
 
-def _run_dir(output_root: Path, view: str, model_name: str) -> Path:
+def _model_run_name(model_name: str, args: argparse.Namespace) -> str:
+    """Return the model run/report name for a possibly suffixed experiment."""
+    suffix = getattr(args, "model_run_suffix", "")
+    return f"{model_name}_{suffix}" if suffix else model_name
+
+
+def _run_dir(output_root: Path, view: str, run_name: str) -> Path:
     """Return the run directory for one experiment."""
-    return output_root / "runs" / view / model_name
+    return output_root / "runs" / view / run_name
 
 
 def train_experiments(args: argparse.Namespace) -> None:
@@ -662,11 +789,12 @@ def train_experiments(args: argparse.Namespace) -> None:
 
     for view in _selected_views(args.views):
         for model_name in model_names:
-            run_dir = _run_dir(output_root, view, model_name)
+            run_name = _model_run_name(model_name, args)
+            run_dir = _run_dir(output_root, view, run_name)
             visualizations_dir = run_dir / "visualizations" / "test"
             run_dir.mkdir(parents=True, exist_ok=True)
 
-            _log(f"Training {model_name} on {view}...")
+            _log(f"Training {run_name} on {view}...")
             if model_name == "patchcore":
                 _log(
                     "PatchCore config: "
@@ -676,40 +804,27 @@ def train_experiments(args: argparse.Namespace) -> None:
                     f"num_neighbors={args.patchcore_num_neighbors}, "
                     f"precision={args.patchcore_precision}",
                 )
-            datamodule = _build_datamodule(output_root, view, model_name, args)
-            model = _build_model(model_name, args.image_size, visualizations_dir, args)
-            max_epochs = args.efficientad_epochs if model_name == "efficient_ad" else 1
-            engine = Engine(
-                accelerator=args.accelerator,
-                devices=args.devices,
-                max_epochs=max_epochs,
-                default_root_dir=run_dir,
-                logger=False,
-            )
             try:
+                datamodule = _build_datamodule(output_root, view, model_name, args)
+                model = _build_model(model_name, args.image_size, visualizations_dir, args)
+                max_epochs = args.efficientad_epochs if model_name == "efficient_ad" else 1
+                engine = Engine(
+                    accelerator=args.accelerator,
+                    devices=args.devices,
+                    max_epochs=max_epochs,
+                    default_root_dir=run_dir,
+                    logger=False,
+                )
                 engine.fit(model=model, datamodule=datamodule)
+                test_metrics = engine.test(model=model, datamodule=datamodule)
             except Exception as error:
-                if model_name == "efficient_ad" and _looks_like_network_error(error):
-                    _log_efficientad_asset_help(args)
-                    msg = (
-                        "EfficientAd tried to download required assets but the network/DNS lookup failed. "
-                        "Fix DNS/network access, place the assets in the paths above, or rerun with "
-                        "`--models patchcore` / `--skip-missing-efficientad-assets`."
-                    )
-                    raise RuntimeError(msg) from None
-                if _looks_like_network_error(error):
-                    msg = (
-                        f"{model_name} tried to download a pretrained resource but the network/DNS lookup failed. "
-                        "Fix network access or cache the required pretrained files before rerunning."
-                    )
-                    raise RuntimeError(msg) from None
+                _raise_if_pretrained_resource_error(model_name, args, error)
                 raise
-            test_metrics = engine.test(model=model, datamodule=datamodule)
 
             metrics_path = run_dir / "test_metrics.json"
             with metrics_path.open("w", encoding="utf-8") as file:
                 json.dump(_json_safe(test_metrics), file, indent=2)
-            _log(f"Finished {model_name}/{view}. Metrics: {_repo_relative(metrics_path)}")
+            _log(f"Finished {run_name}/{view}. Metrics: {_repo_relative(metrics_path)}")
 
 
 def _find_checkpoint(run_dir: Path) -> Path:
@@ -812,14 +927,30 @@ def _summarize_sample_level(group: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def _add_deployment_predictions(predictions: pd.DataFrame) -> pd.DataFrame:
-    """Add normal-test-max deployment thresholds and predictions."""
+def _deployment_threshold(scores: pd.Series, false_positive_rate: float) -> float:
+    """Return a threshold that permits about the requested normal false-positive rate."""
+    clean_scores = scores.dropna().sort_values().reset_index(drop=True)
+    if clean_scores.empty:
+        return 0.0
+
+    allowed_false_positives = int(np.floor(len(clean_scores) * false_positive_rate))
+    if allowed_false_positives <= 0:
+        return float(clean_scores.iloc[-1])
+
+    threshold_index = max(0, len(clean_scores) - allowed_false_positives - 1)
+    return float(clean_scores.iloc[threshold_index])
+
+
+def _add_deployment_predictions(predictions: pd.DataFrame, deploy_fpr: float = 0.0) -> pd.DataFrame:
+    """Add normal-test-based deployment thresholds and predictions."""
     frames = []
     for (_model, _view), group in predictions.groupby(["model", "view"], sort=True):
         normal_test = group[group["label"] == "normal_test"]
-        threshold = float(normal_test["pred_score"].max()) if not normal_test.empty else float(group["pred_score"].max())
+        threshold_scores = normal_test["pred_score"] if not normal_test.empty else group["pred_score"]
+        threshold = _deployment_threshold(threshold_scores, deploy_fpr)
         group = group.copy()
         group["deploy_threshold"] = threshold
+        group["deploy_target_fpr"] = deploy_fpr
         group["deploy_pred_label"] = (group["pred_score"] > threshold).astype(int)
         group["gt_label"] = (group["label"] == "defect").astype(int)
         frames.append(group)
@@ -830,7 +961,7 @@ def _write_score_histogram(group: pd.DataFrame, output_path: Path) -> None:
     """Write a score histogram for one model/view group."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
     plt.figure(figsize=(8, 5))
-    for label, color in [("normal", "tab:gray"), ("normal_test", "tab:green"), ("defect", "tab:red")]:
+    for label, color in [("normal_test", "tab:green"), ("defect", "tab:red")]:
         scores = group.loc[group["label"] == label, "pred_score"].dropna()
         if not scores.empty:
             plt.hist(scores, bins=20, alpha=0.55, label=label, color=color)
@@ -845,6 +976,14 @@ def _write_score_histogram(group: pd.DataFrame, output_path: Path) -> None:
     plt.close()
 
 
+def _false_positive_rate(metrics: dict[str, float | int]) -> float:
+    """Return the false-positive rate from binary metrics."""
+    false_positives = int(metrics["fp"])
+    true_negatives = int(metrics["tn"])
+    normal_count = false_positives + true_negatives
+    return false_positives / normal_count if normal_count else 0.0
+
+
 def _copy_error_examples(errors: pd.DataFrame, output_dir: Path) -> None:
     """Copy representative false positive or false negative preprocessed images."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -856,9 +995,9 @@ def _copy_error_examples(errors: pd.DataFrame, output_dir: Path) -> None:
             shutil.copy2(source, destination)
 
 
-def _build_summary_and_reports(predictions: pd.DataFrame, reports_dir: Path) -> pd.DataFrame:
+def _build_summary_and_reports(predictions: pd.DataFrame, reports_dir: Path, deploy_fpr: float = 0.0) -> pd.DataFrame:
     """Write CSV, Markdown, histogram, and error-example reports."""
-    predictions = _add_deployment_predictions(predictions)
+    predictions = _add_deployment_predictions(predictions, deploy_fpr)
     eval_predictions = predictions[predictions["label"].isin(["normal_test", "defect"])].copy()
     summary_rows = []
     false_positives = []
@@ -872,7 +1011,10 @@ def _build_summary_and_reports(predictions: pd.DataFrame, reports_dir: Path) -> 
         adaptive_metrics = {}
         adaptive_rows = group.dropna(subset=["anomalib_pred_label"])
         if not adaptive_rows.empty:
-            adaptive_metrics = _binary_metrics(adaptive_rows["gt_label"], adaptive_rows["anomalib_pred_label"].astype(int))
+            adaptive_metrics = _binary_metrics(
+                adaptive_rows["gt_label"],
+                adaptive_rows["anomalib_pred_label"].astype(int),
+            )
 
         threshold = float(group["deploy_threshold"].iloc[0])
         summary_rows.append(
@@ -880,6 +1022,9 @@ def _build_summary_and_reports(predictions: pd.DataFrame, reports_dir: Path) -> 
                 "model": model_name,
                 "view": view,
                 "deploy_threshold": threshold,
+                "deploy_target_fpr": deploy_fpr,
+                "image_fpr": _false_positive_rate(image_metrics),
+                "sample_fpr": _false_positive_rate(sample_metrics),
                 **{f"image_{key}": value for key, value in image_metrics.items()},
                 **{f"sample_{key}": value for key, value in sample_metrics.items()},
                 **{f"anomalib_image_{key}": value for key, value in adaptive_metrics.items()},
@@ -887,7 +1032,8 @@ def _build_summary_and_reports(predictions: pd.DataFrame, reports_dir: Path) -> 
         )
 
         figure_path = reports_dir / "figures" / f"{view}_{model_name}_score_histogram.png"
-        _write_score_histogram(predictions[(predictions["model"] == model_name) & (predictions["view"] == view)], figure_path)
+        figure_rows = predictions[(predictions["model"] == model_name) & (predictions["view"] == view)]
+        _write_score_histogram(figure_rows, figure_path)
 
         fp = group[(group["label"] == "normal_test") & (group["deploy_pred_label"] == 1)].sort_values(
             "pred_score",
@@ -918,19 +1064,24 @@ def _write_markdown_summary(summary: pd.DataFrame, output_path: Path) -> None:
     lines = [
         "# ZS32 Defect Detection Summary",
         "",
-        "| model | view | threshold | image_acc | image_recall | image_f1 | sample_acc | sample_recall | sample_f1 |",
-        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| model | view | threshold | target_fpr | image_fpr | image_acc | image_recall | image_f1 | "
+        "sample_fpr | sample_acc | sample_recall | sample_f1 |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for _, row in summary.iterrows():
         lines.append(
-            "| {model} | {view} | {threshold:.6f} | {image_acc:.3f} | {image_recall:.3f} | {image_f1:.3f} | "
+            "| {model} | {view} | {threshold:.6f} | {target_fpr:.3f} | {image_fpr:.3f} | "
+            "{image_acc:.3f} | {image_recall:.3f} | {image_f1:.3f} | {sample_fpr:.3f} | "
             "{sample_acc:.3f} | {sample_recall:.3f} | {sample_f1:.3f} |".format(
                 model=row["model"],
                 view=row["view"],
                 threshold=float(row["deploy_threshold"]),
+                target_fpr=float(row["deploy_target_fpr"]),
+                image_fpr=float(row["image_fpr"]),
                 image_acc=float(row["image_accuracy"]),
                 image_recall=float(row["image_recall"]),
                 image_f1=float(row["image_f1"]),
+                sample_fpr=float(row["sample_fpr"]),
                 sample_acc=float(row["sample_accuracy"]),
                 sample_recall=float(row["sample_recall"]),
                 sample_f1=float(row["sample_f1"]),
@@ -967,27 +1118,32 @@ def evaluate_experiments(args: argparse.Namespace) -> None:
     for view in _selected_views(args.views):
         data_path = _processed_view_dir(output_root, view)
         for model_name in _selected_models(args.models):
-            run_dir = _run_dir(output_root, view, model_name)
+            run_name = _model_run_name(model_name, args)
+            run_dir = _run_dir(output_root, view, run_name)
             checkpoint_path = _find_checkpoint(run_dir)
             visualizations_dir = run_dir / "visualizations" / "predict"
-            _log(f"Predicting {model_name} on {view} from {_repo_relative(checkpoint_path)}...")
+            _log(f"Predicting {run_name} on {view} from {_repo_relative(checkpoint_path)}...")
 
-            model = _build_model(model_name, args.image_size, visualizations_dir, args)
-            engine = Engine(
-                accelerator=args.accelerator,
-                devices=args.devices,
-                default_root_dir=run_dir / "predict",
-                logger=False,
-            )
-            predictions = engine.predict(
-                model=model,
-                data_path=data_path,
-                ckpt_path=checkpoint_path,
-                return_predictions=True,
-            )
-            frame = _predictions_to_frame(predictions, model_name)
+            try:
+                model = _build_model(model_name, args.image_size, visualizations_dir, args)
+                engine = Engine(
+                    accelerator=args.accelerator,
+                    devices=args.devices,
+                    default_root_dir=run_dir / "predict",
+                    logger=False,
+                )
+                predictions = engine.predict(
+                    model=model,
+                    data_path=data_path,
+                    ckpt_path=checkpoint_path,
+                    return_predictions=True,
+                )
+            except Exception as error:
+                _raise_if_pretrained_resource_error(model_name, args, error)
+                raise
+            frame = _predictions_to_frame(predictions, run_name)
             if frame.empty:
-                msg = f"No predictions returned for {model_name}/{view}."
+                msg = f"No predictions returned for {run_name}/{view}."
                 raise RuntimeError(msg)
             prediction_frames.append(frame)
 
@@ -1004,8 +1160,8 @@ def evaluate_experiments(args: argparse.Namespace) -> None:
         raise RuntimeError(msg)
     predictions = predictions.sort_values(["model", "view", "label", "sample_id", "frame_id"])
 
-    reports_dir = output_root / "reports"
-    summary = _build_summary_and_reports(predictions, reports_dir)
+    reports_dir = output_root / args.reports_dir_name
+    summary = _build_summary_and_reports(predictions, reports_dir, args.deploy_fpr)
     _log(f"Predictions: {_repo_relative(reports_dir / 'predictions.csv')}")
     _log(f"Summary: {_repo_relative(reports_dir / 'summary.md')}")
     _log(summary.to_string(index=False))
@@ -1039,14 +1195,36 @@ def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--roi", type=_parse_roi, default=DEFAULT_ROI, help="Crop ROI as x1,y1,x2,y2, none, or full.")
     parser.add_argument("--image-size", type=_parse_image_size, default=DEFAULT_IMAGE_SIZE, help="Model size as H,W.")
     parser.add_argument(
+        "--model-run-suffix",
+        type=_parse_run_suffix,
+        default="",
+        help="Optional suffix for the run directory and reported model name.",
+    )
+    parser.add_argument(
+        "--reports-dir-name",
+        type=_parse_reports_dir_name,
+        default=Path("reports"),
+        help="Relative directory below output-root where evaluation reports are written.",
+    )
+    parser.add_argument(
         "--visualizer-field-size",
         type=_parse_field_size,
         help="Visualization panel size as W,H. Defaults to the model input aspect ratio.",
     )
-    parser.add_argument("--skip-blue-removal", action="store_true", help="Skip HSV blue-mark inpainting during preprocessing.")
+    parser.add_argument(
+        "--skip-blue-removal",
+        action="store_true",
+        help="Skip HSV blue-mark inpainting during preprocessing.",
+    )
     parser.add_argument("--accelerator", choices=("gpu", "cpu", "auto"), default="gpu", help="Lightning accelerator.")
     parser.add_argument("--devices", type=int, default=1, help="Number of accelerator devices.")
     parser.add_argument("--num-workers", type=int, default=8, help="DataLoader worker count.")
+    parser.add_argument(
+        "--train-sampling-ratio",
+        type=_parse_sampling_ratio,
+        default=1.0,
+        help="Fraction of normal training images to use. Validation/test data are unchanged.",
+    )
     parser.add_argument("--patchcore-batch-size", type=int, default=8, help="PatchCore training batch size.")
     parser.add_argument("--patchcore-backbone", default="wide_resnet50_2", help="PatchCore timm backbone name.")
     parser.add_argument(
@@ -1074,14 +1252,29 @@ def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--eval-batch-size", type=int, default=8, help="Evaluation batch size.")
     parser.add_argument("--efficientad-epochs", type=int, default=20, help="EfficientAd max epochs.")
     parser.add_argument("--anomaly-dino-neighbors", type=int, default=1, help="AnomalyDINO nearest-neighbor count.")
-    parser.add_argument("--anomaly-dino-encoder", default="dinov2_vit_small_14", help="AnomalyDINO DINOv2 encoder name.")
+    parser.add_argument(
+        "--anomaly-dino-encoder",
+        default="dinov2_vit_small_14",
+        help="AnomalyDINO DINOv2 encoder name.",
+    )
     parser.add_argument("--anomaly-dino-masking", action="store_true", help="Enable AnomalyDINO foreground masking.")
     parser.add_argument(
         "--anomaly-dino-coreset-subsampling",
         action="store_true",
         help="Enable AnomalyDINO coreset subsampling.",
     )
-    parser.add_argument("--anomaly-dino-sampling-ratio", type=float, default=0.1, help="AnomalyDINO coreset ratio.")
+    parser.add_argument(
+        "--anomaly-dino-sampling-ratio",
+        type=_parse_sampling_ratio,
+        default=0.1,
+        help="AnomalyDINO coreset ratio.",
+    )
+    parser.add_argument(
+        "--deploy-fpr",
+        type=_parse_deploy_fpr,
+        default=0.0,
+        help="Allowed normal_test false-positive rate for deployment threshold, e.g. 0.05 permits about 5%%.",
+    )
     parser.add_argument("--imagenet-dir", type=Path, default=DEFAULT_IMAGENETTE_DIR, help="EfficientAd ImageNette dir.")
     parser.add_argument(
         "--skip-missing-efficientad-assets",
@@ -1096,7 +1289,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    preprocess_parser = subparsers.add_parser("preprocess", help="Crop optional ROI, optionally remove blue marks, and write manifest.")
+    preprocess_parser = subparsers.add_parser(
+        "preprocess",
+        help="Crop optional ROI, optionally remove blue marks, and write manifest.",
+    )
     _add_common_arguments(preprocess_parser)
     preprocess_parser.set_defaults(func=preprocess_dataset)
 

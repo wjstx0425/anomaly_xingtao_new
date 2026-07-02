@@ -28,6 +28,14 @@ Examples:
 
   .venv/bin/python pipeline/5_demo_inspection.py \\
     --part-profile c789 \\
+    --c789-top-ckpt-path results/c789_100/left_top_parts_anomalydino/.../model.ckpt \\
+    --c789-bottom-ckpt-path c789_bottom/ckpt_015/model.ckpt \\
+    --fx11-top-ckpt-path results/fx11_100/no_hand_top_parts_anomalydino/.../model.ckpt \\
+    --fx11-bottom-ckpt-path results/fx11_100/no_hand_bottom_parts_anomalydino/.../model.ckpt \\
+    --device 0 --accelerator gpu
+
+  .venv/bin/python pipeline/5_demo_inspection.py \\
+    --part-profile c789 \\
     --demo-top-image dataset/c789/left/top/normal/example.png \\
     --demo-bottom-image dataset/c789/left/bottom/normal/example.png \\
     --mock-predictions --mock-defects top:slot02 \\

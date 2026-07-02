@@ -19,7 +19,7 @@ import re
 import sys
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
@@ -79,22 +79,86 @@ FX11_BOTTOM_CKPT_PATH = (
 PROFILE_DEMO_THRESHOLDS = {
     "fx11": {
         "top": 0.5,
-        "bottom": 0.49,
+        "bottom": 0.48,
     },
     "c789": {
-        "top": 0.6,
-        "bottom": 0.48961880803108215,
+        "top": 0.55,
+        "bottom": 0.55,
     },
 }
 TIMING_LABELS = {
     "capture_hdr": "采集HDR",
     "crop_mask": "裁剪mask",
+    "stamp_ocr": "钢印识别",
     "quality_gate": "质量门控",
     "model_inference": "模型推理",
     "save_results": "保存结果",
     "gui_render": "GUI渲染",
     "total_face": "单面总计",
 }
+DEFAULT_DEFECT_MAP_THRESHOLD = 0.65
+DEFAULT_DEFECT_MIN_AREA = 64
+STAMP_ROI_DEFAULTS = {
+    ("c789", "bottom"): {
+        "x1": 620,
+        "y1": 60,
+        "x2": 1040,
+        "y2": 285,
+        "rotate_180": True,
+        "mirror_horizontal": True,
+    },
+    ("fx11", "top"): {
+        "x1": 820,
+        "y1": 115,
+        "x2": 1260,
+        "y2": 285,
+        "rotate_180": False,
+        "mirror_horizontal": True,
+    },
+}
+ARCHIVE_SLOT_FIELDS = (
+    "created_at",
+    "inspection_id",
+    "part",
+    "part_title",
+    "face",
+    "face_title",
+    "slot",
+    "status",
+    "score",
+    "threshold",
+    "defect_regions_json",
+    "part_number",
+    "stamp_date",
+    "ocr_status",
+    "ocr_confidence",
+    "ocr_text",
+    "fused_image",
+    "annotated_image",
+    "crop_image",
+    "stamp_roi_image",
+    "stamp_enhanced_image",
+    "predictions_csv",
+    "trace_json",
+)
+ARCHIVE_PART_FIELDS = (
+    "created_at",
+    "inspection_id",
+    "part",
+    "part_title",
+    "slot",
+    "status",
+    "defect_faces",
+    "part_number",
+    "stamp_date",
+    "ocr_status",
+    "top_score",
+    "bottom_score",
+    "top_status",
+    "bottom_status",
+    "top_crop_image",
+    "bottom_crop_image",
+)
 
 
 @dataclass(frozen=True)
@@ -196,6 +260,32 @@ class FaceConfig:
 
 
 @dataclass(frozen=True)
+class StampOcrResult:
+    """Recognized U-stamp data for one slot."""
+
+    status: str
+    part_number: str | None = None
+    stamp_date: str | None = None
+    raw_text: str = ""
+    confidence: float = 0.0
+    roi_path: Path | None = None
+    enhanced_path: Path | None = None
+    message: str = ""
+
+
+@dataclass(frozen=True)
+class DefectRegion:
+    """One predicted defect region in crop and full-image coordinates."""
+
+    slot: str
+    bbox: tuple[int, int, int, int]
+    full_bbox: tuple[int, int, int, int]
+    area: float
+    contour: tuple[tuple[int, int], ...]
+    full_contour: tuple[tuple[int, int], ...]
+
+
+@dataclass(frozen=True)
 class SlotResult:
     """Prediction result for one slot."""
 
@@ -204,6 +294,8 @@ class SlotResult:
     threshold: float | None
     pred_label: int
     source_path: Path
+    defect_regions: tuple[DefectRegion, ...] = ()
+    stamp_ocr: StampOcrResult | None = None
 
     @property
     def status(self) -> str:
@@ -264,6 +356,9 @@ class FaceResult:
     trace_path: Path | None = None
     checkpoint_path: Path | None = None
     predict_batch_size: int | None = None
+    annotated_image_path: Path | None = None
+    archive_slot_rows: list[dict[str, Any]] = field(default_factory=list)
+    archive_part_rows: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def defect_slots(self) -> list[str]:
@@ -442,6 +537,8 @@ class AnomalibPredictor:
         self.workflow = inference_helpers._load_workflow_module()
         self.predict_batch_size = args.predict_batch_size
         self.predict_num_workers = args.predict_num_workers
+        self.defect_map_threshold = args.defect_map_threshold
+        self.defect_min_area = args.defect_min_area
         self.last_effective_batch_size = args.predict_batch_size
         self.predict_dataset_class = PredictDataset
         self.data_loader_class = DataLoader
@@ -546,9 +643,17 @@ class AnomalibPredictor:
                 label_for_prediction(row, self.threshold, self.inference, self.workflow)
                 for row in frame.itertuples(index=False)
             ]
+            artifacts = self.inference._prediction_artifacts(predictions, self.workflow)
             predictions_csv.parent.mkdir(parents=True, exist_ok=True)
             frame.to_csv(predictions_csv, index=False)
-        return slot_results_from_frame(frame, self.threshold)
+        return slot_results_from_frame_with_artifacts(
+            frame,
+            self.threshold,
+            self.face,
+            artifacts,
+            map_threshold=self.defect_map_threshold,
+            min_area=self.defect_min_area,
+        )
 
 
 class MockPredictor:
@@ -576,7 +681,13 @@ class MockPredictor:
                 is_defect = slot in self.defect_slots
                 score = self.threshold + 0.18 if is_defect else max(0.0, self.threshold - 0.18)
                 pred_label = int(is_defect)
-                results.append(SlotResult(slot, score, self.threshold, pred_label, path))
+                slot_spec = next((item for item in self.face.preset.slots if item.name == slot), None)
+                regions = (
+                    (synthetic_defect_region(self.face, slot_spec),)
+                    if is_defect and slot_spec is not None
+                    else ()
+                )
+                results.append(SlotResult(slot, score, self.threshold, pred_label, path, defect_regions=regions))
                 rows.append(
                     {
                         "face": self.face.key,
@@ -623,6 +734,533 @@ def slot_results_from_frame(frame: Any, threshold: float | None) -> list[SlotRes
             ),
         )
     return results
+
+
+def _to_numpy_array(value: Any) -> np.ndarray | None:
+    """Convert tensor-like prediction output to a numpy array."""
+    if value is None:
+        return None
+    if hasattr(value, "detach"):
+        value = value.detach()
+    if hasattr(value, "cpu"):
+        value = value.cpu()
+    if hasattr(value, "numpy"):
+        value = value.numpy()
+    try:
+        array = np.asarray(value)
+    except Exception:
+        return None
+    if array.size == 0:
+        return None
+    return np.squeeze(array)
+
+
+def _normalize_float_map(array: np.ndarray) -> np.ndarray:
+    """Normalize a numeric map to 0..1."""
+    data = array.astype("float32", copy=False)
+    minimum = float(np.nanmin(data))
+    maximum = float(np.nanmax(data))
+    if maximum <= minimum:
+        return np.zeros_like(data, dtype="float32")
+    return (data - minimum) / (maximum - minimum)
+
+
+def _mask_from_artifact(
+    artifact: dict[str, Any] | None,
+    *,
+    crop_size: tuple[int, int],
+    threshold: float,
+) -> np.ndarray | None:
+    """Return a crop-size binary defect mask from a prediction artifact."""
+    if artifact is None:
+        return None
+    width, height = crop_size
+    mask = _to_numpy_array(artifact.get("pred_mask"))
+    if mask is not None:
+        if mask.ndim > 2:
+            mask = np.squeeze(mask)
+        mask = mask.astype("float32")
+        if mask.shape[:2] != (height, width):
+            mask = cv2.resize(mask, (width, height), interpolation=cv2.INTER_NEAREST)
+        return mask > 0.5
+
+    anomaly_map = _to_numpy_array(artifact.get("anomaly_map"))
+    if anomaly_map is None:
+        return None
+    if anomaly_map.ndim > 2:
+        anomaly_map = np.squeeze(anomaly_map)
+    anomaly_map = _normalize_float_map(anomaly_map)
+    if anomaly_map.shape[:2] != (height, width):
+        anomaly_map = cv2.resize(anomaly_map, (width, height), interpolation=cv2.INTER_LINEAR)
+    return anomaly_map > threshold
+
+
+def _tuple_points(contour: np.ndarray) -> tuple[tuple[int, int], ...]:
+    """Convert an OpenCV contour to plain integer points."""
+    points = contour.reshape(-1, 2)
+    return tuple((int(x), int(y)) for x, y in points)
+
+
+def defect_regions_from_artifact(
+    artifact: dict[str, Any] | None,
+    face: FaceConfig,
+    slot: SlotSpec,
+    *,
+    map_threshold: float = DEFAULT_DEFECT_MAP_THRESHOLD,
+    min_area: float = DEFAULT_DEFECT_MIN_AREA,
+) -> tuple[DefectRegion, ...]:
+    """Extract full-image defect regions for one slot prediction artifact."""
+    mask = _mask_from_artifact(
+        artifact,
+        crop_size=(slot.box.width, slot.box.height),
+        threshold=map_threshold,
+    )
+    if mask is None:
+        return ()
+
+    contours, _hierarchy = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    offset_x = face.preset.roi.x1 + slot.box.x1
+    offset_y = face.preset.roi.y1 + slot.box.y1
+    regions = []
+    for contour in contours:
+        area = float(cv2.contourArea(contour))
+        if area < min_area:
+            continue
+        x, y, width, height = cv2.boundingRect(contour)
+        points = _tuple_points(contour)
+        full_points = tuple((x_point + offset_x, y_point + offset_y) for x_point, y_point in points)
+        regions.append(
+            DefectRegion(
+                slot=slot.name,
+                bbox=(int(x), int(y), int(x + width), int(y + height)),
+                full_bbox=(int(x + offset_x), int(y + offset_y), int(x + width + offset_x), int(y + height + offset_y)),
+                area=area,
+                contour=points,
+                full_contour=full_points,
+            ),
+        )
+    return tuple(sorted(regions, key=lambda item: item.area, reverse=True))
+
+
+def defect_region_to_dict(region: DefectRegion) -> dict[str, Any]:
+    """Convert a defect region to JSON-serializable data."""
+    return {
+        "slot": region.slot,
+        "bbox": list(region.bbox),
+        "full_bbox": list(region.full_bbox),
+        "area": region.area,
+        "contour": [list(point) for point in region.contour],
+        "full_contour": [list(point) for point in region.full_contour],
+    }
+
+
+def synthetic_defect_region(face: FaceConfig, slot: SlotSpec) -> DefectRegion:
+    """Return a deterministic mock defect region inside one slot."""
+    width, height = slot.box.width, slot.box.height
+    x1 = max(0, int(width * 0.42))
+    y1 = max(0, int(height * 0.38))
+    x2 = min(width, max(x1 + 1, int(width * 0.58)))
+    y2 = min(height, max(y1 + 1, int(height * 0.62)))
+    contour = ((x1, y1), (x2, y1), (x2, y2), (x1, y2))
+    offset_x = face.preset.roi.x1 + slot.box.x1
+    offset_y = face.preset.roi.y1 + slot.box.y1
+    full_contour = tuple((x + offset_x, y + offset_y) for x, y in contour)
+    return DefectRegion(
+        slot=slot.name,
+        bbox=(x1, y1, x2, y2),
+        full_bbox=(x1 + offset_x, y1 + offset_y, x2 + offset_x, y2 + offset_y),
+        area=float((x2 - x1) * (y2 - y1)),
+        contour=contour,
+        full_contour=full_contour,
+    )
+
+
+def _artifact_for_row(row: Any, artifacts: dict[str, dict[str, Any]]) -> dict[str, Any] | None:
+    """Return the prediction artifact for a frame row."""
+    for attribute in ("processed_path", "source_path"):
+        value = getattr(row, attribute, None)
+        if value is None:
+            continue
+        artifact = artifacts.get(str(Path(value).resolve()))
+        if artifact is not None:
+            return artifact
+    return None
+
+
+def slot_results_from_frame_with_artifacts(
+    frame: Any,
+    threshold: float | None,
+    face: FaceConfig,
+    artifacts: dict[str, dict[str, Any]],
+    *,
+    map_threshold: float,
+    min_area: float,
+) -> list[SlotResult]:
+    """Convert predictions to slot results with optional defect regions."""
+    slots_by_name = {slot.name: slot for slot in face.preset.slots}
+    results = []
+    for row in frame.sort_values("slot").itertuples(index=False):
+        slot_name = str(row.slot)
+        score = None if getattr(row, "pred_score", None) is None else float(row.pred_score)
+        pred_label = int(row.pred_label)
+        regions = ()
+        slot_spec = slots_by_name.get(slot_name)
+        if pred_label and slot_spec is not None:
+            regions = defect_regions_from_artifact(
+                _artifact_for_row(row, artifacts),
+                face,
+                slot_spec,
+                map_threshold=map_threshold,
+                min_area=min_area,
+            )
+        results.append(
+            SlotResult(
+                slot=slot_name,
+                score=score,
+                threshold=threshold,
+                pred_label=pred_label,
+                source_path=Path(row.source_path),
+                defect_regions=regions,
+            ),
+        )
+    return results
+
+
+def stamp_ocr_to_dict(result: StampOcrResult | None) -> dict[str, Any] | None:
+    """Convert OCR result to JSON-serializable data."""
+    if result is None:
+        return None
+    return {
+        "status": result.status,
+        "part_number": result.part_number,
+        "stamp_date": result.stamp_date,
+        "raw_text": result.raw_text,
+        "confidence": result.confidence,
+        "roi_path": None if result.roi_path is None else str(result.roi_path),
+        "enhanced_path": None if result.enhanced_path is None else str(result.enhanced_path),
+        "message": result.message,
+    }
+
+
+def load_stamp_roi_config(path: Path | None) -> dict[tuple[str, str], dict[str, Any]]:
+    """Load optional stamp ROI overrides from JSON."""
+    if path is None:
+        return {}
+    data = json.loads(path.read_text(encoding="utf-8"))
+    overrides: dict[tuple[str, str], dict[str, Any]] = {}
+    if not isinstance(data, dict):
+        return overrides
+    for key, value in data.items():
+        if isinstance(value, dict) and "." in key:
+            part_key, face_key = key.split(".", maxsplit=1)
+            overrides[(part_key, face_key)] = value
+        elif isinstance(value, dict):
+            for face_key, face_value in value.items():
+                if isinstance(face_value, dict):
+                    overrides[(str(key), str(face_key))] = face_value
+    return overrides
+
+
+def _stamp_roi_for_face(face: FaceConfig, overrides: dict[tuple[str, str], dict[str, Any]]) -> dict[str, Any] | None:
+    """Return crop-relative stamp ROI config for one face."""
+    config = STAMP_ROI_DEFAULTS.get((face.part_key, face.key))
+    override = overrides.get((face.part_key, face.key))
+    if config is None and override is None:
+        return None
+    merged = dict(config or {})
+    merged.update(override or {})
+    try:
+        roi = {
+            "x1": int(merged["x1"]),
+            "y1": int(merged["y1"]),
+            "x2": int(merged["x2"]),
+            "y2": int(merged["y2"]),
+            "rotate_180": bool(merged.get("rotate_180", False)),
+            "mirror_horizontal": bool(merged.get("mirror_horizontal", merged.get("flip_horizontal", False))),
+            "mirror_vertical": bool(merged.get("mirror_vertical", merged.get("flip_vertical", False))),
+        }
+    except (KeyError, TypeError, ValueError):
+        return None
+    if roi["x2"] <= roi["x1"] or roi["y2"] <= roi["y1"]:
+        return None
+    return roi
+
+
+def _clamp_roi(roi: dict[str, Any], image: np.ndarray) -> tuple[int, int, int, int] | None:
+    """Clamp an OCR ROI to the crop image bounds."""
+    height, width = image.shape[:2]
+    x1 = max(0, min(width, int(roi["x1"])))
+    y1 = max(0, min(height, int(roi["y1"])))
+    x2 = max(0, min(width, int(roi["x2"])))
+    y2 = max(0, min(height, int(roi["y2"])))
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return x1, y1, x2, y2
+
+
+def _crop_stamp_roi(crop: np.ndarray, roi: dict[str, Any]) -> np.ndarray | None:
+    """Crop and orient a U-stamp ROI from one slot crop."""
+    clamped = _clamp_roi(roi, crop)
+    if clamped is None:
+        return None
+    x1, y1, x2, y2 = clamped
+    stamp = crop[y1:y2, x1:x2].copy()
+    if roi.get("rotate_180"):
+        stamp = cv2.rotate(stamp, cv2.ROTATE_180)
+    if roi.get("mirror_horizontal"):
+        stamp = cv2.flip(stamp, 1)
+    if roi.get("mirror_vertical"):
+        stamp = cv2.flip(stamp, 0)
+    return stamp
+
+
+def enhance_stamp_roi(stamp: np.ndarray) -> np.ndarray:
+    """Enhance an embossed stamp ROI for OpenCV-only OCR."""
+    gray = cv2.cvtColor(stamp, cv2.COLOR_BGR2GRAY) if stamp.ndim == 3 else stamp.copy()
+    gray = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX)
+    clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(6, 6))
+    enhanced = clahe.apply(gray.astype(np.uint8))
+    blurred = cv2.GaussianBlur(enhanced, (0, 0), 1.0)
+    enhanced = cv2.addWeighted(enhanced, 1.7, blurred, -0.7, 0)
+    return cv2.resize(enhanced, (enhanced.shape[1] * 2, enhanced.shape[0] * 2), interpolation=cv2.INTER_CUBIC)
+
+
+@lru_cache(maxsize=1)
+def _digit_templates() -> dict[str, list[np.ndarray]]:
+    """Build simple OpenCV-rendered digit templates."""
+    templates: dict[str, list[np.ndarray]] = {str(value): [] for value in range(10)}
+    for digit in templates:
+        for scale, thickness in ((1.15, 2), (1.3, 2), (1.45, 3)):
+            image = np.zeros((56, 42), dtype=np.uint8)
+            (text_width, text_height), baseline = cv2.getTextSize(digit, cv2.FONT_HERSHEY_SIMPLEX, scale, thickness)
+            x = max(0, (image.shape[1] - text_width) // 2)
+            y = max(text_height + 2, (image.shape[0] + text_height - baseline) // 2)
+            cv2.putText(image, digit, (x, y), cv2.FONT_HERSHEY_SIMPLEX, scale, 255, thickness, cv2.LINE_AA)
+            templates[digit].append(image)
+    return templates
+
+
+def _binary_stamp_line(line: np.ndarray) -> np.ndarray:
+    """Return a binary image emphasizing stamp digits."""
+    line = cv2.normalize(line, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    blackhat = cv2.morphologyEx(line, cv2.MORPH_BLACKHAT, cv2.getStructuringElement(cv2.MORPH_RECT, (13, 9)))
+    tophat = cv2.morphologyEx(line, cv2.MORPH_TOPHAT, cv2.getStructuringElement(cv2.MORPH_RECT, (13, 9)))
+    contrast = cv2.addWeighted(blackhat, 1.0, tophat, 1.0, 0)
+    if float(contrast.std()) < 8.0:
+        contrast = cv2.absdiff(line, cv2.GaussianBlur(line, (0, 0), 5))
+    _threshold, binary = cv2.threshold(contrast, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)))
+    return binary
+
+
+def _candidate_digit_boxes(binary: np.ndarray) -> list[tuple[int, int, int, int]]:
+    """Return candidate digit boxes sorted left to right."""
+    contours, _hierarchy = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    boxes = []
+    image_area = binary.shape[0] * binary.shape[1]
+    for contour in contours:
+        x, y, width, height = cv2.boundingRect(contour)
+        area = width * height
+        if area < max(18, image_area * 0.0008):
+            continue
+        if height < binary.shape[0] * 0.12 or width < 3:
+            continue
+        if width > binary.shape[1] * 0.25 or height > binary.shape[0] * 0.95:
+            continue
+        boxes.append((x, y, x + width, y + height))
+    boxes.sort(key=lambda box: box[0])
+
+    merged: list[tuple[int, int, int, int]] = []
+    for box in boxes:
+        if not merged or box[0] - merged[-1][2] > 4:
+            merged.append(box)
+            continue
+        previous = merged[-1]
+        merged[-1] = (previous[0], min(previous[1], box[1]), max(previous[2], box[2]), max(previous[3], box[3]))
+    return merged
+
+
+def _prepare_digit_patch(binary: np.ndarray, box: tuple[int, int, int, int]) -> np.ndarray:
+    """Normalize one candidate digit patch for template matching."""
+    x1, y1, x2, y2 = box
+    patch = binary[y1:y2, x1:x2]
+    if patch.size == 0:
+        return np.zeros((56, 42), dtype=np.uint8)
+    padded = cv2.copyMakeBorder(patch, 4, 4, 4, 4, cv2.BORDER_CONSTANT, value=0)
+    return cv2.resize(padded, (42, 56), interpolation=cv2.INTER_AREA)
+
+
+def _match_digit(patch: np.ndarray) -> tuple[str, float]:
+    """Match a normalized digit patch against generated templates."""
+    best_digit = ""
+    best_score = -1.0
+    patch_float = patch.astype("float32")
+    for digit, templates in _digit_templates().items():
+        for template in templates:
+            score = float(cv2.matchTemplate(patch_float, template.astype("float32"), cv2.TM_CCOEFF_NORMED)[0, 0])
+            if score > best_score:
+                best_digit = digit
+                best_score = score
+    return best_digit, max(0.0, best_score)
+
+
+def _recognize_digit_line(line: np.ndarray) -> tuple[str, float]:
+    """Recognize one numeric stamp line with simple template matching."""
+    binary = _binary_stamp_line(line)
+    boxes = _candidate_digit_boxes(binary)
+    if not boxes:
+        return "", 0.0
+    digits = []
+    scores = []
+    for box in boxes:
+        digit, score = _match_digit(_prepare_digit_patch(binary, box))
+        if score < 0.08:
+            continue
+        digits.append(digit)
+        scores.append(score)
+    if not digits:
+        return "", 0.0
+    return "".join(digits), float(sum(scores) / len(scores))
+
+
+def _split_stamp_lines(enhanced: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Split an enhanced ROI into top and bottom text lines."""
+    height = enhanced.shape[0]
+    top = enhanced[int(height * 0.12) : int(height * 0.52), :]
+    bottom = enhanced[int(height * 0.45) : int(height * 0.88), :]
+    return top, bottom
+
+
+def _valid_stamp_date(value: str) -> bool:
+    """Return whether a recognized value is a plausible YYYYMMDD date."""
+    if not re.fullmatch(r"\d{8}", value):
+        return False
+    try:
+        datetime.strptime(value, "%Y%m%d")
+    except ValueError:
+        return False
+    return True
+
+
+def parse_stamp_lines(top_line: str, bottom_line: str) -> tuple[str | None, str | None, str]:
+    """Parse fixed two-line U-stamp text into part number and date."""
+    first = re.sub(r"\D", "", top_line)
+    second = re.sub(r"\D", "", bottom_line)
+    if _valid_stamp_date(second):
+        return first or None, second, "OK" if first else "FAIL"
+    if _valid_stamp_date(first) and second:
+        return second, first, "OK"
+    return (first or None), (second if _valid_stamp_date(second) else None), "FAIL"
+
+
+def _stamp_orientation_candidates(stamp: np.ndarray) -> list[np.ndarray]:
+    """Return OCR candidates for mirrored or rotated stamp images."""
+    candidates = [
+        stamp,
+        cv2.flip(stamp, 1),
+        cv2.flip(stamp, 0),
+        cv2.rotate(stamp, cv2.ROTATE_180),
+    ]
+    unique = []
+    signatures = set()
+    for candidate in candidates:
+        signature = (candidate.shape, candidate.tobytes()[:128])
+        if signature in signatures:
+            continue
+        signatures.add(signature)
+        unique.append(candidate)
+    return unique
+
+
+def _recognize_oriented_stamp(stamp: np.ndarray) -> tuple[StampOcrResult, np.ndarray]:
+    """Recognize one already-oriented stamp ROI and return enhanced image."""
+    enhanced = enhance_stamp_roi(stamp)
+    top, bottom = _split_stamp_lines(enhanced)
+    top_text, top_confidence = _recognize_digit_line(top)
+    bottom_text, bottom_confidence = _recognize_digit_line(bottom)
+    part_number, stamp_date, status = parse_stamp_lines(top_text, bottom_text)
+    confidence = float((top_confidence + bottom_confidence) / 2.0)
+    if confidence < 0.16 or status != "OK":
+        status = "FAIL"
+    raw_text = "\n".join(text for text in (top_text, bottom_text) if text)
+    return (
+        StampOcrResult(
+            status=status,
+            part_number=part_number if status == "OK" else None,
+            stamp_date=stamp_date if status == "OK" else None,
+            raw_text=raw_text,
+            confidence=confidence,
+            message="" if status == "OK" else "钢印识别置信度低或格式不合法",
+        ),
+        enhanced,
+    )
+
+
+def recognize_stamp_roi(stamp: np.ndarray, roi_path: Path, enhanced_path: Path) -> StampOcrResult:
+    """Recognize a two-line numeric U stamp from one cropped ROI."""
+    best_result: StampOcrResult | None = None
+    best_stamp = stamp
+    best_enhanced: np.ndarray | None = None
+    for candidate in _stamp_orientation_candidates(stamp):
+        result, enhanced = _recognize_oriented_stamp(candidate)
+        if best_result is None:
+            best_result, best_stamp, best_enhanced = result, candidate, enhanced
+            continue
+        if result.status == "OK" and best_result.status != "OK":
+            best_result, best_stamp, best_enhanced = result, candidate, enhanced
+            continue
+        if result.status == best_result.status and result.confidence > best_result.confidence:
+            best_result, best_stamp, best_enhanced = result, candidate, enhanced
+
+    if best_result is None or best_enhanced is None:
+        best_result = StampOcrResult(status="FAIL", message="钢印识别失败")
+        best_enhanced = enhance_stamp_roi(stamp)
+    roi_path.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(roi_path), best_stamp)
+    cv2.imwrite(str(enhanced_path), best_enhanced)
+    return replace(
+        best_result,
+        roi_path=roi_path,
+        enhanced_path=enhanced_path,
+    )
+
+
+def recognize_stamp_ocr(
+    face: FaceConfig,
+    crop_paths: list[Path],
+    stamp_dir: Path,
+    args: argparse.Namespace,
+    timings: TimingRecorder | None = None,
+) -> dict[str, StampOcrResult]:
+    """Recognize supported U stamps for all slot crops in one face."""
+    roi_config = _stamp_roi_for_face(face, load_stamp_roi_config(args.stamp_roi_config))
+    if roi_config is None:
+        return {}
+
+    results: dict[str, StampOcrResult] = {}
+    recorder = timings or TimingRecorder()
+    with recorder.stage("stamp_ocr"):
+        for crop_path in sorted(crop_paths):
+            slot = slot_from_path(str(crop_path))
+            crop = cv2.imread(str(crop_path), cv2.IMREAD_COLOR)
+            if crop is None:
+                results[slot] = StampOcrResult(status="FAIL", message=f"无法读取crop: {crop_path}")
+                continue
+            stamp = _crop_stamp_roi(crop, roi_config)
+            if stamp is None:
+                results[slot] = StampOcrResult(status="FAIL", message="钢印ROI超出crop范围")
+                continue
+            roi_path = stamp_dir / f"{face.key}_{slot}_stamp.png"
+            enhanced_path = stamp_dir / f"{face.key}_{slot}_stamp_enhanced.png"
+            results[slot] = recognize_stamp_roi(stamp, roi_path, enhanced_path)
+    return results
+
+
+def attach_stamp_ocr(slots: list[SlotResult], stamp_results: dict[str, StampOcrResult]) -> list[SlotResult]:
+    """Attach OCR results to slot predictions."""
+    if not stamp_results:
+        return slots
+    return [replace(slot, stamp_ocr=stamp_results.get(slot.slot)) for slot in slots]
 
 
 def image_metrics(
@@ -766,12 +1404,52 @@ def _slot_result_to_dict(slot: SlotResult) -> dict[str, Any]:
         "pred_label": slot.pred_label,
         "status": slot.status,
         "source_path": str(slot.source_path),
+        "defect_regions": [defect_region_to_dict(region) for region in slot.defect_regions],
+        "stamp_ocr": stamp_ocr_to_dict(slot.stamp_ocr),
     }
 
 
 def _compact_timings(timings_ms: dict[str, float]) -> dict[str, float]:
     """Round timing values for logs and trace records."""
     return {name: round(value, 2) for name, value in sorted(timings_ms.items())}
+
+
+def _box_to_dict(box: Any) -> dict[str, int]:
+    """Return a serializable crop box with its size."""
+    return {
+        "x1": box.x1,
+        "y1": box.y1,
+        "x2": box.x2,
+        "y2": box.y2,
+        "width": box.width,
+        "height": box.height,
+    }
+
+
+def crop_preset_layout(face: FaceConfig) -> dict[str, Any]:
+    """Return the exact crop layout used by one face."""
+    preset = face.preset
+    return {
+        "preset": face.preset_name,
+        "roi": _box_to_dict(preset.roi),
+        "slots": [
+            {
+                "name": slot.name,
+                "row": slot.row,
+                "col": slot.col,
+                "box": _box_to_dict(slot.box),
+            }
+            for slot in preset.slots
+        ],
+    }
+
+
+def _format_crop_layout(face: FaceConfig) -> str:
+    """Return a compact crop-layout summary for startup logs."""
+    layout = crop_preset_layout(face)
+    roi = layout["roi"]
+    slots = ", ".join(f"{slot['name']}={slot['box']['width']}x{slot['box']['height']}" for slot in layout["slots"])
+    return f"{layout['preset']} roi={roi['width']}x{roi['height']} slots: {slots}"
 
 
 def write_trace_record(
@@ -781,7 +1459,7 @@ def write_trace_record(
     args: argparse.Namespace,
 ) -> Path:
     """Write a per-face JSON trace record for auditability."""
-    trace_path = result.image_path.parent / f"{face.key}_trace.json"
+    trace_path = result.trace_path or result.image_path.parent / f"{face.key}_trace.json"
     record = {
         "created_at": datetime.now().isoformat(timespec="milliseconds"),
         "part": face.part_key,
@@ -813,6 +1491,7 @@ def write_trace_record(
         },
         "crop": {
             "preset": face.preset_name,
+            "layout": crop_preset_layout(face),
             "crops_dir": str(result.crops_dir),
             "slot_metrics": result.crop_metrics,
         },
@@ -848,8 +1527,23 @@ def write_trace_record(
             "reference_mean_tolerance": args.quality_reference_mean_tolerance,
         },
         "slots": [_slot_result_to_dict(slot) for slot in result.slots],
+        "defect_regions": [
+            defect_region_to_dict(region)
+            for slot in result.slots
+            for region in slot.defect_regions
+        ],
+        "stamp_ocr": {
+            slot.slot: stamp_ocr_to_dict(slot.stamp_ocr)
+            for slot in result.slots
+            if slot.stamp_ocr is not None
+        },
+        "archive_rows": {
+            "slots": result.archive_slot_rows,
+            "parts": result.archive_part_rows,
+        },
         "artifacts": {
             "fused_image": str(result.image_path),
+            "annotated_image": None if result.annotated_image_path is None else str(result.annotated_image_path),
             "predictions_csv": str(result.predictions_csv),
             "trace": str(trace_path),
             "ui_screenshot": None if args.save_ui_screenshot is None else str(args.save_ui_screenshot),
@@ -973,14 +1667,18 @@ def _resolve_face_threshold(
 
 
 def _profile_override(args: argparse.Namespace, part_key: str, face_key: str, option: str) -> Any | None:
-    """Return a side override only for the initially selected part profile."""
+    """Return profile-specific overrides, falling back to initial-profile side overrides."""
+    profile_value = getattr(args, f"{part_key}_{face_key}_{option}", None)
+    if profile_value is not None:
+        return profile_value
     if part_key != args.part_profile:
         return None
-    return getattr(args, f"{face_key}_{option}")
+    return getattr(args, f"{face_key}_{option}", None)
 
 
-def resolve_face_configs(args: argparse.Namespace, part_key: str) -> dict[str, FaceConfig]:
+def resolve_face_configs(args: argparse.Namespace, part_key: str | None = None) -> dict[str, FaceConfig]:
     """Build face configs for a selectable part profile."""
+    part_key = args.part_profile if part_key is None else part_key
     profile = PART_PROFILES[part_key]
     top_gain = args.top_gain if args.top_gain is not None else args.gain
     bottom_gain = args.bottom_gain if args.bottom_gain is not None else args.gain
@@ -1088,6 +1786,9 @@ def inspect_face(
         print_diagnostics(face, crop_paths)
     predictions_csv = face_dir / f"{face.key}_predictions.csv"
     slots = predictor.predict(crop_paths, predictions_csv, timings)
+    stamp_results = recognize_stamp_ocr(face, crop_paths, face_dir / "stamp_rois", args, timings)
+    slots = attach_stamp_ocr(slots, stamp_results)
+    annotated_image_path = save_annotated_image(image, face, slots, face_dir / f"{face.key}_annotated.png")
     return FaceResult(
         face.key,
         face.title,
@@ -1099,6 +1800,7 @@ def inspect_face(
         crop_metrics=crop_metrics,
         checkpoint_path=getattr(predictor, "checkpoint_path", None),
         predict_batch_size=getattr(predictor, "last_effective_batch_size", args.predict_batch_size),
+        annotated_image_path=annotated_image_path,
     )
 
 
@@ -1148,6 +1850,7 @@ def format_timing_report(result: FaceResult) -> str:
     for key in (
         "capture_hdr",
         "crop_mask",
+        "stamp_ocr",
         "quality_gate",
         "model_inference",
         "save_results",
@@ -1180,6 +1883,224 @@ def all_defect_positions(results: dict[str, FaceResult]) -> list[str]:
     return positions
 
 
+def _contour_array(points: tuple[tuple[int, int], ...]) -> np.ndarray:
+    """Return an OpenCV contour array from plain points."""
+    return np.asarray(points, dtype=np.int32).reshape(-1, 1, 2)
+
+
+def draw_defect_annotations(image: np.ndarray, face: FaceConfig, slots: list[SlotResult]) -> np.ndarray:
+    """Draw slot boxes and predicted defect regions on a full fused image."""
+    annotated = image.copy()
+    slots_by_name = {slot.name: slot for slot in face.preset.slots}
+    for result in slots:
+        if not result.pred_label:
+            continue
+        slot = slots_by_name.get(result.slot)
+        if slot is None:
+            continue
+        offset_x = face.preset.roi.x1 + slot.box.x1
+        offset_y = face.preset.roi.y1 + slot.box.y1
+        cv2.rectangle(
+            annotated,
+            (offset_x, offset_y),
+            (offset_x + slot.box.width, offset_y + slot.box.height),
+            (0, 0, 255),
+            4,
+        )
+        if result.defect_regions:
+            for region in result.defect_regions:
+                cv2.polylines(
+                    annotated,
+                    [_contour_array(region.full_contour)],
+                    isClosed=True,
+                    color=(0, 0, 255),
+                    thickness=5,
+                )
+                x1, y1, x2, y2 = region.full_bbox
+                cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 0, 255), 2)
+        cv2.putText(
+            annotated,
+            result.slot,
+            (offset_x + 12, offset_y + 36),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1.0,
+            (0, 0, 255),
+            3,
+            cv2.LINE_AA,
+        )
+    return annotated
+
+
+def save_annotated_image(image: np.ndarray, face: FaceConfig, slots: list[SlotResult], path: Path) -> Path:
+    """Save a full-image annotation for predicted defects."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    annotated = draw_defect_annotations(image, face, slots)
+    if not cv2.imwrite(str(path), annotated):
+        msg = f"Could not write annotated image: {path}"
+        raise RuntimeError(msg)
+    return path
+
+
+def _json_compact(value: Any) -> str:
+    """Return compact JSON for CSV cells."""
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _archive_root(args: argparse.Namespace) -> Path:
+    """Return the archive root for this run."""
+    return args.archive_root if args.archive_root is not None else args.output_dir / "archive"
+
+
+def _write_archive_rows(path: Path, fieldnames: tuple[str, ...], rows: list[dict[str, Any]]) -> None:
+    """Append archive rows, writing the header once."""
+    if not rows:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_header = not path.is_file() or path.stat().st_size == 0
+    with path.open("a", newline="", encoding="utf-8") as file:
+        writer = csv.DictWriter(file, fieldnames=fieldnames)
+        if write_header:
+            writer.writeheader()
+        writer.writerows(rows)
+
+
+def _float_cell(value: float | None) -> str:
+    """Return a stable CSV float cell."""
+    return "" if value is None else f"{value:.6f}"
+
+
+def _slot_archive_rows(
+    result: FaceResult,
+    face: FaceConfig,
+    args: argparse.Namespace,
+    *,
+    trace_path: Path,
+) -> list[dict[str, Any]]:
+    """Build per-slot archive rows for one face result."""
+    created_at = datetime.now().isoformat(timespec="seconds")
+    inspection_id = args.output_dir.name
+    rows = []
+    for slot in result.slots:
+        ocr = slot.stamp_ocr
+        rows.append(
+            {
+                "created_at": created_at,
+                "inspection_id": inspection_id,
+                "part": face.part_key,
+                "part_title": face.part_title,
+                "face": face.key,
+                "face_title": face.title,
+                "slot": slot.slot,
+                "status": slot.status,
+                "score": _float_cell(slot.score),
+                "threshold": _float_cell(slot.threshold),
+                "defect_regions_json": _json_compact([defect_region_to_dict(region) for region in slot.defect_regions]),
+                "part_number": "" if ocr is None or ocr.part_number is None else ocr.part_number,
+                "stamp_date": "" if ocr is None or ocr.stamp_date is None else ocr.stamp_date,
+                "ocr_status": "" if ocr is None else ocr.status,
+                "ocr_confidence": "" if ocr is None else _float_cell(ocr.confidence),
+                "ocr_text": "" if ocr is None else ocr.raw_text.replace("\n", " / "),
+                "fused_image": str(result.image_path),
+                "annotated_image": "" if result.annotated_image_path is None else str(result.annotated_image_path),
+                "crop_image": str(slot.source_path),
+                "stamp_roi_image": "" if ocr is None or ocr.roi_path is None else str(ocr.roi_path),
+                "stamp_enhanced_image": "" if ocr is None or ocr.enhanced_path is None else str(ocr.enhanced_path),
+                "predictions_csv": str(result.predictions_csv),
+                "trace_json": str(trace_path),
+            },
+        )
+    return rows
+
+
+def _slot_result_map(result: FaceResult | None) -> dict[str, SlotResult]:
+    """Return slot results keyed by slot name."""
+    if result is None:
+        return {}
+    return {slot.slot: slot for slot in result.slots}
+
+
+def _preferred_stamp_result(slots: list[SlotResult]) -> StampOcrResult | None:
+    """Return the best available OCR result for one physical slot."""
+    for slot in slots:
+        if slot.stamp_ocr is not None and slot.stamp_ocr.status == "OK":
+            return slot.stamp_ocr
+    return next((slot.stamp_ocr for slot in slots if slot.stamp_ocr is not None), None)
+
+
+def _part_archive_rows(
+    state: DemoState,
+    face_configs: dict[str, FaceConfig],
+    args: argparse.Namespace,
+) -> list[dict[str, Any]]:
+    """Build per-physical-slot archive rows after both faces are inspected."""
+    created_at = datetime.now().isoformat(timespec="seconds")
+    inspection_id = args.output_dir.name
+    top_result = state.results.get("top")
+    bottom_result = state.results.get("bottom")
+    top_slots = _slot_result_map(top_result)
+    bottom_slots = _slot_result_map(bottom_result)
+    slot_names = sorted(set(top_slots) | set(bottom_slots))
+    rows = []
+    for slot_name in slot_names:
+        top_slot = top_slots.get(slot_name)
+        bottom_slot = bottom_slots.get(slot_name)
+        candidates = [slot for slot in (top_slot, bottom_slot) if slot is not None]
+        status = "NG" if any(slot.pred_label for slot in candidates) else "OK"
+        defect_faces = []
+        if top_slot is not None and top_slot.pred_label:
+            defect_faces.append(face_configs["top"].title)
+        if bottom_slot is not None and bottom_slot.pred_label:
+            defect_faces.append(face_configs["bottom"].title)
+        stamp = _preferred_stamp_result(candidates)
+        rows.append(
+            {
+                "created_at": created_at,
+                "inspection_id": inspection_id,
+                "part": state.part_key,
+                "part_title": state.part_title,
+                "slot": slot_name,
+                "status": status,
+                "defect_faces": ";".join(defect_faces),
+                "part_number": "" if stamp is None or stamp.part_number is None else stamp.part_number,
+                "stamp_date": "" if stamp is None or stamp.stamp_date is None else stamp.stamp_date,
+                "ocr_status": "" if stamp is None else stamp.status,
+                "top_score": "" if top_slot is None else _float_cell(top_slot.score),
+                "bottom_score": "" if bottom_slot is None else _float_cell(bottom_slot.score),
+                "top_status": "" if top_slot is None else top_slot.status,
+                "bottom_status": "" if bottom_slot is None else bottom_slot.status,
+                "top_crop_image": "" if top_slot is None else str(top_slot.source_path),
+                "bottom_crop_image": "" if bottom_slot is None else str(bottom_slot.source_path),
+            },
+        )
+    return rows
+
+
+def archive_face_result(
+    result: FaceResult,
+    face: FaceConfig,
+    args: argparse.Namespace,
+    *,
+    trace_path: Path,
+) -> list[dict[str, Any]]:
+    """Append per-slot archive rows for one face."""
+    rows = _slot_archive_rows(result, face, args, trace_path=trace_path)
+    _write_archive_rows(_archive_root(args) / "inspection_slots.csv", ARCHIVE_SLOT_FIELDS, rows)
+    return rows
+
+
+def archive_finished_part(
+    state: DemoState,
+    face_configs: dict[str, FaceConfig],
+    args: argparse.Namespace,
+) -> list[dict[str, Any]]:
+    """Append per-part archive rows after a two-face inspection finishes."""
+    if not state.finished:
+        return []
+    rows = _part_archive_rows(state, face_configs, args)
+    _write_archive_rows(_archive_root(args) / "inspection_parts.csv", ARCHIVE_PART_FIELDS, rows)
+    return rows
+
+
 def _fit_image(image: np.ndarray, width: int, height: int) -> tuple[np.ndarray, float, int, int]:
     """Fit an image into a target rectangle."""
     src_h, src_w = image.shape[:2]
@@ -1192,6 +2113,7 @@ def _fit_image(image: np.ndarray, width: int, height: int) -> tuple[np.ndarray, 
     return resized, scale, offset_x, offset_y
 
 
+@lru_cache(maxsize=64)
 def _load_font(size: int, *, bold: bool = False) -> Any | None:
     """Load a font that can draw Chinese text when Pillow is available."""
     try:
@@ -1235,6 +2157,80 @@ def _draw_text(
     image[:, :] = cv2.cvtColor(np.asarray(pil_image), cv2.COLOR_RGB2BGR)
 
 
+def _text_bbox(text: str, *, size: int, bold: bool = False) -> tuple[int, int, int, int] | None:
+    """Return rendered Pillow text bounds when available."""
+    font = _load_font(size, bold=bold)
+    if font is None:
+        return None
+    return font.getbbox(text)
+
+
+def _text_size(text: str, *, size: int, bold: bool = False) -> tuple[int, int]:
+    """Return rendered text size in pixels."""
+    bbox = _text_bbox(text, size=size, bold=bold)
+    if bbox is None:
+        (width, height), _baseline = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, size / 32.0, 2)
+        return width, height
+    return bbox[2] - bbox[0], bbox[3] - bbox[1]
+
+
+def _fit_text_to_width(text: str, max_width: int, *, size: int, bold: bool = False) -> str:
+    """Return text truncated to fit the available width."""
+    if max_width <= 0:
+        return ""
+    if _text_size(text, size=size, bold=bold)[0] <= max_width:
+        return text
+    suffix = "..."
+    suffix_width = _text_size(suffix, size=size, bold=bold)[0]
+    if suffix_width > max_width:
+        return ""
+
+    low, high = 0, len(text)
+    while low < high:
+        mid = (low + high + 1) // 2
+        candidate = text[:mid] + suffix
+        if _text_size(candidate, size=size, bold=bold)[0] <= max_width:
+            low = mid
+        else:
+            high = mid - 1
+    return text[:low] + suffix
+
+
+def _draw_text_fit(
+    image: np.ndarray,
+    text: str,
+    rect: tuple[int, int, int, int],
+    *,
+    size: int,
+    color: tuple[int, int, int],
+    bold: bool = False,
+    align: str = "left",
+    valign: str = "top",
+) -> None:
+    """Draw text constrained to a rectangle."""
+    x1, y1, x2, y2 = rect
+    text = _fit_text_to_width(text, x2 - x1, size=size, bold=bold)
+    if not text:
+        return
+    width, height = _text_size(text, size=size, bold=bold)
+    bbox = _text_bbox(text, size=size, bold=bold)
+    text_left = 0 if bbox is None else bbox[0]
+    text_top = 0 if bbox is None else bbox[1]
+    if align == "center":
+        x = x1 + max(0, (x2 - x1 - width) // 2) - text_left
+    elif align == "right":
+        x = x2 - width - text_left
+    else:
+        x = x1 - text_left
+    if valign == "center":
+        y = y1 + max(0, (y2 - y1 - height) // 2) - text_top
+    elif valign == "bottom":
+        y = y2 - height - text_top
+    else:
+        y = y1 - text_top
+    _draw_text(image, text, (x, y), size=size, color=color, bold=bold)
+
+
 def _draw_panel(
     image: np.ndarray,
     rect: tuple[int, int, int, int],
@@ -1249,9 +2245,9 @@ def _draw_panel(
     cv2.rectangle(image, (x1, y1), (x2, y2), (224, 224, 224), 1)
     cv2.rectangle(image, (x1, y1), (x2, y1 + 58), (248, 248, 248), -1)
     cv2.line(image, (x1, y1 + 58), (x2, y1 + 58), (232, 232, 232), 1)
-    _draw_text(image, title, (x1 + 20, y1 + 16), size=24, color=(36, 44, 56), bold=True)
+    _draw_text_fit(image, title, (x1 + 20, y1 + 14, x2 - 20, y1 + 48), size=24, color=(36, 44, 56), bold=True)
     if subtitle:
-        _draw_text(image, subtitle, (x1 + 190, y1 + 19), size=17, color=(112, 122, 138))
+        _draw_text_fit(image, subtitle, (x1 + 190, y1 + 18, x2 - 20, y1 + 45), size=17, color=(112, 122, 138))
 
 
 def _draw_badge(
@@ -1262,12 +2258,22 @@ def _draw_badge(
     color: tuple[int, int, int],
     text_color: tuple[int, int, int] = (255, 255, 255),
     size: int = 22,
+    align: str = "left",
 ) -> None:
     """Draw a compact status badge."""
     x1, y1, x2, y2 = rect
     cv2.rectangle(image, (x1, y1), (x2, y2), color, -1)
     cv2.rectangle(image, (x1, y1), (x2, y2), color, 1)
-    _draw_text(image, text, (x1 + 14, y1 + max(5, (y2 - y1 - size) // 2)), size=size, color=text_color, bold=True)
+    _draw_text_fit(
+        image,
+        text,
+        (x1 + 12, y1 + 2, x2 - 12, y2 - 2),
+        size=size,
+        color=text_color,
+        bold=True,
+        align=align,
+        valign="center",
+    )
 
 
 def _status_color(status: str) -> tuple[int, int, int]:
@@ -1297,8 +2303,8 @@ def _face_timing_text(result: FaceResult | None) -> str:
     if total is None:
         return "耗时 --"
     if inference is None:
-        return f"总计 {total / 1000.0:.2f}s"
-    return f"总计 {total / 1000.0:.2f}s / 推理 {inference / 1000.0:.2f}s"
+        return f"总计{total / 1000.0:.2f}s"
+    return f"总计{total / 1000.0:.2f}s / 推理{inference / 1000.0:.2f}s"
 
 
 def _face_summary_meta(title: str, result: FaceResult | None) -> str:
@@ -1320,6 +2326,21 @@ def _slot_status(result: FaceResult | None, slot: str) -> tuple[str, float | Non
     return found.status, found.score
 
 
+def _slot_ocr_text(result: FaceResult | None, slot: str) -> str:
+    """Return compact OCR display text for one slot."""
+    if result is None:
+        return ""
+    found = next((item for item in result.slots if item.slot == slot), None)
+    if found is None or found.stamp_ocr is None:
+        return ""
+    ocr = found.stamp_ocr
+    if ocr.status == "OK" and ocr.part_number and ocr.stamp_date:
+        return f"{ocr.part_number} / {ocr.stamp_date}"
+    if ocr.raw_text.strip():
+        return "钢印? " + " / ".join(line for line in ocr.raw_text.splitlines() if line.strip())
+    return "钢印--"
+
+
 def _draw_face_result_panel(
     canvas: np.ndarray,
     face: FaceConfig,
@@ -1329,15 +2350,33 @@ def _draw_face_result_panel(
     """Draw one face result panel."""
     status = result.status if result is not None else "待检测"
     quality = _quality_status(result)
-    _draw_panel(canvas, rect, f"{face.title}检测结果", subtitle=_face_timing_text(result))
+    _draw_panel(canvas, rect, f"{face.title}检测结果")
     x1, y1, x2, _y2 = rect
     status = result.status if result is not None else "待检测"
     color = _status_color(status)
-    _draw_badge(canvas, status, (x2 - 112, y1 + 14, x2 - 22, y1 + 46), color=color, size=21)
+    status_rect = (x2 - 112, y1 + 14, x2 - 22, y1 + 46)
+    _draw_text_fit(
+        canvas,
+        _face_timing_text(result),
+        (x1 + 188, y1 + 17, status_rect[0] - 14, y1 + 46),
+        size=15,
+        color=(112, 122, 138),
+        align="right",
+        valign="center",
+    )
+    _draw_badge(canvas, status, status_rect, color=color, size=21, align="center")
     quality_color = _status_color(quality)
     _draw_badge(canvas, f"质量 {quality}", (x1 + 20, y1 + 70, x1 + 130, y1 + 100), color=quality_color, size=16)
     defect_text = "缺陷 " + (", ".join(result.defect_slots) if result and result.defect_slots else "无")
-    _draw_text(canvas, defect_text, (x1 + 150, y1 + 72), size=18, color=(74, 85, 101), bold=bool(result and result.defect_slots))
+    _draw_text_fit(
+        canvas,
+        defect_text,
+        (x1 + 150, y1 + 70, x2 - 24, y1 + 100),
+        size=18,
+        color=(74, 85, 101),
+        bold=bool(result and result.defect_slots),
+        valign="center",
+    )
 
     slots = sorted(slot.name for slot in face.preset.slots)
     for index, slot in enumerate(slots):
@@ -1351,7 +2390,15 @@ def _draw_face_result_panel(
         cv2.rectangle(canvas, (tile_x, tile_y), (tile_x + 196, tile_y + 48), (226, 231, 238), 1)
         cv2.rectangle(canvas, (tile_x, tile_y), (tile_x + 6, tile_y + 48), tile_color, -1)
         _draw_text(canvas, slot, (tile_x + 16, tile_y + 7), size=18, color=(35, 45, 58), bold=True)
-        _draw_text(canvas, slot_status, (tile_x + 126, tile_y + 7), size=18, color=tile_color, bold=True)
+        _draw_text_fit(
+            canvas,
+            slot_status,
+            (tile_x + 118, tile_y + 6, tile_x + 184, tile_y + 27),
+            size=18,
+            color=tile_color,
+            bold=True,
+            align="center",
+        )
         score_text = "--" if score is None else f"{score:.3f}"
         _draw_text(canvas, score_text, (tile_x + 16, tile_y + 27), size=14, color=(96, 106, 120))
         threshold = None
@@ -1363,6 +2410,16 @@ def _draw_face_result_panel(
             cv2.rectangle(canvas, (bar_x, bar_y), (bar_x + 102, bar_y + 6), (225, 230, 236), -1)
             ratio = max(0.0, min(float(score) / max(float(threshold) * 1.4, 1e-6), 1.0))
             cv2.rectangle(canvas, (bar_x, bar_y), (bar_x + int(102 * ratio), bar_y + 6), tile_color, -1)
+        ocr_text = _slot_ocr_text(result, slot)
+        if ocr_text:
+            _draw_text_fit(
+                canvas,
+                ocr_text,
+                (tile_x + 74, tile_y + 25, tile_x + 184, tile_y + 42),
+                size=11,
+                color=(92, 104, 120),
+                align="right",
+            )
 
 
 def _slot_box_in_display(
@@ -1381,6 +2438,31 @@ def _slot_box_in_display(
     x2 = ox + offset_x + round((roi.x1 + slot.box.x2) * scale)
     y2 = oy + offset_y + round((roi.y1 + slot.box.y2) * scale)
     return x1, y1, x2, y2
+
+
+def _draw_defect_regions_in_display(
+    canvas: np.ndarray,
+    result: FaceResult | None,
+    scale: float,
+    offset_x: int,
+    offset_y: int,
+    origin: tuple[int, int],
+) -> None:
+    """Draw full-image defect regions scaled into the current display."""
+    if result is None:
+        return
+    ox, oy = origin
+    for slot in result.slots:
+        for region in slot.defect_regions:
+            points = np.asarray(
+                [
+                    [ox + offset_x + round(x * scale), oy + offset_y + round(y * scale)]
+                    for x, y in region.full_contour
+                ],
+                dtype=np.int32,
+            )
+            if len(points) >= 2:
+                cv2.polylines(canvas, [points.reshape(-1, 1, 2)], isClosed=True, color=(0, 0, 255), thickness=4)
 
 
 def _draw_part_switcher(canvas: np.ndarray, state: DemoState, x: int, y: int) -> None:
@@ -1418,8 +2500,22 @@ def render_dashboard(state: DemoState, face_configs: dict[str, FaceConfig], widt
     bottom_title = face_configs["bottom"].title
     top_stage = "OK" if "top" in state.results and state.results["top"].status == "OK" else "NG" if "top" in state.results else "待检"
     bottom_stage = "OK" if "bottom" in state.results and state.results["bottom"].status == "OK" else "NG" if "bottom" in state.results else "待检"
-    _draw_badge(canvas, f"{top_title} {top_stage}", (1070, 56, 1302, 88), color=_status_color(top_stage), size=17)
-    _draw_badge(canvas, f"{bottom_title} {bottom_stage}", (1320, 56, 1552, 88), color=_status_color(bottom_stage), size=17)
+    _draw_badge(
+        canvas,
+        f"{top_title} {top_stage}",
+        (1070, 56, 1302, 88),
+        color=_status_color(top_stage),
+        size=17,
+        align="center",
+    )
+    _draw_badge(
+        canvas,
+        f"{bottom_title} {bottom_stage}",
+        (1320, 56, 1552, 88),
+        color=_status_color(bottom_stage),
+        size=17,
+        align="center",
+    )
 
     image_rect = (34, 112, 1068, 742)
     active_face = state.current_face or state.active_face or "top"
@@ -1442,6 +2538,7 @@ def render_dashboard(state: DemoState, face_configs: dict[str, FaceConfig], widt
             box = _slot_box_in_display(slot, active_config, scale, off_x, off_y, (image_x, image_y))
             cv2.rectangle(canvas, (box[0], box[1]), (box[2], box[3]), color, thickness)
             _draw_text(canvas, slot.name, (box[0] + 8, box[1] + 8), size=18, color=color, bold=True)
+        _draw_defect_regions_in_display(canvas, active_result, scale, off_x, off_y, (image_x, image_y))
         if active_result is not None:
             result_color = _status_color(active_result.status)
             _draw_badge(canvas, f"{active_title} {active_result.status}", (image_x + 18, image_y + 18, image_x + 170, image_y + 54), color=result_color, size=20)
@@ -1457,17 +2554,33 @@ def render_dashboard(state: DemoState, face_configs: dict[str, FaceConfig], widt
     _draw_panel(canvas, summary_rect, "整件汇总", subtitle="双面任一 NG 则整件 NG")
     status = part_status(state.results)
     color = _status_color(status)
-    _draw_badge(canvas, status, (200, 808, 342, 858), color=color, size=30)
+    _draw_badge(canvas, status, (200, 834, 342, 884), color=color, size=30, align="center")
     defects = all_defect_positions(state.results)
     defect_text = "缺陷位置: " + (", ".join(defects) if defects else "无")
-    _draw_text(canvas, defect_text, (390, 806), size=24, color=(40, 49, 63), bold=bool(defects))
+    _draw_text_fit(
+        canvas,
+        defect_text,
+        (390, 828, 1088, 858),
+        size=24,
+        color=(40, 49, 63),
+        bold=bool(defects),
+        valign="center",
+    )
     top_result = state.results.get("top")
     bottom_result = state.results.get("bottom")
-    top_meta = _face_summary_meta("正面", top_result)
-    bottom_meta = _face_summary_meta("底面", bottom_result)
-    _draw_text(canvas, top_meta, (390, 844), size=17, color=(92, 104, 120))
-    _draw_text(canvas, bottom_meta, (790, 844), size=17, color=(92, 104, 120))
-    _draw_text(canvas, "1/2 切换零件   s 连续检测   r 重置   q 退出", (1120, 844), size=18, color=(92, 104, 120), bold=True)
+    top_meta = _face_summary_meta(top_title, top_result)
+    bottom_meta = _face_summary_meta(bottom_title, bottom_result)
+    _draw_text_fit(canvas, top_meta, (390, 860, 760, 886), size=17, color=(92, 104, 120), valign="center")
+    _draw_text_fit(canvas, bottom_meta, (790, 860, 1090, 886), size=17, color=(92, 104, 120), valign="center")
+    _draw_text_fit(
+        canvas,
+        "1/2 切换零件   s 连续检测   r 重置   q 退出",
+        (1120, 860, 1544, 886),
+        size=18,
+        color=(92, 104, 120),
+        bold=True,
+        valign="center",
+    )
     return canvas
 
 
@@ -1531,9 +2644,15 @@ def finalize_face_result(
     image_input: ImageInput,
     args: argparse.Namespace,
     timings: TimingRecorder,
+    state: DemoState | None = None,
+    face_configs: dict[str, FaceConfig] | None = None,
 ) -> None:
     """Attach timings, write trace, and print timing report."""
     result.timings_ms = dict(timings.stages_ms)
+    result.trace_path = result.image_path.parent / f"{face.key}_trace.json"
+    result.archive_slot_rows = archive_face_result(result, face, args, trace_path=result.trace_path)
+    if state is not None and face_configs is not None and state.finished:
+        result.archive_part_rows = archive_finished_part(state, face_configs, args)
     write_trace_record(result, face, image_input, args)
     print(format_timing_report(result))
 
@@ -1663,7 +2782,7 @@ def run_auto_demo(
             result = run_face(state, face, image_input, predictors[face_key], face_configs, args, timings)
             with timings.stage("gui_render"):
                 render_dashboard(state, face_configs)
-        finalize_face_result(result, face, image_input, args, timings)
+        finalize_face_result(result, face, image_input, args, timings, state, face_configs)
     if args.save_ui_screenshot is not None:
         save_dashboard(args.save_ui_screenshot, state, face_configs)
 
@@ -1759,7 +2878,7 @@ def run_gui(
                     if args.save_ui_screenshot is not None:
                         with timings.stage("save_results"):
                             cv2.imwrite(str(args.save_ui_screenshot), canvas)
-                finalize_face_result(result, face, image_input, args, timings)
+                finalize_face_result(result, face, image_input, args, timings, state, face_configs)
             except QualityGateError as error:
                 state.status_message = str(error)
                 print(f"[quality] {error}")
@@ -1794,6 +2913,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--bottom-ckpt-path", type=Path, help="Optional explicit bottom checkpoint for the initial profile.")
     parser.add_argument("--top-threshold", type=float, help="Optional explicit top threshold for the initial profile.")
     parser.add_argument("--bottom-threshold", type=float, help="Optional explicit bottom threshold for the initial profile.")
+    for part_key in PART_ORDER:
+        for face_key in FACE_ORDER:
+            parser.add_argument(
+                f"--{part_key}-{face_key}-output-root",
+                type=Path,
+                help=f"Optional {part_key} {face_key} output-root override.",
+            )
+            parser.add_argument(
+                f"--{part_key}-{face_key}-ckpt-path",
+                type=Path,
+                help=f"Optional explicit {part_key} {face_key} checkpoint.",
+            )
+            parser.add_argument(
+                f"--{part_key}-{face_key}-threshold",
+                type=float,
+                help=f"Optional explicit {part_key} {face_key} threshold.",
+            )
     parser.add_argument(
         "--threshold-profile",
         choices=THRESHOLD_PROFILES,
@@ -1836,6 +2972,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-gui", action="store_true", help="Do not open the OpenCV window.")
     parser.add_argument("--save-ui-screenshot", type=Path, help="Save the rendered UI canvas.")
     parser.add_argument("--diagnostics", action="store_true", help="Print crop brightness diagnostics.")
+    parser.add_argument("--archive-root", type=Path, help="Archive directory for inspection CSVs and linked artifacts.")
+    parser.add_argument(
+        "--defect-map-threshold",
+        type=float,
+        default=DEFAULT_DEFECT_MAP_THRESHOLD,
+        help="Normalized anomaly-map threshold used when pred_mask is unavailable.",
+    )
+    parser.add_argument(
+        "--defect-min-area",
+        type=float,
+        default=DEFAULT_DEFECT_MIN_AREA,
+        help="Minimum defect region area in crop pixels.",
+    )
+    parser.add_argument("--stamp-roi-config", type=Path, help="Optional JSON file overriding stamp OCR ROIs.")
     parser.add_argument(
         "--quality-gate",
         choices=("warn", "fail", "off"),
@@ -1905,6 +3055,7 @@ def print_startup_settings(face_configs: dict[str, FaceConfig], args: argparse.N
         face = face_configs[face_key]
         print(f"{face.title} threshold: {_format_threshold(face.threshold)} ({face.threshold_source})")
         print(f"{face.title} checkpoint: {face.ckpt_path or 'auto'}")
+        print(f"{face.title} crop: {_format_crop_layout(face)}")
         if face.image_size is not None:
             print(f"{face.title} image_size: {face.image_size[0]},{face.image_size[1]}")
     print(
@@ -1918,7 +3069,8 @@ def print_startup_settings(face_configs: dict[str, FaceConfig], args: argparse.N
         "Runtime: "
         f"predict_batch_size={args.predict_batch_size}, workers={args.predict_num_workers}, "
         f"progress_bar={args.show_progress_bar}, matmul_precision={args.matmul_precision}, "
-        f"quality_gate={args.quality_gate}"
+        f"quality_gate={args.quality_gate}, archive={_archive_root(args)}, "
+        f"defect_map_threshold={args.defect_map_threshold:g}, defect_min_area={args.defect_min_area:g}"
     )
 
 
@@ -1929,6 +3081,15 @@ def configure_runtime(args: argparse.Namespace) -> None:
         raise SystemExit(msg)
     if args.predict_num_workers < 0:
         msg = "--predict-num-workers must be non-negative."
+        raise SystemExit(msg)
+    if not 0.0 <= args.defect_map_threshold <= 1.0:
+        msg = "--defect-map-threshold must be between 0 and 1."
+        raise SystemExit(msg)
+    if args.defect_min_area < 0:
+        msg = "--defect-min-area must be non-negative."
+        raise SystemExit(msg)
+    if args.stamp_roi_config is not None and not args.stamp_roi_config.is_file():
+        msg = f"--stamp-roi-config does not exist: {args.stamp_roi_config}"
         raise SystemExit(msg)
     if args.matmul_precision == "none":
         return

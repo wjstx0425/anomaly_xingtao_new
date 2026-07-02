@@ -100,12 +100,12 @@ class CropPreset:
 C789_LEFT_TOP_3X2 = CropPreset(
     roi=Box(460, 30, 3480, 2600),
     slots=(
-        SlotSpec("slot01", 1, 1, Box(0, 0, 1510, 857)),
-        SlotSpec("slot02", 1, 2, Box(1510, 0, 3020, 857)),
-        SlotSpec("slot03", 2, 1, Box(0, 857, 1510, 1713)),
-        SlotSpec("slot04", 2, 2, Box(1510, 857, 3020, 1713)),
-        SlotSpec("slot05", 3, 1, Box(0, 1713, 1510, 2570)),
-        SlotSpec("slot06", 3, 2, Box(1510, 1713, 3020, 2570)),
+        SlotSpec("slot01", 1, 1, Box(0, 0, 1510, 700)),
+        SlotSpec("slot02", 1, 2, Box(1510, 0, 3020, 700)),
+        SlotSpec("slot03", 2, 1, Box(0, 880, 1510, 1600)),
+        SlotSpec("slot04", 2, 2, Box(1510, 857, 3020, 1600)),
+        SlotSpec("slot05", 3, 1, Box(0, 1750, 1510, 2570)),
+        SlotSpec("slot06", 3, 2, Box(1510, 1750, 3020, 2570)),
     ),
     slot_hole_masks={
         "slot01": (EllipseMask(482, 520, 55, 55), EllipseMask(1043, 519, 75, 55)),
@@ -121,10 +121,10 @@ C789_LEFT_BOTTOM_3X2 = CropPreset(
     slots=(
         SlotSpec("slot01", 1, 1, Box(0, 0, 1650, 780)),
         SlotSpec("slot02", 1, 2, Box(1600, 0, 3250, 780)),
-        SlotSpec("slot03", 2, 1, Box(0, 780, 1650, 1730)),
-        SlotSpec("slot04", 2, 2, Box(1600, 780, 3250, 1730)),
-        SlotSpec("slot05", 3, 1, Box(0, 1730, 1650, 2710)),
-        SlotSpec("slot06", 3, 2, Box(1600, 1730, 3250, 2710)),
+        SlotSpec("slot03", 2, 1, Box(0, 900, 1650, 1730)),
+        SlotSpec("slot04", 2, 2, Box(1600, 900, 3250, 1730)),
+        SlotSpec("slot05", 3, 1, Box(0, 1850, 1650, 2710)),
+        SlotSpec("slot06", 3, 2, Box(1600, 1850, 3250, 2710)),
     ),
     slot_hole_masks={
         "slot01": (EllipseMask(592, 232, 70, 65), EllipseMask(1148, 225, 85, 65)),
@@ -138,24 +138,24 @@ C789_LEFT_BOTTOM_3X2 = CropPreset(
 FX11_NO_HAND_TOP_6X1 = CropPreset(
     roi=Box(0, 0, 4024, 3036),
     slots=(
-        SlotSpec("slot01", 1, 1, Box(830, 40, 3230, 450)),
-        SlotSpec("slot02", 2, 1, Box(830, 440, 3230, 860)),
-        SlotSpec("slot03", 3, 1, Box(830, 890, 3230, 1300)),
-        SlotSpec("slot04", 4, 1, Box(830, 1290, 3230, 1700)),
-        SlotSpec("slot05", 5, 1, Box(830, 1700, 3230, 2110)),
-        SlotSpec("slot06", 6, 1, Box(830, 2130, 3230, 2590)),
+        SlotSpec("slot01", 1, 1, Box(830, 270, 3230, 680)),
+        SlotSpec("slot02", 2, 1, Box(830, 670, 3230, 1090)),
+        SlotSpec("slot03", 3, 1, Box(830, 1120, 3230, 1530)),
+        SlotSpec("slot04", 4, 1, Box(830, 1520, 3230, 1930)),
+        SlotSpec("slot05", 5, 1, Box(830, 1930, 3230, 2340)),
+        SlotSpec("slot06", 6, 1, Box(830, 2360, 3230, 2820)),
     ),
     slot_hole_masks={},
 )
 FX11_NO_HAND_BOTTOM_6X1 = CropPreset(
     roi=Box(0, 0, 4024, 3036),
     slots=(
-        SlotSpec("slot01", 1, 1, Box(830, 10, 3230, 420)),
-        SlotSpec("slot02", 2, 1, Box(830, 420, 3230, 840)),
-        SlotSpec("slot03", 3, 1, Box(830, 870, 3230, 1280)),
-        SlotSpec("slot04", 4, 1, Box(830, 1280, 3230, 1700)),
-        SlotSpec("slot05", 5, 1, Box(830, 1700, 3230, 2110)),
-        SlotSpec("slot06", 6, 1, Box(830, 2130, 3230, 2590)),
+        SlotSpec("slot01", 1, 1, Box(830, 210, 3230, 640)),
+        SlotSpec("slot02", 2, 1, Box(830, 640, 3230, 1060)),
+        SlotSpec("slot03", 3, 1, Box(830, 1090, 3230, 1500)),
+        SlotSpec("slot04", 4, 1, Box(830, 1500, 3230, 1920)),
+        SlotSpec("slot05", 5, 1, Box(830, 1920, 3230, 2330)),
+        SlotSpec("slot06", 6, 1, Box(830, 2350, 3230, 2810)),
     ),
     slot_hole_masks={},
 )

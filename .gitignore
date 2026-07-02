@@ -6,6 +6,8 @@ pre_trained
 results
 hik_images/
 openvino_cache
+c789_bottom/
+*.ckpt
 
 # Test-related files and directories
 tmp*

@@ -44,6 +44,17 @@ class PreprocessingConfig:
     remove_blue_marks: bool
 
 
+@dataclass(frozen=True)
+class ValidRegionMaskConfig:
+    """Settings for image-specific valid-region score masks."""
+
+    preset: str
+    hole_dilation: int
+    border_margin: int
+    foreground_threshold_scale: float
+    min_coverage: float = 0.05
+
+
 @lru_cache(maxsize=1)
 def _load_workflow_module() -> ModuleType:
     """Load the ZS32 workflow module from its example-script path."""
@@ -515,6 +526,274 @@ def _normalize_uint8(array: Any) -> Any:
     return ((array - min_value) / (max_value - min_value) * 255.0).clip(0, 255).astype(np.uint8)
 
 
+@lru_cache(maxsize=1)
+def _load_part_crop_module() -> ModuleType:
+    """Load part-crop presets used by valid-region masks."""
+    spec = importlib.util.spec_from_file_location(
+        "prepare_part_crops_for_valid_region",
+        REPO_ROOT / "capture_data" / "prepare_part_crops.py",
+    )
+    if spec is None or spec.loader is None:
+        msg = "Could not load part-crop presets for valid-region masks."
+        raise RuntimeError(msg)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _valid_region_preset_choices() -> tuple[str, ...]:
+    """Return valid-region mask preset names accepted by the CLI."""
+    try:
+        presets = tuple(sorted(_load_part_crop_module().PRESETS))
+    except Exception:
+        presets = ()
+    return ("none", "auto", *presets)
+
+
+def _resolve_valid_region_preset(value: str, view: str) -> str:
+    """Resolve ``auto`` to the crop preset matching a known C789 view."""
+    if value != "auto":
+        return value
+    if view == "left_top":
+        return "c789_left_top_3x2"
+    if view == "left_bottom":
+        return "c789_left_bottom_3x2"
+    return "none"
+
+
+def _slot_name_from_path(path: str) -> str | None:
+    """Infer a slot name from a crop filename or sample folder."""
+    import re
+
+    match = re.search(r"_slot(?P<slot>[0-9]+)", str(path))
+    if match is None:
+        return None
+    return f"slot{int(match.group('slot')):02d}"
+
+
+def _foreground_region_mask(image: Any, config: ValidRegionMaskConfig) -> Any:
+    """Build a conservative foreground mask that rejects dark fixture/background."""
+    import cv2
+    import numpy as np
+
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+    otsu_threshold, _ = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    threshold = float(np.clip(max(18.0, otsu_threshold * config.foreground_threshold_scale), 18.0, 55.0))
+    raw = (gray > threshold).astype(np.uint8)
+    raw = cv2.morphologyEx(raw, cv2.MORPH_CLOSE, np.ones((17, 17), np.uint8), iterations=1)
+    raw = cv2.morphologyEx(raw, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8), iterations=1)
+
+    component_count, labels, stats, _ = cv2.connectedComponentsWithStats(raw, 8)
+    if component_count <= 1:
+        foreground = raw.astype(bool)
+    else:
+        largest = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+        foreground = labels == largest
+
+    height, width = gray.shape
+    border = np.zeros((height, width), dtype=bool)
+    margin = max(0, config.border_margin)
+    if margin == 0:
+        border[:, :] = True
+    elif height > margin * 2 and width > margin * 2:
+        border[margin : height - margin, margin : width - margin] = True
+    material = foreground & border & (gray > max(20.0, threshold * 0.9))
+    return cv2.morphologyEx(material.astype(np.uint8), cv2.MORPH_OPEN, np.ones((5, 5), np.uint8), iterations=1).astype(bool)
+
+
+def _preset_hole_mask(shape: tuple[int, int], slot_name: str, preset_name: str, dilation: int) -> Any:
+    """Return a boolean mask for preset hole/inpaint regions in one slot crop."""
+    import cv2
+    import numpy as np
+
+    part_crops = _load_part_crop_module()
+    preset = part_crops.PRESETS.get(preset_name)
+    if preset is None:
+        return np.zeros(shape, dtype=bool)
+    slot = next((candidate for candidate in preset.slots if candidate.name == slot_name), None)
+    hole_masks = preset.slot_hole_masks.get(slot_name, ())
+    if slot is None or not hole_masks:
+        return np.zeros(shape, dtype=bool)
+
+    height, width = shape
+    scale_x = width / max(slot.box.width, 1)
+    scale_y = height / max(slot.box.height, 1)
+    mask = np.zeros(shape, dtype=np.uint8)
+    for ellipse in hole_masks:
+        center = (round(ellipse.cx * scale_x), round(ellipse.cy * scale_y))
+        axes = (max(1, round(ellipse.rx * scale_x)), max(1, round(ellipse.ry * scale_y)))
+        cv2.ellipse(mask, center, axes, ellipse.angle, 0, 360, 255, -1)
+    if dilation > 0:
+        kernel = np.ones((dilation, dilation), np.uint8)
+        mask = cv2.dilate(mask, kernel, iterations=1)
+    return mask > 0
+
+
+def _build_valid_region_mask(image: Any, slot_name: str | None, config: ValidRegionMaskConfig) -> Any:
+    """Build a valid scoring mask for a crop image."""
+    import numpy as np
+
+    if config.preset == "none":
+        return np.ones(image.shape[:2], dtype=bool)
+
+    valid_mask = _foreground_region_mask(image, config)
+    if slot_name:
+        hole_mask = _preset_hole_mask(valid_mask.shape, slot_name, config.preset, config.hole_dilation)
+        valid_mask = valid_mask & ~hole_mask
+    return valid_mask
+
+
+def _masked_score_from_map(
+    anomaly_map: Any,
+    valid_mask: Any,
+    original_score: float,
+    method: str,
+    component_threshold_ratio: float,
+    component_min_area: int,
+) -> tuple[float, dict[str, float | int | str]]:
+    """Return a valid-region score calibrated to the original prediction score scale."""
+    import cv2
+    import numpy as np
+
+    anomaly_map = np.nan_to_num(anomaly_map.astype("float32"), copy=False)
+    valid_mask = valid_mask.astype(bool)
+    valid_values = anomaly_map[valid_mask]
+    full_max = float(anomaly_map.max()) if anomaly_map.size else 0.0
+    details: dict[str, float | int | str] = {
+        "full_max": full_max,
+        "valid_pixel_count": int(valid_values.size),
+        "component_count": 0,
+        "largest_component_area": 0,
+        "score_fallback": "",
+    }
+    if valid_values.size == 0 or full_max <= 0:
+        details["score_fallback"] = "original_empty_mask"
+        return float(original_score), details
+
+    selected_raw = float(valid_values.max())
+    if method == "masked_component":
+        threshold = full_max * component_threshold_ratio
+        candidates = ((anomaly_map >= threshold) & valid_mask).astype(np.uint8)
+        component_count, labels, stats, _ = cv2.connectedComponentsWithStats(candidates, 8)
+        accepted_raw_scores = []
+        largest_area = 0
+        accepted_count = 0
+        for component_index in range(1, component_count):
+            area = int(stats[component_index, cv2.CC_STAT_AREA])
+            if area < component_min_area:
+                continue
+            accepted_count += 1
+            largest_area = max(largest_area, area)
+            accepted_raw_scores.append(float(anomaly_map[labels == component_index].max()))
+        details["component_count"] = accepted_count
+        details["largest_component_area"] = largest_area
+        if accepted_raw_scores:
+            selected_raw = max(accepted_raw_scores)
+        else:
+            details["score_fallback"] = "masked_max_no_component"
+    elif method != "masked_max":
+        msg = f"Unsupported valid-region score method: {method}"
+        raise ValueError(msg)
+
+    details["selected_raw_score"] = selected_raw
+    score = float(original_score) * selected_raw / full_max
+    return float(round(score, 8)), details
+
+
+def _add_valid_region_score_columns(frame: Any, artifacts: dict[str, dict[str, Any]], args: Any, workflow: ModuleType) -> Any:
+    """Add optional valid-region score columns and optionally drive deployment labels."""
+    import cv2
+    import numpy as np
+
+    preset = _resolve_valid_region_preset(args.valid_region_mask_preset, args.view)
+    frame = frame.copy()
+    frame["deploy_score"] = frame["pred_score"]
+    frame["deploy_score_source"] = "original"
+    if args.valid_region_score_mode == "off" or preset == "none":
+        return frame
+
+    config = ValidRegionMaskConfig(
+        preset=preset,
+        hole_dilation=args.valid_region_hole_dilation,
+        border_margin=args.valid_region_border_margin,
+        foreground_threshold_scale=args.valid_region_foreground_threshold_scale,
+        min_coverage=args.valid_region_min_coverage,
+    )
+    scores: list[float] = []
+    labels: list[int | None] = []
+    coverages: list[float] = []
+    slots: list[str | None] = []
+    component_counts: list[int] = []
+    largest_component_areas: list[int] = []
+    fallbacks: list[str] = []
+
+    for row in frame.itertuples(index=False):
+        image_path = Path(row.source_path if Path(row.source_path).is_file() else row.processed_path)
+        image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+        artifact = artifacts.get(str(Path(row.processed_path).resolve()), {})
+        anomaly_map = _to_2d_array(artifact.get("anomaly_map"))
+        slot_name = _slot_name_from_path(str(row.source_path)) or _slot_name_from_path(str(row.processed_path))
+        slots.append(slot_name)
+
+        if image is None or anomaly_map is None:
+            scores.append(float("nan"))
+            labels.append(None)
+            coverages.append(float("nan"))
+            component_counts.append(0)
+            largest_component_areas.append(0)
+            fallbacks.append("missing_image_or_map")
+            continue
+
+        height, width = image.shape[:2]
+        resized_map = cv2.resize(anomaly_map.astype("float32"), (width, height), interpolation=cv2.INTER_LINEAR)
+        valid_mask = _build_valid_region_mask(image, slot_name, config)
+        coverage = float(valid_mask.mean())
+        coverages.append(coverage)
+        if coverage < config.min_coverage:
+            scores.append(float("nan"))
+            labels.append(None)
+            component_counts.append(0)
+            largest_component_areas.append(0)
+            fallbacks.append("coverage_below_min")
+            continue
+
+        score, details = _masked_score_from_map(
+            resized_map,
+            valid_mask,
+            float(row.pred_score),
+            args.valid_region_score_method,
+            args.valid_region_component_threshold_ratio,
+            args.valid_region_component_min_area,
+        )
+        scores.append(score)
+        labels.append(None if row.deploy_threshold is None or workflow.pd.isna(row.deploy_threshold) else int(score > row.deploy_threshold))
+        component_counts.append(int(details.get("component_count", 0)))
+        largest_component_areas.append(int(details.get("largest_component_area", 0)))
+        fallbacks.append(str(details.get("score_fallback", "")))
+
+    frame["valid_region_mask_preset"] = preset
+    frame["valid_region_score_method"] = args.valid_region_score_method
+    frame["valid_region_slot"] = slots
+    frame["valid_region_coverage"] = coverages
+    frame["valid_region_score"] = scores
+    frame["valid_region_pred_label"] = labels
+    frame["valid_region_component_count"] = component_counts
+    frame["valid_region_largest_component_area"] = largest_component_areas
+    frame["valid_region_fallback"] = fallbacks
+
+    if args.valid_region_score_mode == "deploy":
+        usable_scores = ~workflow.pd.isna(frame["valid_region_score"])
+        frame.loc[usable_scores, "deploy_score"] = frame.loc[usable_scores, "valid_region_score"]
+        frame.loc[usable_scores, "deploy_score_source"] = "valid_region"
+        if "deploy_pred_label" in frame:
+            deploy_labels = frame["valid_region_pred_label"].where(usable_scores, frame["deploy_pred_label"])
+            frame["deploy_pred_label"] = deploy_labels
+
+    return frame
+
+
 def _safe_artifact_stem(index: int, source_path: str, score: Any, result_type: str, workflow: ModuleType) -> str:
     """Build a compact, filesystem-safe artifact stem."""
     import re
@@ -526,12 +805,25 @@ def _safe_artifact_stem(index: int, source_path: str, score: Any, result_type: s
 
 def _annotation_lines(row: Any, mask_note: str | None = None) -> list[str]:
     """Build annotation text for review images."""
+    import math
+
     threshold = "none" if row.deploy_threshold is None else f"{float(row.deploy_threshold):.4f}"
+    deploy_score = getattr(row, "deploy_score", row.pred_score)
+    score_source = getattr(row, "deploy_score_source", "original")
     lines = [
         f"{row.result_type}  gt={row.gt_label} pred={row.review_pred_label}",
-        f"score={float(row.pred_score):.6f} threshold={threshold}",
+        f"score={float(deploy_score):.6f} source={score_source} threshold={threshold}",
         f"label={row.dataset_label} view={row.view}",
     ]
+    valid_region_score = getattr(row, "valid_region_score", None)
+    if valid_region_score is not None:
+        try:
+            if not math.isnan(float(valid_region_score)):
+                method = getattr(row, "valid_region_score_method", "")
+                coverage = getattr(row, "valid_region_coverage", float("nan"))
+                lines.append(f"valid_score={float(valid_region_score):.6f} method={method} coverage={float(coverage):.3f}")
+        except (TypeError, ValueError):
+            pass
     if mask_note:
         lines.append(mask_note)
     return lines
@@ -642,7 +934,8 @@ def _write_review_artifacts(
         artifact = artifacts.get(str(Path(row.processed_path).resolve()), {})
         anomaly_map = _to_2d_array(artifact.get("anomaly_map"))
         pred_mask = _to_2d_array(artifact.get("pred_mask"))
-        base_name = _safe_artifact_stem(index, row.source_path, row.pred_score, result_type, workflow)
+        deploy_score = getattr(row, "deploy_score", row.pred_score)
+        base_name = _safe_artifact_stem(index, row.source_path, deploy_score, result_type, workflow)
         lines = _annotation_lines(row)
 
         cv2.imwrite(str(result_dir / f"{base_name}_image.png"), _annotate_image(image.copy(), lines, result_type))
@@ -669,7 +962,8 @@ def _print_predictions(frame: Any, threshold: float | None, workflow: ModuleType
     """Print compact prediction lines to stdout."""
     label_column = "deploy_pred_label" if threshold is not None else "anomalib_pred_label"
     for row in frame.itertuples(index=False):
-        score = "nan" if workflow.pd.isna(row.pred_score) else f"{float(row.pred_score):.6f}"
+        score_value = getattr(row, "deploy_score", row.pred_score)
+        score = "nan" if workflow.pd.isna(score_value) else f"{float(score_value):.6f}"
         label = _label_text(getattr(row, label_column), workflow)
         print(f"{label:7s} score={score} {row.source_path}")
 
@@ -731,6 +1025,60 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.5,
         help="Fallback normalized anomaly-map threshold used only when pred_mask is missing.",
+    )
+    parser.add_argument(
+        "--valid-region-mask-preset",
+        choices=_valid_region_preset_choices(),
+        default="none",
+        help="Optional crop preset used to exclude background, fixture, and preset hole/inpaint regions.",
+    )
+    parser.add_argument(
+        "--valid-region-score-mode",
+        choices=("off", "report", "deploy"),
+        default="off",
+        help="off disables scoring, report adds CSV columns, deploy also uses the valid-region score for labels.",
+    )
+    parser.add_argument(
+        "--valid-region-score-method",
+        choices=("masked_max", "masked_component"),
+        default="masked_max",
+        help="Valid-region score statistic. Use masked_max first; component mode removes tiny hot components.",
+    )
+    parser.add_argument(
+        "--valid-region-hole-dilation",
+        type=int,
+        default=24,
+        help="Pixels used to dilate preset hole/inpaint exclusion masks.",
+    )
+    parser.add_argument(
+        "--valid-region-border-margin",
+        type=int,
+        default=8,
+        help="Image border pixels excluded from automatic foreground masks.",
+    )
+    parser.add_argument(
+        "--valid-region-foreground-threshold-scale",
+        type=float,
+        default=0.45,
+        help="Scale applied to Otsu threshold when extracting the foreground valid region.",
+    )
+    parser.add_argument(
+        "--valid-region-min-coverage",
+        type=float,
+        default=0.05,
+        help="Minimum valid-mask coverage required before a valid-region score is used.",
+    )
+    parser.add_argument(
+        "--valid-region-component-threshold-ratio",
+        type=float,
+        default=0.7,
+        help="Component-mode raw-map threshold as a fraction of the full-map maximum.",
+    )
+    parser.add_argument(
+        "--valid-region-component-min-area",
+        type=int,
+        default=64,
+        help="Minimum connected-component area in resized image pixels for component-mode scoring.",
     )
     parser.add_argument(
         "--rebuild-model",
@@ -797,6 +1145,7 @@ def main() -> None:
 
     artifacts = _prediction_artifacts(predictions, workflow)
     frame = _prediction_frame(predictions, args, checkpoint_path, source_map, threshold, workflow)
+    frame = _add_valid_region_score_columns(frame, artifacts, args, workflow)
     frame = _add_review_columns(frame, args, workflow)
     predictions_path = output_dir / "predictions.csv"
     frame.to_csv(predictions_path, index=False)

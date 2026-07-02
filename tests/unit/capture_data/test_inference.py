@@ -222,3 +222,56 @@ def test_mask_overlay_handles_empty_masks() -> None:
     )
 
     assert overlay.shape == image.shape
+
+
+def test_valid_region_mask_excludes_background_and_preset_holes() -> None:
+    """C789 top valid-region masks should keep metal pixels and reject invalid regions."""
+    inference = load_inference_module()
+    image = np.zeros((700, 1510, 3), dtype=np.uint8)
+    image[80:620, 120:1390] = 120
+    cv2.ellipse(image, (482, 520), (55, 55), 0, 0, 360, (125, 125, 125), -1)
+
+    config = inference.ValidRegionMaskConfig(
+        preset="c789_left_top_3x2",
+        hole_dilation=8,
+        border_margin=8,
+        foreground_threshold_scale=0.45,
+    )
+    mask = inference._build_valid_region_mask(image, "slot01", config)
+
+    assert bool(mask[250, 500])
+    assert not bool(mask[10, 10])
+    assert not bool(mask[520, 482])
+
+
+def test_masked_max_score_uses_valid_region_scale() -> None:
+    """Masked max scores should stay on the original prediction score scale."""
+    inference = load_inference_module()
+    anomaly_map = np.array(
+        [
+            [1.0, 0.1, 0.1],
+            [0.1, 0.4, 0.1],
+            [0.1, 0.1, 0.2],
+        ],
+        dtype=np.float32,
+    )
+    valid_mask = np.array(
+        [
+            [False, False, False],
+            [False, True, False],
+            [False, False, True],
+        ],
+    )
+
+    score, details = inference._masked_score_from_map(
+        anomaly_map,
+        valid_mask,
+        original_score=0.8,
+        method="masked_max",
+        component_threshold_ratio=0.7,
+        component_min_area=2,
+    )
+
+    assert score == 0.32
+    assert details["valid_pixel_count"] == 2
+    assert details["component_count"] == 0

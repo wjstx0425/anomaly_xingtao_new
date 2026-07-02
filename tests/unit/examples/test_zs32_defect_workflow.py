@@ -113,7 +113,7 @@ def test_preprocess_image_can_use_full_image_and_skip_blue_removal(tmp_path: Pat
 
 
 def test_deployment_threshold_uses_normal_test_max() -> None:
-    """Deployment threshold should come from normal_test scores."""
+    """Deployment threshold should default to the max normal_test score."""
     workflow = load_workflow_module()
     predictions = pd.DataFrame(
         {
@@ -128,6 +128,26 @@ def test_deployment_threshold_uses_normal_test_max() -> None:
 
     assert predictions["deploy_threshold"].unique().tolist() == [0.3]
     assert predictions["deploy_pred_label"].tolist() == [0, 0, 0, 1]
+
+
+def test_deployment_threshold_allows_target_false_positive_rate() -> None:
+    """Deployment threshold should allow a configurable normal_test false-positive rate."""
+    workflow = load_workflow_module()
+    normal_test_scores = [index / 100 for index in range(20)]
+    predictions = pd.DataFrame(
+        {
+            "model": ["anomaly_dino"] * 22,
+            "view": ["no_hand_top"] * 22,
+            "label": ["normal_test"] * 20 + ["defect", "defect"],
+            "pred_score": [*normal_test_scores, 0.181, 0.191],
+        },
+    )
+
+    predictions = workflow._add_deployment_predictions(predictions, deploy_fpr=0.05)
+
+    assert round(float(predictions["deploy_threshold"].iloc[0]), 2) == 0.18
+    assert predictions[predictions["label"] == "normal_test"]["deploy_pred_label"].sum() == 1
+    assert predictions[predictions["label"] == "defect"]["deploy_pred_label"].tolist() == [1, 1]
 
 
 def test_sample_summary_uses_max_frame_score() -> None:
@@ -188,6 +208,22 @@ def test_iter_raw_images_supports_no_hand_bottom_dirs(tmp_path: Path) -> None:
     images = list(workflow._iter_raw_images(tmp_path, "no_hand_bottom", "normal"))
 
     assert images == [image_path]
+
+
+def test_iter_raw_images_supports_left_bottom_alias(tmp_path: Path) -> None:
+    """C789 left_bottom should accept both bottom_ZS32 and bottom folders."""
+    workflow = load_workflow_module()
+    image_path = tmp_path / "left" / "bottom" / "normal" / "part001_000001.png"
+    image_path.parent.mkdir(parents=True)
+    image_path.touch()
+
+    images = list(workflow._iter_raw_images(tmp_path, "left_bottom", "normal"))
+
+    assert images == [image_path]
+    assert workflow._raw_label_dirs(tmp_path, "left_bottom", "normal") == [
+        tmp_path / "left" / "bottom_ZS32" / "normal",
+        tmp_path / "left" / "bottom" / "normal",
+    ]
 
 
 def test_preprocess_dataset_clears_stale_view_output(tmp_path: Path) -> None:
