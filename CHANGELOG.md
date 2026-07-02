@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- 🚀 **pipeline**: Add and document the custom C789/FX11 inspection workflow, including model comparison, custom training, hardened stress-normal validation, live demo archive/OCR output, and manual geometry templates.
+
 ### Removed
 
 ### Changed
@@ -15,6 +17,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Deprecated
 
 ### Fixed
+
+- 🐞 **data**: Reject negative `--normal-test-ratio` values before normal/normal_test splitting.
 
 ## [v2.4.2] - 2026-05-15
 

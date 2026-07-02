@@ -183,6 +183,22 @@ def test_prepare_part_crops_splits_normal_sources_into_normal_test(tmp_path: Pat
     assert len(list((output_root / "left" / "top" / "normal_test").glob("*/images/*.png"))) == 2
 
 
+def test_assign_normal_output_labels_rejects_negative_normal_test_ratio(tmp_path: Path) -> None:
+    """Normal split ratio should not accept negative values."""
+    crops = load_prepare_part_crops_module()
+    images = [
+        ("normal", tmp_path / "normal_a.png"),
+        ("normal", tmp_path / "normal_b.png"),
+    ]
+
+    try:
+        crops.assign_normal_output_labels(images, "auto", -0.25, seed=0)
+    except ValueError as error:
+        assert "--normal-test-ratio" in str(error)
+    else:
+        raise AssertionError("Expected negative --normal-test-ratio to raise ValueError")
+
+
 def test_prepare_part_crops_keeps_existing_normal_test_in_auto_mode(tmp_path: Path) -> None:
     """Auto mode should honor an existing normal_test directory instead of resplitting normal."""
     crops = load_prepare_part_crops_module()

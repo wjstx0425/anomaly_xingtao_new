@@ -208,6 +208,26 @@ def test_compare_models_builds_safe_default_workflow_args(tmp_path: Path) -> Non
     ]
 
 
+def test_compare_models_can_require_efficientad_assets(tmp_path: Path) -> None:
+    """The comparison wrapper should allow strict EfficientAD asset checking."""
+    compare = _load_module("pipeline_compare_models_require_assets", "pipeline/6_compare_models.py")
+    args = compare.build_parser().parse_args(
+        [
+            "--data-root",
+            str(tmp_path / "parts"),
+            "--output-root",
+            str(tmp_path / "results"),
+            "--views",
+            "no_hand_top",
+            "--require-efficientad-assets",
+        ],
+    )
+
+    workflow_args = compare.build_workflow_args("all", args)
+
+    assert "--skip-missing-efficientad-assets" not in workflow_args
+
+
 def test_compare_models_skip_preprocess_runs_train_then_evaluate(tmp_path: Path) -> None:
     """The comparison wrapper should reuse preprocessing when requested."""
     compare = _load_module("pipeline_compare_models_skip", "pipeline/6_compare_models.py")

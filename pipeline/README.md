@@ -12,20 +12,41 @@ uv sync
 
 ## 流程总览
 
-```text
-1_collect_data.py   采集原始大图
-2_process_data.py   裁成单零件图片，可 mask 孔
-3_train_model.py    预处理、训练、评估
-4_inference.py      离线推理并输出复核图
-5_demo_inspection.py 现场双面演示
-6_compare_models.py 自动跑 PatchCore、EfficientAD、AnomalyDINO 并生成对比表
-```
+| 脚本 | 用途 | 适用场景 |
+| --- | --- | --- |
+| `0_run_all.py` | 串联多个阶段 | 已经确认单步命令正确后再使用 |
+| `1_collect_data.py` | 采集原始大图 | normal/defect 原始数据采集 |
+| `2_process_data.py` | 裁成单零件图片，可 mask 孔 | 自动预设裁剪或手动画框 |
+| `3_train_model.py` | 预处理、训练、评估 | 单模型或指定模型训练的主入口 |
+| `4_inference.py` | 离线推理并输出复核图 | 复核新图片、stress normal、real defects |
+| `5_demo_inspection.py` | 现场双面演示 | 相机在线检测、C789/FX11 切换 |
+| `6_compare_models.py` | 比较 PatchCore、EfficientAD、AnomalyDINO | 单个数据集的常规模型对比 |
+| `7_train_c789_100_compare_4gpu.py` | C789-100 top/bottom 四卡批量实验 | 专用脚本，默认路径绑定 `/DATA/ljl/...` |
+| `8_train_custom_models.py` | 自定义数据集多模型训练 | 通用批量训练入口，路径和参数都显式传入 |
+| `9_split_stress_normal.py` | stress normal 按 group 拆 train/locked | 鲁棒性验证，要求文件名能解析 `_g编号_` |
+| `10_build_hardened_dataset.py` | clean + stress train 合成 hardened 数据集 | 用 stress train 扩充正常分布 |
+| `11_build_geometry_templates.py` | 从正常图自动建几何模板 | 初始几何模板或快速 baseline |
+| `12_geometry_eval.py` | 评估几何模板并可融合 AnomalyDINO | locked stress 校准、defect 验收 |
+| `13_export_geometry_review_pack.py` | 导出人工 review pack 和可编辑 mask | 人工检查、生成手工模板种子 |
+| `14_build_manual_geometry_templates.py` | 从手工 mask 编译模板 | 编辑 mask 后必须运行 |
+| `15_edit_geometry_masks.py` | 可视化编辑手工 mask | 交互式修 expected/allowed/ignore/watch_edge |
 
 最常用流程：
 
 ```text
 采 normal/defect -> 裁剪 -> 训练评估 -> 推理复核或现场演示
 ```
+
+如果要上传到 GitHub，只提交代码和文档，不提交数据、checkpoint 或训练输出。
+当前 `.gitignore` 已排除 `dataset/`、`datasets`、`results`、`c789_bottom/`、
+`*.ckpt`、`wandb/`、`lightning_logs/`、`mlruns` 等本地产物。提交前建议检查：
+
+```bash
+git status --short --ignored dataset results c789_bottom
+git diff --cached --stat
+```
+
+`git status --short --ignored` 中这些目录应显示为 `!!`，不应显示为 `A` 或 `M`。
 
 ## 1. 采集数据
 
@@ -377,6 +398,11 @@ FX11 no_hand/bottom：
 报表里的分数直方图只画 `normal_test` 和 `defect`，训练集 `normal`
 不参与阈值判断，也不会再画到直方图里。
 
+注意：`3_train_model.py` 的默认部署目标是 `--deploy-fpr 0.0`；用于快速比较的
+`6_compare_models.py` 和 `8_train_custom_models.py` 默认示例偏向召回率，通常使用
+`--deploy-fpr 0.05`。对比不同结果时先确认 `reports/summary.csv` 里的
+`deploy_target_fpr` 一致。
+
 显存紧张时，AnomalyDINO 可以保留：
 
 ```bash
@@ -471,6 +497,63 @@ EfficientAD，继续比较另外两个模型。想让资源缺失时直接报错
 <output-root>/reports/model_comparison.md
 ```
 
+默认缺少 EfficientAD teacher weights 或 ImageNette 数据时会跳过 EfficientAD。
+如果必须确认 EfficientAD 资源齐全，加 `--require-efficientad-assets`。
+
+`6_compare_models.py` 是单数据集比较入口；如果要同时跑 C789 top/bottom
+并扫多组采样比例，再用下面的 `7_train_c789_100_compare_4gpu.py`。如果只是换
+自己的数据路径和超参数，优先用 `8_train_custom_models.py`，不要改硬编码脚本。
+
+### 专用四卡 C789-100 批量实验
+
+`7_train_c789_100_compare_4gpu.py` 是实验复现脚本，不是通用入口。默认读取：
+
+```text
+/DATA/ljl/c789_100_left_top_parts
+/DATA/ljl/c789_100_left_bottom_parts
+```
+
+默认使用 GPU `0 1 2 3`，并对 PatchCore/EfficientAD/AnomalyDINO 扫多组采样比例。
+在其他机器上必须显式传数据路径和 GPU：
+
+```bash
+.venv/bin/python pipeline/7_train_c789_100_compare_4gpu.py \
+  --top-data-root dataset/c789_100_left_top_parts \
+  --bottom-data-root dataset/c789_100_left_bottom_parts \
+  --output-root results/c789_100_compare_4gpu \
+  --gpus 0 1 2 3 \
+  --skip-missing-efficientad-assets \
+  --dry-run
+```
+
+确认 dry-run 打印的命令和路径都正确后，再去掉 `--dry-run`。
+
+### 通用自定义模型训练
+
+`8_train_custom_models.py` 适合把路径、模型和显存参数都显式写出来。它会先
+preprocess 一次，再按模型并行训练，最后生成汇总表：
+
+```bash
+.venv/bin/python pipeline/8_train_custom_models.py \
+  --data-root dataset/c789_100_left_top_parts \
+  --output-root results/custom_left_top_compare \
+  --views left_top \
+  --models patchcore anomaly_dino \
+  --gpus 0 \
+  --roi full \
+  --image-size 392,784 \
+  --deploy-fpr 0.05 \
+  --skip-missing-efficientad-assets \
+  --dry-run
+```
+
+输出表在：
+
+```text
+<output-root>/reports/model_comparison.md
+<output-root>/reports/model_comparison.csv
+```
+
 ## 4. 推理
 
 对原始图片或目录推理：
@@ -503,6 +586,17 @@ review/TN
 review/FP
 review/FN
 ```
+
+部署阈值优先级：
+
+```text
+显式 --threshold > <output-root>/reports/summary.csv 的 deploy_threshold > anomalib 原始 pred_label
+```
+
+如果 `--output-root`、`--view` 或 `--model` 指错，脚本可能找不到匹配的
+`reports/summary.csv`，控制台会提示 `threshold: not found`，这时复核分类会退回
+模型原始标签，不再等价于部署阈值。上线或对比报告时，建议显式传
+`--threshold`，或先确认对应 `summary.csv` 存在且 view/model 匹配。
 
 关键参数：
 
@@ -617,14 +711,14 @@ locked stress normal 验收用 `pipeline/4_inference.py` 单独跑
 ```bash
 .venv/bin/python pipeline/5_demo_inspection.py \
   --part-profile c789 \
-  --c789-top-output-root /home/yunjing/anomalib/results/c789_100/left_top_parts_anomalydino \
-  --c789-top-ckpt-path /home/yunjing/anomalib/results/c789_100/left_top_parts_anomalydino/runs/left_top/anomaly_dino/AnomalyDINO/zs32_left_top/left_top/v3/weights/lightning/model.ckpt \
-  --c789-bottom-output-root /home/yunjing/anomalib/c789_bottom \
-  --c789-bottom-ckpt-path /home/yunjing/anomalib/c789_bottom/ckpt_015/model.ckpt \
-  --fx11-top-output-root /home/yunjing/anomalib/results/fx11_100/no_hand_top_parts_anomalydino \
-  --fx11-top-ckpt-path /home/yunjing/anomalib/results/fx11_100/no_hand_top_parts_anomalydino/runs/no_hand_top/anomaly_dino/AnomalyDINO/zs32_no_hand_top/no_hand_top/v1/weights/lightning/model.ckpt \
-  --fx11-bottom-output-root /home/yunjing/anomalib/results/fx11_100/no_hand_bottom_parts_anomalydino \
-  --fx11-bottom-ckpt-path /home/yunjing/anomalib/results/fx11_100/no_hand_bottom_parts_anomalydino/runs/no_hand_bottom/anomaly_dino/AnomalyDINO/zs32_no_hand_bottom/no_hand_bottom/v1/weights/lightning/model.ckpt \
+  --c789-top-output-root results/c789_100/left_top_parts_anomalydino \
+  --c789-top-ckpt-path results/c789_100/left_top_parts_anomalydino/runs/left_top/anomaly_dino/AnomalyDINO/zs32_left_top/left_top/v3/weights/lightning/model.ckpt \
+  --c789-bottom-output-root c789_bottom \
+  --c789-bottom-ckpt-path c789_bottom/ckpt_015/model.ckpt \
+  --fx11-top-output-root results/fx11_100/no_hand_top_parts_anomalydino \
+  --fx11-top-ckpt-path results/fx11_100/no_hand_top_parts_anomalydino/runs/no_hand_top/anomaly_dino/AnomalyDINO/zs32_no_hand_top/no_hand_top/v1/weights/lightning/model.ckpt \
+  --fx11-bottom-output-root results/fx11_100/no_hand_bottom_parts_anomalydino \
+  --fx11-bottom-ckpt-path results/fx11_100/no_hand_bottom_parts_anomalydino/runs/no_hand_bottom/anomaly_dino/AnomalyDINO/zs32_no_hand_bottom/no_hand_bottom/v1/weights/lightning/model.ckpt \
   --device 0 \
   --accelerator gpu \
   --predict-batch-size 1 \
@@ -644,6 +738,57 @@ locked stress normal 验收用 `pipeline/4_inference.py` 单独跑
   --no-gui \
   --save-ui-screenshot results/c789/demo_inspection/ui_preview.png
 ```
+
+带归档和钢印 OCR 的离线演示：
+
+```bash
+.venv/bin/python pipeline/5_demo_inspection.py \
+  --part-profile c789 \
+  --demo-top-image dataset/c789/left/top/normal/example.png \
+  --demo-bottom-image dataset/c789/left/bottom/normal/example.png \
+  --archive-root results/c789/demo_inspection/archive \
+  --stamp-roi-config config/stamp_roi.json \
+  --diagnostics \
+  --auto-run \
+  --no-gui
+```
+
+归档会追加写入：
+
+```text
+<archive-root>/inspection_slots.csv
+<archive-root>/inspection_parts.csv
+```
+
+每一面还会写 trace JSON、annotated image、slot crops、`predictions.csv`，
+OCR 会额外保存 `stamp_rois/*_stamp.png` 和 `*_stamp_enhanced.png`。
+
+`--stamp-roi-config` 是 crop 内坐标，不是原始大图坐标。支持两种 JSON 写法：
+
+```json
+{
+  "c789.top": {
+    "x1": 100,
+    "y1": 40,
+    "x2": 360,
+    "y2": 160,
+    "mirror_horizontal": true
+  },
+  "c789": {
+    "bottom": {
+      "x1": 120,
+      "y1": 50,
+      "x2": 380,
+      "y2": 170,
+      "rotate_180": true
+    }
+  }
+}
+```
+
+`x2` 必须大于 `x1`，`y2` 必须大于 `y1`。如果 ROI 配置缺字段或越界，当前版本会跳过
+对应面的 OCR 或给该 slot 写 `FAIL`，所以调试时建议加 `--diagnostics` 并检查
+trace JSON 里的 `stamp_ocr`。
 
 界面操作：
 
@@ -721,22 +866,41 @@ INFER_ARGS='dataset/c789_left_top_parts/left/top
 - 训练前先打开 `--preview-overlay` 的图片，确认裁剪框和孔 mask 正确。
 - 单零件 crop 训练必须使用 `--roi full`。
 - `left_bottom` 的 workflow 目录是 `left/bottom_ZS32`。
+- `9_split_stress_normal.py` 依赖文件名里的 `_g编号_`，例如 `..._g001_...png`。
+- `--link-mode symlink` 会写绝对源路径的符号链接，适合本机省空间；需要拷到别的机器时用 `--link-mode copy`。
 - 指标好不代表能上线，建议再采一批新正常件和新缺陷件做独立验证。
 - EfficientAD 可能需要额外本地资源；没有资源时先用 AnomalyDINO 或 PatchCore。
 
 ## C789 手工几何模板
 
-C789 top 的 less/more/corner 缺陷建议走人工核验的几何模板流程。先导出 review pack：
+C789 top 的 less/more/corner 缺陷建议走人工核验的几何模板流程。可以先用正常图
+自动建一版模板：
+
+```bash
+.venv/bin/python pipeline/11_build_geometry_templates.py \
+  --data-root dataset/c789_100_left_top_hardened_parts \
+  --view left_top \
+  --preset c789_left_top_3x2 \
+  --output-dir results/c789_100_hardened/left_top_geometry/templates
+```
+
+如果要人工修模板，再导出 review pack：
 
 ```bash
 .venv/bin/python pipeline/13_export_geometry_review_pack.py \
   --normal-root dataset/c789_100_left_top_hardened_parts/left/top/normal \
   --stress-root dataset/c789_stress_normal_group_split/locked/left/top \
   --defect-root dataset/c789_100_left_top_parts/left/top/defect \
-  --template-dir results/c789_100_hardened/left_top_geometry/templates \
   --output-dir results/c789_100_hardened/left_top_geometry/manual_review_pack \
   --preset c789_left_top_3x2 \
   --samples-per-split 2
+```
+
+默认不传 `--template-dir`，这样会从当前 normal reference 重新生成可编辑 mask。
+只有在明确想基于已有自动模板继续修时，才额外加：
+
+```bash
+--template-dir results/c789_100_hardened/left_top_geometry/templates
 ```
 
 人工检查 `manual_review_pack/sheets/slotXX_review_sheet.png`，然后编辑
@@ -798,3 +962,8 @@ slotXX_watch_edge.png  真正用于 less/more 判断的边界区域
   --anomaly-predictions results/c789_100_hardened/left_top_anomaly_dino/reports/predictions.csv \
   --output-dir results/c789_100_hardened/left_top_geometry/manual_defect_fused
 ```
+
+融合时 `--anomaly-predictions` 会按 `source_path`、`processed_path`、
+`image_path` 或文件名去匹配几何样本。路径来自不同输出目录时，可能匹配不上并退化成
+geometry-only 结果；因此跑完后要检查 `manual_defect_fused/fused_predictions.csv`
+里的 `anomaly_score`、`anomaly_threshold`、`anomaly_deploy_pred_label` 是否按预期非空。

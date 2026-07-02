@@ -440,11 +440,11 @@ def assign_normal_output_labels(
     The split is made at full-image level so all slot crops from one source
     image stay in the same output split.
     """
-    if mode == "never" or normal_test_ratio <= 0:
-        return {}
     if not 0 <= normal_test_ratio < 1:
         msg = "--normal-test-ratio must be >= 0 and < 1."
         raise ValueError(msg)
+    if mode == "never" or normal_test_ratio == 0:
+        return {}
     if mode not in {"auto", "always"}:
         msg = f"Unsupported normal split mode: {mode}"
         raise ValueError(msg)

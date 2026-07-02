@@ -6,6 +6,8 @@
 - `.gitignore` already ignored `results`, `dataset/`, `datasets`, and training logs such as `wandb/`, `lightning_logs/`, and `mlruns`.
 - Added `c789_bottom/` and `*.ckpt` to `.gitignore` so local model checkpoints are not accidentally staged by `git add .`.
 - Push local code changes to the `mygithub` remote (`git@github.com:wjstx0425/anomaly_xingtao.git`) rather than the upstream `origin` remote unless the user explicitly wants to contribute to upstream anomalib.
+- On 2026-07-02, a follow-up review found documentation ambiguity around stages 7-15, upload boundaries, EfficientAD asset defaults, C789 geometry template workflow, demo archive/OCR outputs, and threshold sources. `README.md`, `pipeline/README.md`, and `CHANGELOG.md` were updated to make these boundaries explicit.
+- The same review fixed a small data-split bug: negative `--normal-test-ratio` values now raise `ValueError` instead of silently disabling the split.
 
 ## C789 left_top geometry + AnomalyDINO fusion
 

@@ -135,7 +135,7 @@ def build_workflow_args(command: str, args: argparse.Namespace) -> list[str]:
         workflow_args.append("--anomaly-dino-masking")
     if args.anomaly_dino_coreset_subsampling:
         workflow_args.append("--anomaly-dino-coreset-subsampling")
-    if args.skip_missing_efficientad_assets:
+    if getattr(args, "skip_missing_efficientad_assets", True):
         workflow_args.append("--skip-missing-efficientad-assets")
     return workflow_args
 
@@ -269,13 +269,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--skip-missing-efficientad-assets",
         action="store_true",
-        default=True,
-        help="Skip EfficientAD if teacher weights or ImageNette data are unavailable.",
+        default=argparse.SUPPRESS,
+        help="Skip EfficientAD if teacher weights or ImageNette data are unavailable. This is the default behavior.",
     )
     parser.add_argument(
         "--require-efficientad-assets",
         action="store_false",
         dest="skip_missing_efficientad_assets",
+        default=argparse.SUPPRESS,
         help="Fail instead of skipping when EfficientAD assets are missing.",
     )
 

@@ -41,6 +41,17 @@
 >
 > We value your input! Please share feedback via [GitHub Issues](https://github.com/open-edge-platform/anomalib/issues) or our [Discussions](https://github.com/open-edge-platform/anomalib/discussions)
 
+# Custom Industrial Defect Pipeline
+
+This fork includes a local C789/FX11 inspection workflow under [pipeline/](pipeline/README.md). The workflow covers image capture, part cropping, model training, inference review, live two-sided inspection, stress-normal validation, and manual C789 geometry templates.
+
+```bash
+uv sync
+.venv/bin/python pipeline/8_train_custom_models.py --help
+```
+
+Large local artifacts are intentionally excluded from Git. Keep datasets, checkpoints, and training outputs under ignored paths such as `dataset/`, `datasets/`, `results/`, `c789_bottom/`, and `*.ckpt`; upload source code and documentation only.
+
 # 👋 Introduction
 
 Anomalib is a deep learning library that aims to collect state-of-the-art anomaly detection algorithms for benchmarking on both public and private datasets. Anomalib provides several ready-to-use implementations of anomaly detection algorithms described in the recent literature, as well as a set of tools that facilitate the development and implementation of custom models. The library has a strong focus on visual anomaly detection, where the goal of the algorithm is to detect and/or localize anomalies within images or videos in a dataset. Anomalib is constantly updated with new algorithms and training/inference extensions, so keep checking!
