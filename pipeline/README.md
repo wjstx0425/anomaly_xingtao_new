@@ -30,6 +30,16 @@ uv sync
 | `13_export_geometry_review_pack.py` | 导出人工 review pack 和可编辑 mask | 人工检查、生成手工模板种子 |
 | `14_build_manual_geometry_templates.py` | 从手工 mask 编译模板 | 编辑 mask 后必须运行 |
 | `15_edit_geometry_masks.py` | 可视化编辑手工 mask | 交互式修 expected/allowed/ignore/watch_edge |
+| `16_build_multiview_manifest.py` | 生成多视角 manifest | 正反面、多光照图片按 part/side/view 分组 |
+| `17_calibrate_quality_gate.py` | 校准整图质量门控 | 从 normal/stress normal 统计亮度、过曝、欠曝、模糊阈值 |
+| `18_fuse_inspection_results.py` | 融合 quality/registration/geometry/anomaly CSV | 输出统一 OK/NG/RETAKE/INVALID_CAPTURE/SUSPECT |
+| `19_run_robustness_benchmark.py` | 汇总融合后的鲁棒性 benchmark | clean/stress normal FP、invalid reject、defect recall |
+| `20_run_traditional_operators.py` | 运行 C789 传统可解释算子 | registration、geometry、crack、surface、feature presence 分支 |
+| `21_prepare_yolo_dataset.py` | 导出 Ultralytics YOLO 检测数据集 | 从 slot crop manifest + bbox 标注生成 images/labels/data.yaml |
+| `22_collect_c789_yolo_defects.py` | 采集并裁剪 C789 YOLO 缺陷样本 | 6 个槽位都放缺陷件，输出待标注 defect crop |
+| `23_augment_yolo_dataset.py` | 对 YOLO bbox 数据做离线增强 | 训练集增强，bbox 同步变换 |
+| `25_prepare_yolo_same_dist_dataset.py` | 构建同分布 YOLO 验证集 | 按 `gNNN` 采集组拆分，train 增强、val 不增强 |
+| `26_prepare_yolo_roi_dataset.py` | 构建 ROI-level YOLO 数据集 | GT-centered 诊断 ROI 或 tiled 部署 ROI |
 
 最常用流程：
 
@@ -967,3 +977,525 @@ slotXX_watch_edge.png  真正用于 less/more 判断的边界区域
 `image_path` 或文件名去匹配几何样本。路径来自不同输出目录时，可能匹配不上并退化成
 geometry-only 结果；因此跑完后要检查 `manual_defect_fused/fused_predictions.csv`
 里的 `anomaly_score`、`anomaly_threshold`、`anomaly_deploy_pred_label` 是否按预期非空。
+
+### 几何阈值 fallback
+
+`pipeline/12_geometry_eval.py` 现在支持 MVP-2 的几何阈值 fallback。阈值查找顺序是：
+
+```text
+exact:       slot_id + defect_type + region_id
+slot_type:   slot_id + defect_type + *
+slot_region: slot_id + * + region_id
+slot:        slot_id + * + *
+defect_type: * + defect_type + *
+global:      * + * + *
+```
+
+这里的 `defect_type` 对应当前几何分支内部的 `geometry_type`，也就是 `less` / `more`
+这类几何异常类型；当前阶段不从外部 manifest 读取真实缺陷大类。
+
+旧版 `geometry_thresholds.csv` 仍可读取。加载旧 CSV 时会从已有阈值自动补齐 per-slot、
+per-type 和 global fallback 行；重新 `--calibrate-thresholds` 时也会写出兼容新旧字段：
+
+```text
+slot,geometry_type,geometry_region,geometry_threshold
+slot_id,defect_type,region_id,threshold,threshold_source,n_normal,max_normal,p99_normal,p999_normal
+```
+
+`geometry_predictions.csv` 额外包含：
+
+```text
+threshold_source
+threshold_lookup_level
+```
+
+这两个字段用于解释某个样本命中了 exact 阈值还是 fallback 阈值。自动 fallback 使用已有
+locked normal 阈值/统计中的最大值作为保守阈值，优先避免 stress normal FP 变差。
+如果 locked normal 与模板完全一致、没有任何区域偏差，校准仍会写出每个 slot 的
+`slot_id + * + * = 0.0` 和 global fallback，避免生成空阈值表。
+单个预测样本如果没有任何区域偏差，也会通过 slot/global fallback 标记为
+`geometry_pred_label=0`，而不是留下空预测。
+
+## 质量门控 MVP-3
+
+`capture_data/quality_gate.py` 提供不依赖深度学习的整图质量指标：
+
+```text
+brightness_mean
+brightness_std
+saturation_ratio
+dark_ratio
+blur_laplacian_var
+highlight_ratio
+foreground_coverage
+```
+
+当前上线策略先使用 `mode: warn`，质量异常不会阻断模型推理。没有 invalid 图时可以只用
+normal / stress normal 校准阈值：
+
+```bash
+.venv/bin/python pipeline/17_calibrate_quality_gate.py \
+  --normal-root dataset/c789_100_left_top_parts/left/top/normal \
+  --stress-root dataset/c789_stress_normal_group_split/locked/left/top \
+  --output-yaml config/quality_gate/c789_calibrated.yaml \
+  --output-report results/c789_quality_gate/calibration_report.md
+```
+
+输出包括：
+
+```text
+quality_metrics.csv
+c789_calibrated.yaml
+calibration_report.md
+```
+
+`quality_gate.csv` 写出 `branch=quality_gate`、`status`、`fail_label`、`reason` 和
+`source_path`，可以直接传给 `pipeline/18_fuse_inspection_results.py --quality-csv`。
+WARN 行的 `fail_label=0`，只有 `mode=fail` 下的 FAIL 才会作为 retake gate 阻断 OK。
+
+## Demo 质量告警 MVP-4
+
+现场 demo 的旧命令保持可运行。推荐先用：
+
+```bash
+--quality-gate warn
+```
+
+WARN 模式下，质量门控只提示不阻断推理；UI 会显示 `质量 WARN` 和原因，trace JSON 的
+`quality.issues` / `quality.reason`、以及 archive CSV 的 `quality_status` /
+`quality_reasons` 会同步记录。只有显式使用 `--quality-gate fail` 时，质量失败才会阻断
+模型推理。
+
+## 多视角 Manifest MVP-5
+
+`pipeline/16_build_multiview_manifest.py` 用于把正反面、多光照图片按
+`part_id / side / view` 分组。优先推荐显式 CSV：
+
+```text
+part_id,side,view,image_path,label,defect_type,slot_id,group_id,notes
+```
+
+也可以通过文件名正则自动解析：
+
+```bash
+.venv/bin/python pipeline/16_build_multiview_manifest.py \
+  --input-root dataset/c789_multiview_raw \
+  --filename-regex '(?P<part_id>part[0-9]+)_(?P<side>top|bottom)_(?P<view>uniform)_slot(?P<slot_id>[0-9]+)\.png' \
+  --required-side top \
+  --required-side bottom \
+  --required-view uniform \
+  --output-csv results/c789_multiview/manifest.csv
+```
+
+如果某个 `part_id` 缺少 required side/view，stage 16 会在控制台标记
+`[invalid_capture]`；stage 18 读取 manifest 后会把对应零件输出为 `INVALID_CAPTURE`。
+真实文件名规则确定后，只需要把 `filename_regex` 放进 inspection profile，不需要改代码。
+
+## C789 传统算子分支
+
+`capture_data/traditional_operators.py` 提供不依赖训练的 C789 可解释检查。它复用现有
+slot preset，不重新定位零件：
+
+```text
+c789_left_top_3x2     ROI 460,30,3480,2600
+c789_left_bottom_3x2  ROI 350,320,3600,3030
+```
+
+默认配置在 `config/traditional/c789.yaml`。stage 20 已从全局粗规则升级为
+“按 slot 自动标定模板 + 检测时复用模板”的流程。传统算子在这里是融合检测的一组
+证据分支，不是全类别缺陷分类器；它只负责输出自己擅长的几何、暗线、纹理、姿态等
+证据，再交给 stage 18 和深度模型一起融合。
+
+第一版传统分支包括：
+
+```text
+registration       前景面积、bbox 中心偏移，默认 WARN
+geometry           slot template 差分证据；输出 missing_mask / extra_mask，不宣称真实 less/more 类别
+crack              暗细线增强 + 连通域长线证据，只在 material ROI 内评分
+surface_texture    CLAHE/Laplacian 纹理残差证据，只在 material ROI 内评分，第一版只输出 SUSPECT
+feature_presence   孔洞/暗特征数量证据，当前 C789 配置默认关闭
+```
+
+经验上，`geometry` 更适合支持 `less / more / corner / deform` 这类结构或轮廓相关缺陷；
+`crack` 更适合支持细长暗裂纹候选；`surface_texture` 更适合做 `surface` 类复核提示。
+表面污渍、反光、轻微划痕、裂纹 vs 划痕等语义强的类别，不应只靠单个传统分支硬分类。
+
+先用 normal slot crop 自动标定 slot 模板和几何阈值。默认每个 slot 抽样 96
+张 normal 做标定；需要全量离线精标定时传 `--calibration-max-images-per-slot 0`。
+默认标定产物写到 `<output-dir>/calibration/`，后续 defect/stress normal 检测可直接复用：
+
+```bash
+.venv/bin/python pipeline/20_run_traditional_operators.py \
+  --input-root dataset/c789_100_left_top_parts/left/top/normal \
+  --calibrate-normal-root dataset/c789_100_left_top_parts/left/top/normal \
+  --preset c789_left_top_3x2 \
+  --side top \
+  --view uniform \
+  --input-mode slot \
+  --config config/traditional/c789.yaml \
+  --output-dir results/c789_traditional/top_calibrated
+```
+
+对 C789 top defect 或 stress normal slot crop 运行时，显式传入标定产物：
+
+```bash
+.venv/bin/python pipeline/20_run_traditional_operators.py \
+  --input-root dataset/c789_100_left_top_parts/left/top/defect \
+  --preset c789_left_top_3x2 \
+  --side top \
+  --view uniform \
+  --input-mode slot \
+  --config config/traditional/c789.yaml \
+  --template-dir results/c789_traditional/top_calibrated/calibration/templates \
+  --geometry-thresholds results/c789_traditional/top_calibrated/calibration/geometry_thresholds.csv \
+  --output-dir results/c789_traditional/top_defect
+```
+
+对 C789 bottom 原始大图同样先标定，再复用模板：
+
+```bash
+.venv/bin/python pipeline/20_run_traditional_operators.py \
+  --input-root dataset/c789_100_left_bottom_parts/left/bottom/normal \
+  --calibrate-normal-root dataset/c789_100_left_bottom_parts/left/bottom/normal \
+  --preset c789_left_bottom_3x2 \
+  --side bottom \
+  --view uniform \
+  --input-mode slot \
+  --config config/traditional/c789.yaml \
+  --output-dir results/c789_traditional/bottom_calibrated
+```
+
+```bash
+.venv/bin/python pipeline/20_run_traditional_operators.py \
+  --input-root dataset/c789_100_left_bottom_parts/left/bottom/defect \
+  --preset c789_left_bottom_3x2 \
+  --side bottom \
+  --view uniform \
+  --input-mode slot \
+  --config config/traditional/c789.yaml \
+  --template-dir results/c789_traditional/bottom_calibrated/calibration/templates \
+  --geometry-thresholds results/c789_traditional/bottom_calibrated/calibration/geometry_thresholds.csv \
+  --output-dir results/c789_traditional/bottom_defect
+```
+
+输出：
+
+```text
+calibration/
+traditional_predictions.csv
+traditional_cases.csv
+traditional_summary.csv
+traditional_summary.md
+traditional_defect_evidence_confusion.csv
+evidence/*.png
+```
+
+`--calibrate-normal-root PATH` 会从 normal 样本生成每个 slot 的模板和阈值；
+`--template-dir PATH` 指向已标定的 slot template；`--geometry-thresholds PATH` 指向几何阈值
+CSV。上线验收时建议把 normal/stress normal 和 defect 都跑成独立输出目录，避免新一轮
+标定覆盖旧的 `calibration/` 产物。
+
+`traditional_predictions.csv` 是 fusion-compatible CSV，字段包括：
+
+```text
+part_id,side,view,slot_id,branch,pred_label,score,threshold,
+defect_type,evidence_type,gt_defect_type,reason,source_path,evidence_path,status
+```
+
+这里需要区分三件事：
+
+- `defect_type`：该传统分支能声称的候选类型，例如 `crack`、`surface`、`geometry_delta`。
+- `evidence_type`：证据形态，例如 `missing_mask`、`extra_mask`、`dark_line`、`texture_residual`。
+- `gt_defect_type`：从人工文件名/路径解析出的真实标签类型，只用于离线评估和报告。
+
+例如一个文件名为 `surface_*.png` 的样本被 `geometry` 命中时，正确解释是：
+“该 surface 样本有 geometry_delta 证据”，而不是“传统算法把它分类成 less/more”。
+`evidence_path` 指向每个分支的 overlay 图，便于解释为什么被判为
+`NG`/`SUSPECT`/`WARN`。如果输入已经是 slot crop，可以加 `--input-mode slot`。
+
+运行时默认逐张图片打印进度：
+
+```text
+[traditional] 1/100 dataset/...
+```
+
+`traditional_cases.csv` 会把多个 branch 行聚合到 `source_path + slot_id` 级别。
+`traditional_summary.csv` / `traditional_summary.md` 会报告：
+
+```text
+normal_total
+normal_false_positive
+false_positive_rate
+defect_total
+defect_false_negative
+false_negative_rate
+defect_recall
+unknown_total
+```
+
+`traditional_defect_evidence_confusion.csv` 和 summary markdown 里的
+`GT Defect Type vs Primary Evidence` 表会显示真实缺陷类型和传统主证据的对应关系，用于检查
+传统算子到底是在检测它擅长的结构/纹理/暗线证据，还是只是把样本判成了泛化 NG。
+
+标签默认从路径推断：`normal` / `normal_test` / `stress_normal` 计为 normal，
+`defect` 计为 defect。路径无法判断时会进入 `unknown_total`，不参与误报/漏报分母。
+如果一次输入目录标签很明确，也可以手动指定：
+
+```bash
+--label normal
+--label defect
+```
+
+如果不想打印逐图进度，可以加 `--no-progress`。
+
+图片复核可以用 stage 24，把 dense CSV 转成 contact sheet 和单张定位图。卡片会分开显示
+`GT` 和 `Evidence`，避免把 `geometry` 的 missing/extra 证据误读为真实缺陷类别。
+stage 24 会优先使用 stage 20 的 `evidence_path` 精细 mask；如果没有 evidence 图，则从
+`reason` 里的 `region=rXX_cYY` 生成 4x8 coarse region 热力框：
+
+```text
+red   missing_mask / raw_delta=less
+blue  extra_mask / raw_delta=more
+yellow dark_line
+orange texture_residual
+```
+
+```bash
+.venv/bin/python pipeline/24_visualize_traditional_results.py \
+  --predictions-csv results/c789_traditional/top_defect_semantic_v2_evidence/traditional_predictions.csv \
+  --cases-csv results/c789_traditional/top_defect_semantic_v2_evidence/traditional_cases.csv \
+  --output-dir results/c789_traditional/visual_reports_semantic_evidence \
+  --report-name top_defect_semantic_v2_evidence \
+  --mode defect-all
+```
+
+输出包括：
+
+```text
+top_defect_semantic_v2_evidence_defect-all_page01.jpg
+localization/*_localization.jpg
+```
+
+YOLO 第一版采用独立 Ultralytics fork，不把 Ultralytics 源码 vendoring 到 anomalib。
+anomalib 只负责把 C789 slot crop 和人工 bbox 标注导出为 YOLO 检测数据集，并把 YOLO
+推理结果接入 stage 18 融合。当前推荐先训练单类：
+
+```text
+defect
+```
+
+如果要专门采集一批 C789 YOLO 缺陷样本，可以每次在 6 个槽位都放缺陷件，然后运行：
+
+```bash
+.venv/bin/python pipeline/22_collect_c789_yolo_defects.py \
+  --hand left \
+  --position top \
+  --defect-type scratch \
+  --part-id yolo_batch001 \
+  --group-count 20 \
+  --images-per-group 1 \
+  --raw-root dataset/c789_yolo_raw \
+  --parts-root dataset/c789_yolo_parts \
+  --defect-output-dir dataset/c789_yolo_defect_images \
+  --overwrite
+```
+
+脚本会复用 stage 1 的相机采集和 stage 2 的 C789 预设裁剪，并用
+`--defect-slot-mode all` 把同一张满盘缺陷图的 `slot01`-`slot06` 全部输出为 defect。
+YOLO 待标注图不会做孔洞 inpaint/paint，stage 22 固定使用 `--hole-mask-method none`，
+保留 crop 中的真实孔洞外观。
+`--position bottom` 会自动使用 `c789_left_bottom_3x2`，裁剪数据仍按工作流写成
+`bottom_ZS32`。最终待标注图片在 `--defect-output-dir`，同目录会写
+`defect_image_manifest.csv`；完整 crop manifest 在 `--parts-root/part_crop_manifest.csv`。
+
+准备 YOLO 数据集前，必须先对 slot crop 图像人工标 bbox。不要在原始 `4024x3036`
+大图上标注，也不要把 `part_crop_manifest.csv` 里的 `slot_box` 当作缺陷框。缺少 bbox
+的 defect crop 默认会 fail-closed 报错，避免把缺陷图误导出为空负样本。bbox CSV
+应使用 crop 级 `processed_path` / `image_path` / `sample_id`；原图 `source_path` 会被拒绝。
+导出目录非空时默认拒绝重写，需要明确传 `--overwrite` 清理旧 `images/labels`：
+
+```bash
+.venv/bin/python pipeline/21_prepare_yolo_dataset.py \
+  --manifest dataset/c789_100_left_top_parts/part_crop_manifest.csv \
+  --annotations dataset/c789_100_left_top_parts/bbox_annotations.csv \
+  --output-root dataset/c789_yolo/left_top \
+  --positive-val-ratio 0.2 \
+  --normal-test-split val \
+  --preview-dir results/c789_yolo/left_top_bbox_previews \
+  --overwrite
+```
+
+导出结果包含：
+
+```text
+images/train, images/val, images/test
+labels/train, labels/val, labels/test
+data.yaml
+export_manifest.csv
+```
+
+`labels/*.txt` 使用 Ultralytics 检测格式：
+
+```text
+class_id x_center y_center width height
+```
+
+坐标全部归一化到 `[0,1]`。`normal` / `normal_test` crop 会导出为空 label 负样本；
+带 bbox 的 defect crop 会按 `--positive-val-ratio` 和 `--positive-test-ratio`
+以 source/sample 为单位确定性拆分，只增强训练集，不增强 val/test。
+
+Ultralytics fork 位于：
+
+```bash
+/home/yunjing/ultralytics-c789
+```
+
+最小训练命令：
+
+```bash
+cd /home/yunjing/ultralytics-c789
+python examples/c789/train.py \
+  --data-yaml /home/yunjing/anomalib/dataset/c789_yolo/left_top/data.yaml \
+  --model yolo26n.pt \
+  --epochs 100 \
+  --imgsz 1024 \
+  --batch 8 \
+  --device 0 \
+  --project /home/yunjing/anomalib/results/c789_yolo \
+  --name left_top_defect
+```
+
+6 个 slot 共用一个 YOLO 模型；最终验收必须按 `slot01`-`slot06` 分别统计召回率，
+确认没有某个 slot 系统性漏检。YOLO 推理结果写成 `yolo_predictions.csv` 后，通过
+stage 18 参与融合：
+
+```bash
+.venv/bin/python pipeline/18_fuse_inspection_results.py \
+  --branch-csv yolo=results/c789_yolo/yolo_predictions.csv \
+  --output-dir results/c789_yolo/fused
+```
+
+如果 full-slot YOLO 在少量缺陷上泛化差，先做同分布验证，再做 ROI-level YOLO。stage 25
+会按文件名里的 `gNNN` 采集组拆分：默认 `g002,g008` 作为验证组，训练组只增强 defect，
+验证组保持真实未增强图；normal 来源只采空 label 负样本，不做离线增强：
+
+```bash
+.venv/bin/python pipeline/25_prepare_yolo_same_dist_dataset.py \
+  --input-root /home/yunjing/ultralytics-c789/dataset/c789_all \
+  --normal-source-root /home/yunjing/ultralytics-c789/dataset/c789_all_balanced_yolo \
+  --output-root /home/yunjing/ultralytics-c789/dataset/c789_same_dist_yolo \
+  --val-groups g002 g008 \
+  --train-normal-limit 600 \
+  --val-normal-limit 150 \
+  --overwrite
+```
+
+stage 26 生成 ROI-level YOLO 数据集。`gt-center` 是诊断集：用标注 bbox 中心切 512x512
+ROI，用来判断“小图 + 少背景”是否提升 YOLO 能力；`tile` 是部署集：推理时不知道 bbox，
+因此用 512x512、stride 256 的网格覆盖 slot crop：
+
+```bash
+.venv/bin/python pipeline/26_prepare_yolo_roi_dataset.py \
+  --input-root /home/yunjing/ultralytics-c789/dataset/c789_all \
+  --normal-source-root /home/yunjing/ultralytics-c789/dataset/c789_all_balanced_yolo \
+  --output-root /home/yunjing/ultralytics-c789/dataset/c789_roi_gt_center_yolo \
+  --mode gt-center \
+  --roi-size 512 \
+  --stride 256 \
+  --val-groups g002 g008 \
+  --train-normal-ratio 2 \
+  --val-normal-limit 150 \
+  --overwrite
+
+.venv/bin/python pipeline/26_prepare_yolo_roi_dataset.py \
+  --input-root /home/yunjing/ultralytics-c789/dataset/c789_all \
+  --output-root /home/yunjing/ultralytics-c789/dataset/c789_roi_tile_yolo \
+  --mode tile \
+  --roi-size 512 \
+  --stride 256 \
+  --val-groups g002 g008 \
+  --overwrite
+```
+
+ROI 输出会写 `roi_manifest.csv`，其中包含 `roi_x1_in_slot` 等字段。为了避免训练到被
+ROI 边界截断的错误 bbox，stage 26 只把完整落入 ROI 的框写入 label；GT-centered 模式下
+源 bbox 太大、无法完整放入 512x512 ROI 的样本会写入 `roi_review_report.csv`，需要人工复核
+标注是否过宽或是否应该改用更大的 ROI。ROI 预测框映射回 slot 坐标时使用：
+
+```text
+slot_x = roi_x1_in_slot + pred_x_in_roi
+slot_y = roi_y1_in_slot + pred_y_in_roi
+```
+
+## 工业融合检测 MVP-1
+
+`pipeline/18_fuse_inspection_results.py` 是新的 fail-closed 融合入口。它不会覆盖
+`pipeline/12_geometry_eval.py` 生成的旧版 `fused_predictions.csv`，而是把现有
+`geometry_predictions.csv`、AnomalyDINO `predictions.csv`、可选 `quality_gate.csv` 和
+`registration_results.csv` 统一转换成：
+
+```text
+branch_predictions.csv
+fused_predictions.csv
+summary.md
+```
+
+最小用法：
+
+```bash
+.venv/bin/python pipeline/18_fuse_inspection_results.py \
+  --geometry-csv results/c789_100_hardened/left_top_geometry/manual_defect_fused/geometry_predictions.csv \
+  --anomaly-csv results/c789_100_hardened/left_top_anomaly_dino/reports/predictions.csv \
+  --output-dir results/c789_robustness_v2/fused
+```
+
+如果已经有多视角 manifest 或 fusion config，可以额外传：
+
+```bash
+--manifest results/c789_multiview/manifest.csv
+--fusion-config config/fusion/c789.yaml
+--required-view top:uniform
+--branch-csv traditional=results/c789_traditional/top_normal/traditional_predictions.csv
+--branch-csv yolo=results/c789_yolo/yolo_predictions.csv
+```
+
+当 required side/view 缺失时，融合结果会输出 `INVALID_CAPTURE`；quality 或 registration
+失败时输出 `RETAKE`；geometry、crack、AnomalyDINO、EfficientAD、YOLO 阳性时分别输出
+`NG_GEOMETRY`、`NG_CRACK`、`NG_ANOMALY`、`NG_GLOBAL`、`NG_YOLO`。启用
+`suspect_policy.near_threshold_ratio` 后，接近阈值但未阳性的分支会输出 `SUSPECT`。
+如果 `fusion_config.ok_requires.required_sides` 和 `required_views` 已配置，stage 18 会在
+没有 manifest 的情况下也根据 branch CSV 里的 `side/view` 检查缺失视角。
+
+注意：MVP-1 的最小 CSV 模式为了复用现有 geometry/anomaly 报告，不会默认强制要求
+quality gate 与 registration CSV。用于上线式严格 OK 判定时，应传入包含
+`ok_requires.quality_gate: PASS`、`ok_requires.registration: PASS`、`required_sides` 和
+`required_views` 的 `--fusion-config`。
+
+`pipeline/19_run_robustness_benchmark.py` 在 MVP-1 阶段不重跑模型或几何评估，
+因此不会生成大规模训练结果。它会枚举传入的 normal/defect/invalid root；如果某个输入图片
+没有任何 branch prediction，会计入 `missing_prediction_count`，避免 recall 被虚高。
+defect/normal/stress 输入会以 `benchmark_input` 写入 `branch_predictions.csv`；
+invalid 输入会以 `missing_prediction` 写入，并在详情里标记
+`not_evaluated/missing_prediction`，不计入 invalid reject 成功数。
+
+路径匹配优先使用 `part_id/sample_id/id`、完整路径和 resolved 路径；`basename/stem`
+只在唯一匹配时作为弱匹配使用，避免 clean/defect/stress/invalid 目录下同名图片互相污染。
+对无预测 defect 输入，benchmark 会尽量从文件名解析 `defect_type` 和 `slot_id`，让
+`by_defect_type.csv`、`by_slot.csv` 的分母包含漏检样本。示例：
+
+```bash
+.venv/bin/python pipeline/19_run_robustness_benchmark.py \
+  --clean-normal-root dataset/c789_100_left_top_parts/left/top/normal_test \
+  --stress-normal-root dataset/c789_stress_normal_group_split/locked/left/top \
+  --defect-root dataset/c789_100_left_top_parts/left/top/defect \
+  --geometry-csv results/c789_100_hardened/left_top_geometry/manual_defect_fused/geometry_predictions.csv \
+  --anomaly-predictions results/c789_100_hardened/left_top_anomaly_dino/reports/predictions.csv \
+  --output-dir results/c789_robustness_v2
+```
+
+输出包括 `robustness_summary.md`、`robustness_summary.csv`、`by_defect_type.csv`、
+`by_slot.csv`、`misses.csv`、`false_positives.csv`、`retake_cases.csv`。
+`robustness_summary.csv` 会报告 `defect_recall`/`fused_recall`、
+`geometry_recall`、`anomaly_dino_recall`、normal FP、stress normal FP 和
+invalid reject rate。这里的 `invalid_reject_rate` 只统计已评估并被拒绝的 invalid 样本；
+无预测 invalid 样本会进入 `not_evaluated_missing_prediction_count`。

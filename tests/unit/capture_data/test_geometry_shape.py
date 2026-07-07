@@ -27,6 +27,20 @@ def load_geometry_module() -> ModuleType:
     return module
 
 
+def load_evaluate_geometry_module() -> ModuleType:
+    """Load the geometry evaluator script from its file path."""
+    script_path = Path(__file__).resolve().parents[3] / "capture_data" / "evaluate_geometry_shape.py"
+    sys.path.insert(0, str(script_path.parent))
+    spec = importlib.util.spec_from_file_location("capture_data_evaluate_geometry_shape", script_path)
+    if spec is None or spec.loader is None:
+        msg = f"Could not load geometry evaluator script from {script_path}"
+        raise RuntimeError(msg)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def _rectangle_mask() -> np.ndarray:
     """Return a simple rectangular part mask."""
     mask = np.zeros((100, 130), dtype=bool)
@@ -234,3 +248,186 @@ def test_region_thresholds_do_not_let_one_edge_region_hide_another() -> None:
     assert thresholds[("slot01", "more", "r00_c01")] == 31.5
     assert defect_score.geometry_pred_label == 1
     assert defect_score.geometry_region == "r00_c01"
+
+
+def test_region_thresholds_keep_slot_fallback_when_normals_have_no_region_scores() -> None:
+    """Perfect locked-normal masks should still produce slot and global fallback thresholds."""
+    geometry = load_geometry_module()
+    locked_scores = [
+        geometry.GeometryScore(slot="slot01", geometry_score=0.0, geometry_type="less"),
+        geometry.GeometryScore(slot="slot02", geometry_score=0.0, geometry_type="more"),
+    ]
+
+    thresholds = geometry.calibrate_region_thresholds(locked_scores, margin_ratio=0.05)
+
+    assert thresholds[("slot01", "*", "*")] == 0.0
+    assert thresholds[("slot02", "*", "*")] == 0.0
+    assert thresholds[("*", "*", "*")] == 0.0
+
+
+def test_apply_thresholds_marks_empty_region_scores_as_ok_with_slot_fallback() -> None:
+    """A sample without region deviations should still be evaluated as geometry OK."""
+    geometry = load_geometry_module()
+    score = geometry.GeometryScore(slot="slot01", geometry_score=0.0, geometry_type="less")
+
+    geometry.apply_thresholds(
+        [score],
+        {
+            ("slot01", "*", "*"): 0.0,
+            ("*", "*", "*"): 0.0,
+        },
+    )
+
+    assert score.geometry_pred_label == 0
+    assert score.geometry_threshold == 0.0
+    assert score.threshold_lookup_level == "slot"
+    assert score.threshold_source == "slot01:*:*"
+
+
+def test_apply_thresholds_uses_ordered_fallback_levels() -> None:
+    """Threshold lookup should fall back through exact, slot/type, slot/region, slot, type, and global."""
+    geometry = load_geometry_module()
+    thresholds = {
+        ("slot01", "less", "r00_c00"): 100.0,
+        ("slot01", "less", "*"): 80.0,
+        ("slot01", "*", "r00_c02"): 70.0,
+        ("slot01", "*", "*"): 60.0,
+        ("*", "less", "*"): 50.0,
+        ("*", "*", "*"): 40.0,
+    }
+    scores = [
+        geometry.GeometryScore(
+            slot="slot01",
+            geometry_score=90.0,
+            geometry_type="less",
+            region_scores={"less:r00_c00": 90.0},
+        ),
+        geometry.GeometryScore(
+            slot="slot01",
+            geometry_score=90.0,
+            geometry_type="less",
+            region_scores={"less:r00_c09": 90.0},
+        ),
+        geometry.GeometryScore(
+            slot="slot01",
+            geometry_score=90.0,
+            geometry_type="more",
+            region_scores={"more:r00_c02": 90.0},
+        ),
+        geometry.GeometryScore(
+            slot="slot01",
+            geometry_score=90.0,
+            geometry_type="more",
+            region_scores={"more:r00_c09": 90.0},
+        ),
+        geometry.GeometryScore(
+            slot="slot02",
+            geometry_score=90.0,
+            geometry_type="less",
+            region_scores={"less:r00_c09": 90.0},
+        ),
+        geometry.GeometryScore(
+            slot="slot02",
+            geometry_score=90.0,
+            geometry_type="more",
+            region_scores={"more:r00_c09": 90.0},
+        ),
+    ]
+
+    geometry.apply_thresholds(scores, thresholds)
+
+    assert [score.threshold_lookup_level for score in scores] == [
+        "exact",
+        "slot_type",
+        "slot_region",
+        "slot",
+        "defect_type",
+        "global",
+    ]
+    assert [score.geometry_threshold for score in scores] == [100.0, 80.0, 70.0, 60.0, 50.0, 40.0]
+    assert scores[0].geometry_pred_label == 0
+    assert all(score.geometry_pred_label == 1 for score in scores[1:])
+
+
+def test_apply_thresholds_keeps_zero_exact_threshold() -> None:
+    """A configured 0.0 exact threshold should not be skipped in favor of a fallback."""
+    geometry = load_geometry_module()
+    score = geometry.GeometryScore(
+        slot="slot01",
+        geometry_score=1.0,
+        geometry_type="less",
+        region_scores={"less:r00_c00": 1.0},
+    )
+
+    geometry.apply_thresholds(
+        [score],
+        {
+            ("slot01", "less", "r00_c00"): 0.0,
+            ("slot01", "less", "*"): 10.0,
+        },
+    )
+
+    assert score.geometry_threshold == 0.0
+    assert score.threshold_lookup_level == "exact"
+    assert score.geometry_pred_label == 1
+
+
+def test_load_thresholds_adds_fallback_rows_for_legacy_csv(tmp_path: Path) -> None:
+    """Legacy exact threshold CSV rows should gain slot/type/global fallback entries at load time."""
+    geometry = load_geometry_module()
+    thresholds_csv = tmp_path / "geometry_thresholds.csv"
+    thresholds_csv.write_text(
+        "\n".join(
+            [
+                "slot,geometry_type,geometry_region,geometry_threshold",
+                "slot01,less,r00_c00,10.0",
+                "slot01,less,r00_c01,12.0",
+                "slot02,more,r00_c00,20.0",
+            ],
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    thresholds = geometry.load_thresholds(thresholds_csv)
+
+    assert thresholds[("slot01", "less", "r00_c00")] == 10.0
+    assert thresholds[("slot01", "less", "*")] == 12.0
+    assert thresholds[("slot01", "*", "r00_c00")] == 10.0
+    assert thresholds[("slot01", "*", "*")] == 12.0
+    assert thresholds[("*", "less", "*")] == 12.0
+    assert thresholds[("*", "*", "*")] == 20.0
+
+
+def test_threshold_rows_include_new_schema_and_fallback_diagnostics() -> None:
+    """Calibrated threshold CSV rows should expose both legacy and MVP-2 diagnostic columns."""
+    geometry = load_geometry_module()
+    evaluator = load_evaluate_geometry_module()
+    locked_scores = [
+        geometry.GeometryScore(
+            slot="slot01",
+            geometry_score=10.0,
+            geometry_type="less",
+            region_scores={"less:r00_c00": 10.0, "less:r00_c01": 20.0},
+        ),
+        geometry.GeometryScore(
+            slot="slot01",
+            geometry_score=30.0,
+            geometry_type="more",
+            region_scores={"more:r00_c00": 30.0},
+        ),
+    ]
+    thresholds = geometry.calibrate_region_thresholds(locked_scores, margin_ratio=0.0)
+
+    rows = evaluator._threshold_rows(locked_scores, thresholds, 0.0)
+    row_by_key = {(row["slot_id"], row["defect_type"], row["region_id"]): row for row in rows}
+
+    exact_row = row_by_key[("slot01", "less", "r00_c00")]
+    fallback_row = row_by_key[("slot01", "less", "*")]
+    assert exact_row["slot"] == "slot01"
+    assert exact_row["geometry_type"] == "less"
+    assert exact_row["geometry_threshold"] == exact_row["threshold"]
+    assert exact_row["threshold_source"] == "calibrated_exact"
+    assert fallback_row["threshold_source"] == "auto_fallback"
+    assert fallback_row["n_normal"] == 2
+    assert fallback_row["max_normal"] == 20.0

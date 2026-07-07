@@ -292,6 +292,100 @@ def test_archive_csv_appends_without_duplicate_header(tmp_path: Path) -> None:
     assert len(lines) == 3
 
 
+def test_quality_summary_text_shows_warn_reasons(tmp_path: Path) -> None:
+    """The dashboard quality text should expose WARN reasons for operators."""
+    demo = load_demo_module()
+    result = demo.FaceResult(
+        "top",
+        "正面",
+        tmp_path / "top.png",
+        tmp_path / "crops",
+        tmp_path / "pred.csv",
+        [demo.SlotResult("slot01", 0.1, 0.5, 0, tmp_path / "slot01.png")],
+        quality=demo.QualityReport(
+            status="WARN",
+            issues=["图像过暗: mean=12.0", "图像清晰度偏低: 1.0"],
+            image_mean=12.0,
+            image_std=1.0,
+            image_dark_pct=80.0,
+            image_clip_pct=0.0,
+            image_sharpness=1.0,
+            crop_mean_min=10.0,
+            crop_mean_max=14.0,
+            crop_mean_avg=12.0,
+            crop_std_avg=1.0,
+        ),
+    )
+
+    text = demo._quality_summary_text(result)
+
+    assert text.startswith("质量 WARN")
+    assert "图像过暗" in text
+    assert "图像清晰度偏低" in text
+
+
+def test_archive_rows_include_quality_status_and_reasons(tmp_path: Path) -> None:
+    """Slot and part archive rows should preserve quality status and warning reasons."""
+    demo = load_demo_module()
+    args = demo.build_parser().parse_args(["--output-dir", str(tmp_path / "run")])
+    face_configs = demo.resolve_face_configs(args)
+    quality = demo.QualityReport(
+        status="WARN",
+        issues=["饱和像素过多: 20.0%"],
+        image_mean=240.0,
+        image_std=5.0,
+        image_dark_pct=0.0,
+        image_clip_pct=20.0,
+        image_sharpness=10.0,
+        crop_mean_min=230.0,
+        crop_mean_max=245.0,
+        crop_mean_avg=240.0,
+        crop_std_avg=5.0,
+    )
+    top_result = demo.FaceResult(
+        "top",
+        "正面",
+        tmp_path / "top.png",
+        tmp_path / "crops_top",
+        tmp_path / "top.csv",
+        [demo.SlotResult("slot01", 0.1, 0.5, 0, tmp_path / "slot01.png")],
+        quality=quality,
+    )
+    bottom_result = demo.FaceResult(
+        "bottom",
+        "底面",
+        tmp_path / "bottom.png",
+        tmp_path / "crops_bottom",
+        tmp_path / "bottom.csv",
+        [demo.SlotResult("slot01", 0.2, 0.5, 0, tmp_path / "slot01_bottom.png")],
+        quality=demo.QualityReport(
+            status="OK",
+            issues=[],
+            image_mean=120.0,
+            image_std=20.0,
+            image_dark_pct=0.0,
+            image_clip_pct=0.0,
+            image_sharpness=100.0,
+            crop_mean_min=110.0,
+            crop_mean_max=130.0,
+            crop_mean_avg=120.0,
+            crop_std_avg=20.0,
+        ),
+    )
+    state = demo.DemoState()
+    state.results = {"top": top_result, "bottom": bottom_result}
+    state.active_index = len(demo.FACE_ORDER)
+
+    slot_rows = demo._slot_archive_rows(top_result, face_configs["top"], args, trace_path=tmp_path / "trace.json")
+    part_rows = demo._part_archive_rows(state, face_configs, args)
+
+    assert slot_rows[0]["quality_status"] == "WARN"
+    assert "饱和像素过多" in slot_rows[0]["quality_reasons"]
+    assert part_rows[0]["top_quality_status"] == "WARN"
+    assert "饱和像素过多" in part_rows[0]["top_quality_reasons"]
+    assert part_rows[0]["bottom_quality_status"] == "OK"
+
+
 def test_render_dashboard_returns_nonblank_canvas(tmp_path: Path) -> None:
     """The OpenCV dashboard renderer should be testable without opening a window."""
     demo = load_demo_module()

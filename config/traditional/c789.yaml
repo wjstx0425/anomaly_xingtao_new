@@ -1,0 +1,47 @@
+version: 1
+part_profile: c789
+description: Conservative C789 traditional-operator defaults for offline explainability checks.
+calibration:
+  max_images_per_slot: 96
+presets:
+  top: c789_left_top_3x2
+  bottom: c789_left_bottom_3x2
+operators:
+  registration:
+    enabled: true
+    mode: warn
+    min_area_ratio: 0.12
+    max_area_ratio: 0.78
+    expected_center_x_ratio: 0.5
+    expected_center_y_ratio: 0.5
+    max_center_shift_ratio: 0.28
+  geometry:
+    enabled: true
+    min_area_ratio: 0.12
+    max_area_ratio: 0.78
+    min_solidity: 0.45
+    threshold_mode: region
+    threshold_margin: 0.25
+  crack:
+    enabled: true
+    dark_delta: 45
+    min_length_ratio: 0.32
+    min_aspect_ratio: 4.0
+    min_component_area: 20
+  surface_texture:
+    enabled: true
+    residual_std_max: 42.0
+  feature_presence:
+    enabled: false
+    min_dark_feature_count: 1
+    max_dark_feature_count: 14
+yolo:
+  enabled: false
+  classes:
+    - crack
+    - less
+    - more
+    - corner
+    - surface
+    - deform
+  note: YOLO is reserved as a future branch. Provide a yolo_predictions.csv through stage 18 --branch-csv.

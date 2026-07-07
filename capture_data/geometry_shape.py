@@ -23,6 +23,16 @@ import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 IMAGE_EXTENSIONS = (".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff")
+ThresholdKey = tuple[str, str, str]
+WILDCARD = "*"
+THRESHOLD_LOOKUP_ORDER = (
+    "exact",
+    "slot_type",
+    "slot_region",
+    "slot",
+    "defect_type",
+    "global",
+)
 
 
 @dataclass(frozen=True)
@@ -41,6 +51,30 @@ class GeometryTemplate:
     def shape(self) -> tuple[int, int]:
         """Return template height and width."""
         return self.expected_body.shape
+
+
+@dataclass
+class GeometryDiff:
+    """Template difference masks and measurements for one aligned crop."""
+
+    aligned_mask: np.ndarray
+    missing_mask: np.ndarray
+    extra_mask: np.ndarray
+    geometry_score: float
+    geometry_type: str
+    geometry_region: str
+    less_score: float = 0.0
+    more_score: float = 0.0
+    missing_area: int = 0
+    extra_area: int = 0
+    dx: int = 0
+    dy: int = 0
+    iou: float = 0.0
+    missing_component_count: int = 0
+    extra_component_count: int = 0
+    missing_region: str = ""
+    extra_region: str = ""
+    region_scores: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -69,6 +103,8 @@ class GeometryScore:
     gt_label: int | None = None
     geometry_threshold: float | None = None
     geometry_pred_label: int | None = None
+    threshold_source: str = ""
+    threshold_lookup_level: str = ""
 
     def as_row(self) -> dict[str, str | int | float]:
         """Return a CSV-friendly row."""
@@ -82,6 +118,8 @@ class GeometryScore:
             "geometry_pred_label": "" if self.geometry_pred_label is None else self.geometry_pred_label,
             "geometry_type": self.geometry_type,
             "geometry_threshold": "" if self.geometry_threshold is None else self.geometry_threshold,
+            "threshold_source": self.threshold_source,
+            "threshold_lookup_level": self.threshold_lookup_level,
             "geometry_missing_area": self.missing_area,
             "geometry_extra_area": self.extra_area,
             "geometry_region": self.geometry_region,
@@ -437,7 +475,7 @@ def _component_stats_by_region(
     return largest_area, accepted_count, largest_region, region_scores
 
 
-def score_mask_against_template(
+def diff_mask_against_template(
     observed_mask: np.ndarray,
     template: GeometryTemplate,
     *,
@@ -446,10 +484,15 @@ def score_mask_against_template(
     min_component_area: int = 64,
     tolerance_px: int = 3,
     region_grid: tuple[int, int] = (4, 8),
-) -> GeometryScore:
-    """Score one observed body mask against a normal slot template."""
+) -> GeometryDiff:
+    """Return aligned less/more masks and measurements against a normal template."""
     observed = _resize_mask(observed_mask.astype(bool), template.shape)
-    dx, dy, iou = best_translation(observed, template.expected_body, search_radius=search_radius, coarse_step=coarse_step)
+    dx, dy, iou = best_translation(
+        observed,
+        template.expected_body,
+        search_radius=search_radius,
+        coarse_step=coarse_step,
+    )
     aligned = shift_mask(observed, dx=dx, dy=dy)
 
     tolerance = max(0, tolerance_px)
@@ -487,8 +530,10 @@ def score_mask_against_template(
     region_scores = {f"less:{region}": area for region, area in missing_region_scores.items()}
     region_scores.update({f"more:{region}": area for region, area in extra_region_scores.items()})
 
-    return GeometryScore(
-        slot=template.slot,
+    return GeometryDiff(
+        aligned_mask=aligned,
+        missing_mask=missing_mask,
+        extra_mask=extra_mask,
         geometry_score=float(max(missing_area, extra_area)),
         geometry_type=geometry_type,
         less_score=float(missing_area),
@@ -504,6 +549,46 @@ def score_mask_against_template(
         missing_region=missing_region,
         extra_region=extra_region,
         region_scores=region_scores,
+    )
+
+
+def score_mask_against_template(
+    observed_mask: np.ndarray,
+    template: GeometryTemplate,
+    *,
+    search_radius: int = 25,
+    coarse_step: int = 5,
+    min_component_area: int = 64,
+    tolerance_px: int = 3,
+    region_grid: tuple[int, int] = (4, 8),
+) -> GeometryScore:
+    """Score one observed body mask against a normal slot template."""
+    diff = diff_mask_against_template(
+        observed_mask,
+        template,
+        search_radius=search_radius,
+        coarse_step=coarse_step,
+        min_component_area=min_component_area,
+        tolerance_px=tolerance_px,
+        region_grid=region_grid,
+    )
+    return GeometryScore(
+        slot=template.slot,
+        geometry_score=diff.geometry_score,
+        geometry_type=diff.geometry_type,
+        less_score=diff.less_score,
+        more_score=diff.more_score,
+        missing_area=diff.missing_area,
+        extra_area=diff.extra_area,
+        dx=diff.dx,
+        dy=diff.dy,
+        iou=diff.iou,
+        missing_component_count=diff.missing_component_count,
+        extra_component_count=diff.extra_component_count,
+        geometry_region=diff.geometry_region,
+        missing_region=diff.missing_region,
+        extra_region=diff.extra_region,
+        region_scores=diff.region_scores,
     )
 
 
@@ -732,54 +817,142 @@ def calibrate_region_thresholds(
     scores: Iterable[GeometryScore],
     *,
     margin_ratio: float = 0.05,
-) -> dict[tuple[str, str, str], float]:
+) -> dict[ThresholdKey, float]:
     """Calibrate thresholds by slot, geometry type, and coarse boundary region."""
-    max_by_key: dict[tuple[str, str, str], float] = {}
+    max_by_key: dict[ThresholdKey, float] = {}
+    slots: set[str] = set()
     for score in scores:
+        slots.add(score.slot)
         for key_text, area in score.region_scores.items():
             geometry_type, region = key_text.split(":", maxsplit=1)
             key = (score.slot, geometry_type, region)
             max_by_key[key] = max(max_by_key.get(key, 0.0), float(area))
-    return {key: round(max_score * (1.0 + margin_ratio), 6) for key, max_score in sorted(max_by_key.items())}
+    if not max_by_key:
+        return add_threshold_fallbacks({(slot, WILDCARD, WILDCARD): 0.0 for slot in sorted(slots)})
+    exact_thresholds = {
+        key: round(max_score * (1.0 + margin_ratio), 6) for key, max_score in sorted(max_by_key.items())
+    }
+    return add_threshold_fallbacks(exact_thresholds)
 
 
-def load_thresholds(path: Path) -> dict[tuple[str, str, str], float]:
+def _fallback_items(thresholds: dict[ThresholdKey, float]) -> tuple[tuple[ThresholdKey, float], ...]:
+    """Return conservative fallback thresholds derived from existing rows."""
+    grouped: dict[ThresholdKey, list[float]] = defaultdict(list)
+    for (slot, geometry_type, region), threshold in thresholds.items():
+        if not slot or not geometry_type or not region:
+            continue
+        if slot == WILDCARD and geometry_type == WILDCARD and region == WILDCARD:
+            continue
+        value = float(threshold)
+        grouped[(slot, geometry_type, WILDCARD)].append(value)
+        grouped[(slot, WILDCARD, region)].append(value)
+        grouped[(slot, WILDCARD, WILDCARD)].append(value)
+        grouped[(WILDCARD, geometry_type, WILDCARD)].append(value)
+        grouped[(WILDCARD, WILDCARD, WILDCARD)].append(value)
+    return tuple((key, max(values)) for key, values in sorted(grouped.items()) if values)
+
+
+def add_threshold_fallbacks(thresholds: dict[ThresholdKey, float]) -> dict[ThresholdKey, float]:
+    """Return thresholds with missing wildcard fallback rows filled conservatively."""
+    completed = dict(thresholds)
+    for key, threshold in _fallback_items(thresholds):
+        completed.setdefault(key, round(float(threshold), 6))
+    return completed
+
+
+def _threshold_key_from_row(row: dict[str, str]) -> ThresholdKey | None:
+    """Parse a threshold CSV row key from legacy or MVP-2 columns."""
+    slot = (row.get("slot_id") or row.get("slot") or WILDCARD).strip() or WILDCARD
+    geometry_type = (row.get("defect_type") or row.get("geometry_type") or WILDCARD).strip() or WILDCARD
+    region = (row.get("region_id") or row.get("geometry_region") or WILDCARD).strip() or WILDCARD
+    value = row.get("threshold") or row.get("geometry_threshold")
+    if value in {None, ""}:
+        return None
+    return slot, geometry_type, region
+
+
+def load_thresholds(path: Path) -> dict[ThresholdKey, float]:
     """Load slot thresholds from CSV."""
-    thresholds: dict[tuple[str, str, str], float] = {}
+    thresholds: dict[ThresholdKey, float] = {}
     with path.open(newline="", encoding="utf-8") as file:
         for row in csv.DictReader(file):
-            slot = row.get("slot", "")
             value = row.get("geometry_threshold") or row.get("threshold")
-            if slot and value not in {None, ""}:
-                geometry_type = row.get("geometry_type") or "*"
-                region = row.get("geometry_region") or "*"
-                thresholds[(slot, geometry_type, region)] = float(value)
+            key = _threshold_key_from_row(row)
+            if key is not None and value not in {None, ""}:
+                thresholds[key] = float(value)
     if not thresholds:
         msg = f"No thresholds found in {path}"
         raise ValueError(msg)
-    return thresholds
+    return add_threshold_fallbacks(thresholds)
 
 
-def apply_thresholds(scores: Iterable[GeometryScore], thresholds: dict[tuple[str, str, str], float]) -> None:
+def _threshold_lookup_candidates(slot: str, geometry_type: str, region: str) -> tuple[tuple[str, ThresholdKey], ...]:
+    """Return threshold lookup keys in deterministic fallback order."""
+    return (
+        ("exact", (slot, geometry_type, region)),
+        ("slot_type", (slot, geometry_type, WILDCARD)),
+        ("slot_region", (slot, WILDCARD, region)),
+        ("slot", (slot, WILDCARD, WILDCARD)),
+        ("defect_type", (WILDCARD, geometry_type, WILDCARD)),
+        ("global", (WILDCARD, WILDCARD, WILDCARD)),
+    )
+
+
+def resolve_threshold(
+    thresholds: dict[ThresholdKey, float],
+    *,
+    slot: str,
+    geometry_type: str,
+    region: str,
+) -> tuple[float, str, ThresholdKey] | None:
+    """Resolve a threshold using exact and wildcard fallback levels."""
+    for lookup_level, key in _threshold_lookup_candidates(slot, geometry_type, region):
+        threshold = thresholds.get(key)
+        if threshold is not None:
+            return threshold, lookup_level, key
+    return None
+
+
+def apply_thresholds(scores: Iterable[GeometryScore], thresholds: dict[ThresholdKey, float]) -> None:
     """Attach thresholds and prediction labels to scores in-place."""
     for score in scores:
-        candidates: list[tuple[float, float, str, str, float]] = []
+        candidates: list[tuple[float, float, str, str, float, str, ThresholdKey]] = []
         for key_text, area in score.region_scores.items():
             geometry_type, region = key_text.split(":", maxsplit=1)
-            threshold = (
-                thresholds.get((score.slot, geometry_type, region))
-                or thresholds.get((score.slot, geometry_type, "*"))
-                or thresholds.get((score.slot, "*", "*"))
+            resolved = resolve_threshold(
+                thresholds,
+                slot=score.slot,
+                geometry_type=geometry_type,
+                region=region,
             )
-            if threshold is None:
+            if resolved is None:
                 continue
+            threshold, lookup_level, threshold_key = resolved
             ratio = area / threshold if threshold > 0 else (1_000_000_000.0 if area > 0 else 0.0)
-            candidates.append((ratio, area, geometry_type, region, threshold))
+            candidates.append((ratio, area, geometry_type, region, threshold, lookup_level, threshold_key))
         if not candidates:
+            slot_threshold = thresholds.get((score.slot, WILDCARD, WILDCARD))
+            if slot_threshold is not None:
+                score.geometry_threshold = slot_threshold
+                score.geometry_pred_label = 0
+                score.threshold_lookup_level = "slot"
+                score.threshold_source = ":".join((score.slot, WILDCARD, WILDCARD))
+                continue
+            global_threshold = thresholds.get((WILDCARD, WILDCARD, WILDCARD))
+            if global_threshold is not None:
+                score.geometry_threshold = global_threshold
+                score.geometry_pred_label = 0
+                score.threshold_lookup_level = "global"
+                score.threshold_source = ":".join((WILDCARD, WILDCARD, WILDCARD))
             continue
-        ratio, area, geometry_type, region, threshold = max(candidates, key=lambda item: item[0])
+        _, area, geometry_type, region, threshold, lookup_level, threshold_key = max(
+            candidates,
+            key=lambda item: item[0],
+        )
         score.geometry_score = float(area)
         score.geometry_type = geometry_type
         score.geometry_region = region
         score.geometry_threshold = threshold
         score.geometry_pred_label = int(area > threshold)
+        score.threshold_lookup_level = lookup_level
+        score.threshold_source = ":".join(threshold_key)

@@ -9,6 +9,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Added
 
 - 🚀 **pipeline**: Add and document the custom C789/FX11 inspection workflow, including model comparison, custom training, hardened stress-normal validation, live demo archive/OCR output, and manual geometry templates.
+- 🚀 **pipeline**: Add CSV-based fail-closed inspection fusion and robustness benchmark summaries for the custom industrial workflow.
+- 🚀 **pipeline**: Add geometry threshold fallback diagnostics for slot/type/region, slot, defect-type, and global lookup levels.
+- 🚀 **pipeline**: Add whole-image quality gate calibration, demo WARN reason reporting, and multi-view manifest generation.
+- 🚀 **pipeline**: Add a C789 YOLO defect collection helper that captures full trays, crops all six slots as defects, and flattens the crops for bbox annotation.
 
 ### Removed
 
@@ -19,6 +23,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Fixed
 
 - 🐞 **data**: Reject negative `--normal-test-ratio` values before normal/normal_test splitting.
+- 🐞 **pipeline**: Avoid ambiguous basename/stem fusion matches and keep invalid missing-prediction inputs out of invalid reject success counts.
 
 ## [v2.4.2] - 2026-05-15
 

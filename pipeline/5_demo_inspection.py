@@ -43,6 +43,10 @@ Examples:
     --save-ui-screenshot results/c789/demo_inspection/ui_preview.png
 
 Use capture_data/demo_inspection.py for the complete argument reference.
+
+Quality gate note:
+  --quality-gate warn continues model prediction and records WARN reasons in the UI, trace JSON,
+  and archive CSVs. Use --quality-gate fail only when bad captures should block prediction.
 """
 
 

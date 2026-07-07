@@ -43,7 +43,7 @@
 
 # Custom Industrial Defect Pipeline
 
-This fork includes a local C789/FX11 inspection workflow under [pipeline/](pipeline/README.md). The workflow covers image capture, part cropping, model training, inference review, live two-sided inspection, stress-normal validation, and manual C789 geometry templates.
+This fork includes a local C789/FX11 inspection workflow under [pipeline/](pipeline/README.md). The workflow covers image capture, part cropping, model training, inference review, live two-sided inspection, stress-normal validation, manual C789 geometry templates, quality gate calibration, multi-view manifests, CSV-based fail-closed fusion, and robustness benchmark summaries.
 
 ```bash
 uv sync

@@ -127,6 +127,8 @@ ARCHIVE_SLOT_FIELDS = (
     "status",
     "score",
     "threshold",
+    "quality_status",
+    "quality_reasons",
     "defect_regions_json",
     "part_number",
     "stamp_date",
@@ -156,6 +158,10 @@ ARCHIVE_PART_FIELDS = (
     "bottom_score",
     "top_status",
     "bottom_status",
+    "top_quality_status",
+    "top_quality_reasons",
+    "bottom_quality_status",
+    "bottom_quality_reasons",
     "top_crop_image",
     "bottom_crop_image",
 )
@@ -715,7 +721,11 @@ def slot_from_path(value: Any) -> str:
 
 def label_for_prediction(row: Any, threshold: float | None, inference: ModuleType, workflow: ModuleType) -> int:
     """Return the deployment prediction label for a prediction row."""
-    value = getattr(row, "deploy_pred_label", None) if threshold is not None else getattr(row, "anomalib_pred_label", None)
+    value = (
+        getattr(row, "deploy_pred_label", None)
+        if threshold is not None
+        else getattr(row, "anomalib_pred_label", None)
+    )
     return int(inference._coerce_optional_label(value, workflow))
 
 
@@ -1381,6 +1391,7 @@ def _quality_to_dict(quality: QualityReport | None) -> dict[str, Any] | None:
     return {
         "status": quality.status,
         "issues": quality.issues,
+        "reason": _quality_reasons_text(quality),
         "image_mean": quality.image_mean,
         "image_std": quality.image_std,
         "image_dark_pct": quality.image_dark_pct,
@@ -1393,6 +1404,23 @@ def _quality_to_dict(quality: QualityReport | None) -> dict[str, Any] | None:
         "reference_mean_avg": quality.reference_mean_avg,
         "reference_mean_delta": quality.reference_mean_delta,
     }
+
+
+def _quality_reasons_text(quality: QualityReport | None) -> str:
+    """Return compact quality issue text."""
+    if quality is None or not quality.issues:
+        return ""
+    return "; ".join(quality.issues)
+
+
+def _quality_summary_text(result: FaceResult | None) -> str:
+    """Return quality status plus warning reasons for UI display."""
+    if result is None or result.quality is None:
+        return "质量 待检"
+    reason = _quality_reasons_text(result.quality)
+    if not reason:
+        return f"质量 {result.quality.status}"
+    return f"质量 {result.quality.status}: {reason}"
 
 
 def _slot_result_to_dict(slot: SlotResult) -> dict[str, Any]:
@@ -1979,6 +2007,8 @@ def _slot_archive_rows(
     """Build per-slot archive rows for one face result."""
     created_at = datetime.now().isoformat(timespec="seconds")
     inspection_id = args.output_dir.name
+    quality_status = "" if result.quality is None else result.quality.status
+    quality_reasons = _quality_reasons_text(result.quality)
     rows = []
     for slot in result.slots:
         ocr = slot.stamp_ocr
@@ -1994,6 +2024,8 @@ def _slot_archive_rows(
                 "status": slot.status,
                 "score": _float_cell(slot.score),
                 "threshold": _float_cell(slot.threshold),
+                "quality_status": quality_status,
+                "quality_reasons": quality_reasons,
                 "defect_regions_json": _json_compact([defect_region_to_dict(region) for region in slot.defect_regions]),
                 "part_number": "" if ocr is None or ocr.part_number is None else ocr.part_number,
                 "stamp_date": "" if ocr is None or ocr.stamp_date is None else ocr.stamp_date,
@@ -2039,6 +2071,12 @@ def _part_archive_rows(
     bottom_result = state.results.get("bottom")
     top_slots = _slot_result_map(top_result)
     bottom_slots = _slot_result_map(bottom_result)
+    top_quality_status = "" if top_result is None or top_result.quality is None else top_result.quality.status
+    bottom_quality_status = (
+        "" if bottom_result is None or bottom_result.quality is None else bottom_result.quality.status
+    )
+    top_quality_reasons = _quality_reasons_text(None if top_result is None else top_result.quality)
+    bottom_quality_reasons = _quality_reasons_text(None if bottom_result is None else bottom_result.quality)
     slot_names = sorted(set(top_slots) | set(bottom_slots))
     rows = []
     for slot_name in slot_names:
@@ -2068,6 +2106,10 @@ def _part_archive_rows(
                 "bottom_score": "" if bottom_slot is None else _float_cell(bottom_slot.score),
                 "top_status": "" if top_slot is None else top_slot.status,
                 "bottom_status": "" if bottom_slot is None else bottom_slot.status,
+                "top_quality_status": top_quality_status,
+                "top_quality_reasons": top_quality_reasons,
+                "bottom_quality_status": bottom_quality_status,
+                "bottom_quality_reasons": bottom_quality_reasons,
                 "top_crop_image": "" if top_slot is None else str(top_slot.source_path),
                 "bottom_crop_image": "" if bottom_slot is None else str(bottom_slot.source_path),
             },
@@ -2122,10 +2164,22 @@ def _load_font(size: int, *, bold: bool = False) -> Any | None:
         return None
 
     font_paths = [
-        "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc" if bold else "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc" if bold else "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        (
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"
+            if bold
+            else "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
+        ),
+        (
+            "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc"
+            if bold
+            else "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"
+        ),
         "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        (
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+            if bold
+            else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+        ),
     ]
     for path in font_paths:
         if Path(path).is_file():
@@ -2377,6 +2431,16 @@ def _draw_face_result_panel(
         bold=bool(result and result.defect_slots),
         valign="center",
     )
+    if result is not None and result.quality is not None and result.quality.issues:
+        _draw_text_fit(
+            canvas,
+            _quality_summary_text(result),
+            (x1 + 20, y1 + 100, x2 - 24, y1 + 114),
+            size=12,
+            color=(120, 83, 28),
+            bold=True,
+            valign="center",
+        )
 
     slots = sorted(slot.name for slot in face.preset.slots)
     for index, slot in enumerate(slots):
@@ -2484,7 +2548,12 @@ def _draw_part_switcher(canvas: np.ndarray, state: DemoState, x: int, y: int) ->
         )
 
 
-def render_dashboard(state: DemoState, face_configs: dict[str, FaceConfig], width: int = 1600, height: int = 920) -> np.ndarray:
+def render_dashboard(
+    state: DemoState,
+    face_configs: dict[str, FaceConfig],
+    width: int = 1600,
+    height: int = 920,
+) -> np.ndarray:
     """Render the operator dashboard as a BGR image."""
     canvas = np.full((height, width, 3), (247, 247, 247), dtype=np.uint8)
 
@@ -2498,8 +2567,17 @@ def render_dashboard(state: DemoState, face_configs: dict[str, FaceConfig], widt
 
     top_title = face_configs["top"].title
     bottom_title = face_configs["bottom"].title
-    top_stage = "OK" if "top" in state.results and state.results["top"].status == "OK" else "NG" if "top" in state.results else "待检"
-    bottom_stage = "OK" if "bottom" in state.results and state.results["bottom"].status == "OK" else "NG" if "bottom" in state.results else "待检"
+    if "top" not in state.results:
+        top_stage = "待检"
+    else:
+        top_stage = "OK" if state.results["top"].status == "OK" else "NG"
+    bottom_stage = (
+        "OK"
+        if "bottom" in state.results and state.results["bottom"].status == "OK"
+        else "NG"
+        if "bottom" in state.results
+        else "待检"
+    )
     _draw_badge(
         canvas,
         f"{top_title} {top_stage}",
@@ -2529,25 +2607,60 @@ def render_dashboard(state: DemoState, face_configs: dict[str, FaceConfig], widt
 
     if state.current_image is not None:
         display, scale, off_x, off_y = _fit_image(state.current_image, image_w, image_h)
-        canvas[image_y + off_y : image_y + off_y + display.shape[0], image_x + off_x : image_x + off_x + display.shape[1]] = display
+        display_y = slice(image_y + off_y, image_y + off_y + display.shape[0])
+        display_x = slice(image_x + off_x, image_x + off_x + display.shape[1])
+        canvas[display_y, display_x] = display
         active_result = state.results.get(active_face)
         for slot in active_config.preset.slots:
             status, _score = _slot_status(active_result, slot.name)
-            color = _status_color("OK" if status == "OK" else "NG" if status == "NG" else "")
+            color = _status_color(
+                "OK" if status == "OK" else "NG" if status == "NG" else "",
+            )
             thickness = 4 if status == "NG" else 2
             box = _slot_box_in_display(slot, active_config, scale, off_x, off_y, (image_x, image_y))
             cv2.rectangle(canvas, (box[0], box[1]), (box[2], box[3]), color, thickness)
-            _draw_text(canvas, slot.name, (box[0] + 8, box[1] + 8), size=18, color=color, bold=True)
+            _draw_text(
+                canvas,
+                slot.name,
+                (box[0] + 8, box[1] + 8),
+                size=18,
+                color=color,
+                bold=True,
+            )
         _draw_defect_regions_in_display(canvas, active_result, scale, off_x, off_y, (image_x, image_y))
         if active_result is not None:
             result_color = _status_color(active_result.status)
-            _draw_badge(canvas, f"{active_title} {active_result.status}", (image_x + 18, image_y + 18, image_x + 170, image_y + 54), color=result_color, size=20)
+            _draw_badge(
+                canvas,
+                f"{active_title} {active_result.status}",
+                (image_x + 18, image_y + 18, image_x + 170, image_y + 54),
+                color=result_color,
+                size=20,
+            )
     else:
         cv2.circle(canvas, (image_x + 390, image_y + 252), 34, (210, 218, 228), -1)
-        _draw_text(canvas, "等待上料并按 s", (image_x + 442, image_y + 226), size=31, color=(92, 104, 120), bold=True)
-        _draw_text(canvas, f"下一步: {active_title}", (image_x + 442, image_y + 268), size=22, color=(122, 134, 150))
+        _draw_text(
+            canvas,
+            "等待上料并按 s",
+            (image_x + 442, image_y + 226),
+            size=31,
+            color=(92, 104, 120),
+            bold=True,
+        )
+        _draw_text(
+            canvas,
+            f"下一步: {active_title}",
+            (image_x + 442, image_y + 268),
+            size=22,
+            color=(122, 134, 150),
+        )
 
-    _draw_face_result_panel(canvas, face_configs["top"], state.results.get("top"), (1100, 112, 1566, 412))
+    _draw_face_result_panel(
+        canvas,
+        face_configs["top"],
+        state.results.get("top"),
+        (1100, 112, 1566, 412),
+    )
     _draw_face_result_panel(canvas, face_configs["bottom"], state.results.get("bottom"), (1100, 432, 1566, 732))
 
     summary_rect = (34, 768, 1566, 892)
@@ -2606,12 +2719,18 @@ def next_status_after_result(
     face_configs: dict[str, FaceConfig],
 ) -> str:
     """Return the next status message after a face result."""
+    quality_note = ""
+    if result.quality is not None and result.quality.status == "WARN":
+        quality_note = f"；{_quality_summary_text(result)}"
     if state.finished:
         first_title = face_configs[FACE_ORDER[0]].title
-        return f"{face.title}检测完成: {result.status}。双面检测结束，再按 s 检测下一件{first_title}"
+        return (
+            f"{face.title}检测完成: {result.status}{quality_note}。"
+            f"双面检测结束，再按 s 检测下一件{first_title}"
+        )
     next_face_key = state.active_face
     next_title = face_configs[next_face_key].title if next_face_key else FACE_ORDER[-1]
-    return f"{face.title}检测完成: {result.status}。请切换到{next_title}后按 s 检测"
+    return f"{face.title}检测完成: {result.status}{quality_note}。请切换到{next_title}后按 s 检测"
 
 
 def run_face(
@@ -2909,10 +3028,22 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Optional bottom output-root override for the initially selected part profile.",
     )
-    parser.add_argument("--top-ckpt-path", type=Path, help="Optional explicit top checkpoint for the initial profile.")
-    parser.add_argument("--bottom-ckpt-path", type=Path, help="Optional explicit bottom checkpoint for the initial profile.")
+    parser.add_argument(
+        "--top-ckpt-path",
+        type=Path,
+        help="Optional explicit top checkpoint for the initial profile.",
+    )
+    parser.add_argument(
+        "--bottom-ckpt-path",
+        type=Path,
+        help="Optional explicit bottom checkpoint for the initial profile.",
+    )
     parser.add_argument("--top-threshold", type=float, help="Optional explicit top threshold for the initial profile.")
-    parser.add_argument("--bottom-threshold", type=float, help="Optional explicit bottom threshold for the initial profile.")
+    parser.add_argument(
+        "--bottom-threshold",
+        type=float,
+        help="Optional explicit bottom threshold for the initial profile.",
+    )
     for part_key in PART_ORDER:
         for face_key in FACE_ORDER:
             parser.add_argument(
@@ -2960,8 +3091,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hdr-max-retries", type=int, default=1, help="Retries when fused image is clipped.")
     parser.add_argument("--hdr-max-clip-pct", type=float, default=12.0, help="Max acceptable clipped pixel percentage.")
 
-    parser.add_argument("--demo-top-image", type=Path, help="Use a local full-size top image instead of camera capture.")
-    parser.add_argument("--demo-bottom-image", type=Path, help="Use a local full-size bottom image instead of camera capture.")
+    parser.add_argument(
+        "--demo-top-image",
+        type=Path,
+        help="Use a local full-size top image instead of camera capture.",
+    )
+    parser.add_argument(
+        "--demo-bottom-image",
+        type=Path,
+        help="Use a local full-size bottom image instead of camera capture.",
+    )
     parser.add_argument("--mock-predictions", action="store_true", help="Use deterministic mock predictions.")
     parser.add_argument(
         "--mock-defects",
