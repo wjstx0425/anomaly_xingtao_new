@@ -859,7 +859,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         ) as handles:
             for group_index in range(1, args.group_count + 1):
                 group_id = f"group{group_index:03d}"
-                capture_group(handles, adapter, args, paths, group_id, prompt=input)
+                capture_group(handles, adapter, args, paths, group_id, prompt=input if args.manual_load else None)
     except KeyboardInterrupt:
         return 130
     return 0

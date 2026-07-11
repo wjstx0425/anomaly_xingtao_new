@@ -655,6 +655,38 @@ def test_capture_group_prompts_once_and_captures_all_fronts_before_backs(
     ]
 
 
+@pytest.mark.parametrize(("manual_load", "expected_prompt_count"), [(False, 0), (True, 4)])
+def test_main_prompts_twice_per_group_only_for_manual_load(
+    manual_load: bool,
+    expected_prompt_count: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Automatic capture must not block, while manual loading prompts per side."""
+    adapter = FakeAdapter()
+    received_prompts: list[object] = []
+    prompt_calls: list[str] = []
+    monkeypatch.setattr(multicam.HikvisionAdapter, "load", lambda: adapter)
+    monkeypatch.setattr(multicam, "create_session", lambda *_args: object())
+    monkeypatch.setattr("builtins.input", prompt_calls.append)
+
+    def record_group(*_args: object, prompt: object = None, **_kwargs: object) -> list[bool]:
+        received_prompts.append(prompt)
+        if callable(prompt):
+            prompt("front")
+            prompt("back")
+        return [True]
+
+    monkeypatch.setattr(multicam, "capture_group", record_group)
+    argv = ["--label", "normal", "--hdr", "--group-count", "2"]
+    if manual_load:
+        argv.append("--manual-load")
+
+    assert multicam.main(argv) == 0
+    assert len(received_prompts) == 2
+    assert all(callable(prompt) if manual_load else prompt is None for prompt in received_prompts)
+    assert len(prompt_calls) == expected_prompt_count
+
+
 def test_main_cleans_up_cameras_on_keyboard_interrupt(monkeypatch: pytest.MonkeyPatch) -> None:
     """An operator interrupt should return cleanly through the camera context."""
     adapter = FakeAdapter()
