@@ -5,9 +5,112 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
+import numpy as np
 import pytest
 
 from capture_data import collect_multicamera_dataset as multicam
+
+
+class FakeAdapter:
+    """Record camera lifecycle and acquisition calls without camera hardware."""
+
+    def __init__(self, *, fail_open: int | None = None, fail_start: int | None = None) -> None:
+        self.events: list[str] = []
+        self.fail_open = fail_open
+        self.fail_start = fail_start
+
+    def open(self, device: multicam.DeviceDescription, gain: float, fps: float) -> multicam.CameraHandle:
+        self.events.append(f"open:{device.index}")
+        if device.index == self.fail_open:
+            raise RuntimeError("open failed")
+        return multicam.CameraHandle(device, object(), SimpleNamespace(), bytearray(8), started=False)
+
+    def start(self, handle: multicam.CameraHandle) -> None:
+        self.events.append(f"start:{handle.device.index}")
+        if handle.device.index == self.fail_start:
+            raise RuntimeError("start failed")
+        handle.started = True
+
+    def trigger(self, handle: multicam.CameraHandle) -> None:
+        self.events.append(f"trigger:{handle.device.index}")
+
+    def read(self, handle: multicam.CameraHandle, timeout_ms: int) -> np.ndarray:
+        self.events.append(f"read:{handle.device.index}")
+        return np.full((1, 1, 3), handle.device.index, dtype=np.uint8)
+
+    def stop(self, handle: multicam.CameraHandle) -> None:
+        self.events.append(f"stop:{handle.device.index}")
+
+    def close(self, handle: multicam.CameraHandle) -> None:
+        self.events.append(f"close:{handle.device.index}")
+
+    def destroy(self, handle: multicam.CameraHandle) -> None:
+        self.events.append(f"destroy:{handle.device.index}")
+
+
+def make_devices() -> list[multicam.DeviceDescription]:
+    """Create three deterministic fake device descriptions."""
+    return [multicam.DeviceDescription(index, f"model-{index}", f"serial-{index}") for index in range(3)]
+
+
+def test_trigger_and_read_groups_all_triggers_before_reads() -> None:
+    """All cameras should receive a trigger before any camera is read."""
+    adapter = FakeAdapter()
+    handles = [adapter.open(device, gain=0.0, fps=10.0) for device in make_devices()]
+    adapter.events.clear()
+
+    frames = multicam.trigger_and_read(handles, adapter, timeout_ms=3000)
+
+    assert adapter.events == [
+        "trigger:0",
+        "trigger:1",
+        "trigger:2",
+        "read:0",
+        "read:1",
+        "read:2",
+    ]
+    assert len({id(handle.data_buf) for handle in handles}) == 3
+    assert len({id(handle.frame_info) for handle in handles}) == 3
+    assert len(frames) == 3
+
+
+@pytest.mark.parametrize((failure, failed_index), [("open", 2), ("start", 2)])
+def test_open_cameras_cleans_up_partial_setup_in_reverse_order(failure: str, failed_index: int) -> None:
+    """Successfully created handles should be cleaned exactly once after setup failure."""
+    adapter = FakeAdapter(
+        fail_open=failed_index if failure == "open" else None,
+        fail_start=failed_index if failure == "start" else None,
+    )
+
+    with pytest.raises(RuntimeError, match=f"{failure} failed"):
+        with multicam.open_cameras(make_devices(), adapter, gain=0.0, fps=10.0):
+            pytest.fail("setup failure should prevent entering the context")
+
+    cleanup_events = [
+        event for event in adapter.events if event.split(":", maxsplit=1)[0] in {"stop", "close", "destroy"}
+    ]
+    if failure == "open":
+        assert cleanup_events == [
+            "stop:1",
+            "close:1",
+            "destroy:1",
+            "stop:0",
+            "close:0",
+            "destroy:0",
+        ]
+    else:
+        assert cleanup_events == [
+            "close:2",
+            "destroy:2",
+            "stop:1",
+            "close:1",
+            "destroy:1",
+            "stop:0",
+            "close:0",
+            "destroy:0",
+        ]
 
 
 def test_default_device_order_maps_to_six_views() -> None:

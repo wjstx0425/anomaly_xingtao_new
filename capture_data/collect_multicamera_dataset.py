@@ -10,7 +10,224 @@ the mapping and CLI contract remain testable on machines without the MVS SDK.
 from __future__ import annotations
 
 import argparse
-from collections.abc import Sequence
+import ctypes
+import importlib
+import sys
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Protocol
+
+import numpy as np
+
+SDK_PATH = "/opt/MVS/Samples/64/Python/MvImport"
+FRAME_BUFFER_SIZE = 50 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class DeviceDescription:
+    """Stable camera identity reported by the Hikvision SDK."""
+
+    index: int
+    model: str
+    serial: str
+
+
+@dataclass
+class CameraHandle:
+    """Resources owned by one opened camera."""
+
+    device: DeviceDescription
+    cam: object
+    frame_info: object
+    data_buf: object
+    started: bool
+
+
+class CameraAdapter(Protocol):
+    """Camera operations used by grouped acquisition and lifecycle helpers."""
+
+    def open(self, device: DeviceDescription, gain: float, fps: float) -> CameraHandle: ...
+
+    def start(self, handle: CameraHandle) -> None: ...
+
+    def trigger(self, handle: CameraHandle) -> None: ...
+
+    def read(self, handle: CameraHandle, timeout_ms: int) -> np.ndarray: ...
+
+    def stop(self, handle: CameraHandle) -> None: ...
+
+    def close(self, handle: CameraHandle) -> None: ...
+
+    def destroy(self, handle: CameraHandle) -> None: ...
+
+
+def _decode_sdk_text(value: object) -> str:
+    """Decode a null-terminated SDK character array."""
+    return bytes(value).split(b"\0", maxsplit=1)[0].decode("utf-8", errors="replace")
+
+
+class HikvisionAdapter:
+    """Thin, lazily loaded adapter around the Hikvision MVS SDK."""
+
+    def __init__(self, sdk: object) -> None:
+        self.sdk = sdk
+
+    @classmethod
+    def load(cls) -> HikvisionAdapter:
+        """Load the MVS SDK only when hardware access is requested."""
+        if SDK_PATH not in sys.path:
+            sys.path.append(SDK_PATH)
+        return cls(importlib.import_module("MvCameraControl_class"))
+
+    def _check(self, ret: int, operation: str, device: DeviceDescription | None = None) -> None:
+        if ret == 0:
+            return
+        identity = "" if device is None else f" for device {device.index} serial {device.serial}"
+        raise RuntimeError(f"{operation} failed{identity}, ret=0x{ret:x}")
+
+    def list_devices(self) -> list[DeviceDescription]:
+        """Enumerate attached GigE and USB cameras."""
+        device_list = self.sdk.MV_CC_DEVICE_INFO_LIST()
+        device_types = self.sdk.MV_GIGE_DEVICE | self.sdk.MV_USB_DEVICE
+        self._check(self.sdk.MvCamera.MV_CC_EnumDevices(device_types, device_list), "EnumDevices")
+        devices: list[DeviceDescription] = []
+        for index in range(device_list.nDeviceNum):
+            info = ctypes.cast(
+                device_list.pDeviceInfo[index], ctypes.POINTER(self.sdk.MV_CC_DEVICE_INFO)
+            ).contents
+            if info.nTLayerType == self.sdk.MV_GIGE_DEVICE:
+                transport = info.SpecialInfo.stGigEInfo
+            else:
+                transport = info.SpecialInfo.stUsb3VInfo
+            devices.append(
+                DeviceDescription(
+                    index,
+                    _decode_sdk_text(transport.chModelName),
+                    _decode_sdk_text(transport.chSerialNumber),
+                )
+            )
+        return devices
+
+    def open(self, device: DeviceDescription, gain: float, fps: float) -> CameraHandle:
+        """Create, open, and configure a camera for software triggering."""
+        device_list = self.sdk.MV_CC_DEVICE_INFO_LIST()
+        device_types = self.sdk.MV_GIGE_DEVICE | self.sdk.MV_USB_DEVICE
+        self._check(self.sdk.MvCamera.MV_CC_EnumDevices(device_types, device_list), "EnumDevices", device)
+        if device.index < 0 or device.index >= device_list.nDeviceNum:
+            raise RuntimeError(f"device index {device.index} serial {device.serial} is unavailable")
+        info = ctypes.cast(
+            device_list.pDeviceInfo[device.index], ctypes.POINTER(self.sdk.MV_CC_DEVICE_INFO)
+        ).contents
+        cam = self.sdk.MvCamera()
+        created = False
+        try:
+            self._check(cam.MV_CC_CreateHandle(info), "CreateHandle", device)
+            created = True
+            self._check(cam.MV_CC_OpenDevice(self.sdk.MV_ACCESS_Exclusive, 0), "OpenDevice", device)
+            for name, value in (("ExposureAuto", 0), ("GainAuto", 0), ("TriggerMode", 1), ("TriggerSource", 7)):
+                self._check(cam.MV_CC_SetEnumValue(name, value), name, device)
+            self._check(cam.MV_CC_SetFloatValue("Gain", float(gain)), "Gain", device)
+            self._check(cam.MV_CC_SetBoolValue("AcquisitionFrameRateEnable", True), "FrameRateEnable", device)
+            self._check(cam.MV_CC_SetFloatValue("AcquisitionFrameRate", float(fps)), "FrameRate", device)
+        except Exception:
+            if created:
+                try:
+                    cam.MV_CC_CloseDevice()
+                except Exception:
+                    pass
+                try:
+                    cam.MV_CC_DestroyHandle()
+                except Exception:
+                    pass
+            raise
+        return CameraHandle(
+            device=device,
+            cam=cam,
+            frame_info=self.sdk.MV_FRAME_OUT_INFO_EX(),
+            data_buf=(ctypes.c_ubyte * FRAME_BUFFER_SIZE)(),
+            started=False,
+        )
+
+    def start(self, handle: CameraHandle) -> None:
+        """Start acquisition on one camera."""
+        self._check(handle.cam.MV_CC_StartGrabbing(), "StartGrabbing", handle.device)
+        handle.started = True
+
+    def trigger(self, handle: CameraHandle) -> None:
+        """Issue one software trigger."""
+        self._check(handle.cam.MV_CC_SetCommandValue("TriggerSoftware"), "TriggerSoftware", handle.device)
+
+    def read(self, handle: CameraHandle, timeout_ms: int) -> np.ndarray:
+        """Read and convert one triggered frame."""
+        self._check(
+            handle.cam.MV_CC_GetOneFrameTimeout(handle.data_buf, len(handle.data_buf), handle.frame_info, timeout_ms),
+            "GetOneFrameTimeout",
+            handle.device,
+        )
+        capture_path = str(Path(__file__).resolve().parent)
+        if capture_path not in sys.path:
+            sys.path.append(capture_path)
+        converter = importlib.import_module("collect_dataset").convert_frame_to_bgr
+        return converter(handle.data_buf, handle.frame_info)
+
+    def stop(self, handle: CameraHandle) -> None:
+        """Stop acquisition."""
+        self._check(handle.cam.MV_CC_StopGrabbing(), "StopGrabbing", handle.device)
+        handle.started = False
+
+    def close(self, handle: CameraHandle) -> None:
+        """Close the camera device."""
+        self._check(handle.cam.MV_CC_CloseDevice(), "CloseDevice", handle.device)
+
+    def destroy(self, handle: CameraHandle) -> None:
+        """Destroy the SDK camera handle."""
+        self._check(handle.cam.MV_CC_DestroyHandle(), "DestroyHandle", handle.device)
+
+
+def trigger_and_read(
+    handles: Sequence[CameraHandle], adapter: CameraAdapter, timeout_ms: int
+) -> list[np.ndarray]:
+    """Trigger every camera before reading any frame."""
+    for handle in handles:
+        adapter.trigger(handle)
+    return [adapter.read(handle, timeout_ms) for handle in handles]
+
+
+def close_cameras(handles: Sequence[CameraHandle], adapter: CameraAdapter) -> None:
+    """Best-effort cleanup of camera resources in reverse setup order."""
+    for handle in reversed(handles):
+        if handle.started:
+            try:
+                adapter.stop(handle)
+            except Exception:
+                pass
+        try:
+            adapter.close(handle)
+        except Exception:
+            pass
+        try:
+            adapter.destroy(handle)
+        except Exception:
+            pass
+
+
+@contextmanager
+def open_cameras(
+    devices: Sequence[DeviceDescription], adapter: CameraAdapter, gain: float, fps: float
+) -> Iterator[list[CameraHandle]]:
+    """Open and start cameras, cleaning partial setup on every exit path."""
+    handles: list[CameraHandle] = []
+    try:
+        for device in devices:
+            handle = adapter.open(device, gain, fps)
+            handles.append(handle)
+            adapter.start(handle)
+        yield handles
+    finally:
+        close_cameras(handles, adapter)
+
 
 ROUND_VIEWS: dict[str, tuple[str, str, str]] = {
     "front": ("front", "front_left", "front_right"),
