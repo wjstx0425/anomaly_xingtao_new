@@ -1,5 +1,17 @@
 # AGENTS Memory
 
+## ZS32 three-camera grouped HDR capture
+
+- On 2026-07-11, `capture_data/collect_multicamera_dataset.py` gained the Task 3 HDR round primitive.
+- `capture_exposure_pass()` sets one exposure on all handles, discards configured settle passes using grouped
+  trigger/read ordering, then returns one grouped final pass.
+- `capture_hdr_round()` captures the full three-camera short/long pair, fuses frames by physical camera slot with
+  selective exposure fusion, and retries the complete pair when any fused view exceeds `hdr_max_clip_pct`.
+- Any camera read exception propagates and no partial `HdrViewResult` list is returned. `attempt` is one-based and
+  shared by all three results in a successful/final round.
+- The local uv environment did not include pytest during Task 3; validation used `py_compile` and a direct Python
+  assertion harness covering exact event order, fusion pairing/options, whole-pair retry, and timeout propagation.
+
 ## GitHub upload guardrails
 
 - On 2026-07-02, before uploading local code to GitHub, the checkout had large local artifacts under `results/` (~70G), `dataset/` (~79G), and `c789_bottom/` (~3G).

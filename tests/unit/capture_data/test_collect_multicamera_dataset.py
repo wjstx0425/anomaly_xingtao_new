@@ -16,10 +16,18 @@ from capture_data import collect_multicamera_dataset as multicam
 class FakeAdapter:
     """Record camera lifecycle and acquisition calls without camera hardware."""
 
-    def __init__(self, *, fail_open: int | None = None, fail_start: int | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        fail_open: int | None = None,
+        fail_start: int | None = None,
+        fail_read: int | None = None,
+    ) -> None:
         self.events: list[str] = []
         self.fail_open = fail_open
         self.fail_start = fail_start
+        self.fail_read = fail_read
+        self.exposures: dict[int, float] = {}
 
     def open(self, device: multicam.DeviceDescription, gain: float, fps: float) -> multicam.CameraHandle:
         self.events.append(f"open:{device.index}")
@@ -38,7 +46,14 @@ class FakeAdapter:
 
     def read(self, handle: multicam.CameraHandle, timeout_ms: int) -> np.ndarray:
         self.events.append(f"read:{handle.device.index}")
-        return np.full((1, 1, 3), handle.device.index, dtype=np.uint8)
+        if handle.device.index == self.fail_read:
+            raise RuntimeError("read timed out")
+        exposure = int(self.exposures.get(handle.device.index, 0))
+        return np.full((1, 1, 3), exposure // 1000 + handle.device.index, dtype=np.uint8)
+
+    def set_exposure(self, handle: multicam.CameraHandle, exposure: float) -> None:
+        self.events.append(f"exposure:{handle.device.index}:{int(exposure)}")
+        self.exposures[handle.device.index] = exposure
 
     def stop(self, handle: multicam.CameraHandle) -> None:
         self.events.append(f"stop:{handle.device.index}")
@@ -53,6 +68,122 @@ class FakeAdapter:
 def make_devices() -> list[multicam.DeviceDescription]:
     """Create three deterministic fake device descriptions."""
     return [multicam.DeviceDescription(index, f"model-{index}", f"serial-{index}") for index in range(3)]
+
+
+def make_hdr_config(**overrides: object) -> SimpleNamespace:
+    """Create the minimal configuration consumed by grouped HDR capture."""
+    values: dict[str, object] = {
+        "short_exposure": 4000.0,
+        "long_exposure": 35000.0,
+        "hdr_settle_frames": 0,
+        "timeout_ms": 3000,
+        "align_hdr": False,
+        "short_dark_threshold": 70.0,
+        "long_clip_threshold": 245.0,
+        "blend_width": 18.0,
+        "blur_size": 31,
+        "hdr_max_retries": 0,
+        "hdr_max_clip_pct": 12.0,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def make_handles(adapter: FakeAdapter) -> list[multicam.CameraHandle]:
+    """Open three fake handles and clear setup events."""
+    handles = [adapter.open(device, gain=0.0, fps=10.0) for device in make_devices()]
+    adapter.events.clear()
+    return handles
+
+
+def test_capture_hdr_round_groups_exposures_and_fuses_matching_camera_frames(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each exposure is grouped across cameras and fusion keeps slot pairs together."""
+    adapter = FakeAdapter()
+    handles = make_handles(adapter)
+    fusion_pairs: list[tuple[int, int]] = []
+    fusion_options: list[dict[str, object]] = []
+
+    def fake_fuse(images: list[np.ndarray], **kwargs: object) -> np.ndarray:
+        fusion_pairs.append((int(images[0][0, 0, 0]), int(images[1][0, 0, 0])))
+        fusion_options.append(kwargs)
+        return images[0]
+
+    monkeypatch.setattr(multicam, "fuse_exposures", fake_fuse)
+
+    results = multicam.capture_hdr_round(handles, adapter, make_hdr_config())
+
+    assert adapter.events == [
+        "exposure:0:4000",
+        "exposure:1:4000",
+        "exposure:2:4000",
+        "trigger:0",
+        "trigger:1",
+        "trigger:2",
+        "read:0",
+        "read:1",
+        "read:2",
+        "exposure:0:35000",
+        "exposure:1:35000",
+        "exposure:2:35000",
+        "trigger:0",
+        "trigger:1",
+        "trigger:2",
+        "read:0",
+        "read:1",
+        "read:2",
+    ]
+    assert fusion_pairs == [(4, 35), (5, 36), (6, 37)]
+    assert fusion_options == [
+        {
+            "method": "selective",
+            "align": False,
+            "short_dark_threshold": 70.0,
+            "long_clip_threshold": 245.0,
+            "blend_width": 18.0,
+            "blur_size": 31,
+        }
+    ] * 3
+    assert [result.camera_slot for result in results] == [0, 1, 2]
+    assert [result.attempt for result in results] == [1, 1, 1]
+
+
+def test_capture_hdr_round_retries_the_complete_pair_when_any_view_is_clipped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A clipped view should repeat both exposure passes for every camera."""
+    adapter = FakeAdapter()
+    handles = make_handles(adapter)
+    fusion_count = 0
+
+    def fake_fuse(images: list[np.ndarray], **kwargs: object) -> np.ndarray:
+        nonlocal fusion_count
+        del images, kwargs
+        fusion_count += 1
+        value = 255 if fusion_count == 2 else 0
+        return np.full((1, 1, 3), value, dtype=np.uint8)
+
+    monkeypatch.setattr(multicam, "fuse_exposures", fake_fuse)
+
+    results = multicam.capture_hdr_round(
+        handles,
+        adapter,
+        make_hdr_config(hdr_max_retries=1, hdr_max_clip_pct=12.0),
+    )
+
+    assert adapter.events.count("exposure:0:4000") == 2
+    assert adapter.events.count("exposure:0:35000") == 2
+    assert [result.attempt for result in results] == [2, 2, 2]
+
+
+def test_capture_hdr_round_does_not_return_partial_results_after_timeout() -> None:
+    """Any camera timeout should fail the round instead of returning successful views."""
+    adapter = FakeAdapter(fail_read=1)
+    handles = make_handles(adapter)
+
+    with pytest.raises(RuntimeError, match="read timed out"):
+        multicam.capture_hdr_round(handles, adapter, make_hdr_config())
 
 
 def test_trigger_and_read_groups_all_triggers_before_reads() -> None:

@@ -19,7 +19,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+import cv2
 import numpy as np
+
+from capture_data.exposure_fusion import fuse_exposures
 
 SDK_PATH = "/opt/MVS/Samples/64/Python/MvImport"
 FRAME_BUFFER_SIZE = 50 * 1024 * 1024
@@ -55,6 +58,8 @@ class CameraAdapter(Protocol):
     def trigger(self, handle: CameraHandle) -> None: ...
 
     def read(self, handle: CameraHandle, timeout_ms: int) -> np.ndarray: ...
+
+    def set_exposure(self, handle: CameraHandle, exposure: float) -> None: ...
 
     def stop(self, handle: CameraHandle) -> None: ...
 
@@ -159,6 +164,14 @@ class HikvisionAdapter:
         """Issue one software trigger."""
         self._check(handle.cam.MV_CC_SetCommandValue("TriggerSoftware"), "TriggerSoftware", handle.device)
 
+    def set_exposure(self, handle: CameraHandle, exposure: float) -> None:
+        """Set a manual exposure time in microseconds."""
+        self._check(
+            handle.cam.MV_CC_SetFloatValue("ExposureTime", float(exposure)),
+            "ExposureTime",
+            handle.device,
+        )
+
     def read(self, handle: CameraHandle, timeout_ms: int) -> np.ndarray:
         """Read and convert one triggered frame."""
         self._check(
@@ -193,6 +206,104 @@ def trigger_and_read(
     for handle in handles:
         adapter.trigger(handle)
     return [adapter.read(handle, timeout_ms) for handle in handles]
+
+
+@dataclass(frozen=True)
+class HdrViewResult:
+    """Short, long, and fused images for one physical camera slot."""
+
+    camera_slot: int
+    short_image: np.ndarray
+    long_image: np.ndarray
+    fused_image: np.ndarray
+    fused_clip_pct: float
+    attempt: int
+
+
+class HdrCaptureConfig(Protocol):
+    """Configuration fields required by grouped HDR capture."""
+
+    short_exposure: float
+    long_exposure: float
+    hdr_settle_frames: int
+    timeout_ms: int
+    align_hdr: bool
+    short_dark_threshold: float
+    long_clip_threshold: float
+    blend_width: float
+    blur_size: int
+    hdr_max_retries: int
+    hdr_max_clip_pct: float
+
+
+def capture_exposure_pass(
+    handles: Sequence[CameraHandle],
+    adapter: CameraAdapter,
+    exposure: float,
+    settle_frames: int,
+    timeout_ms: int,
+) -> list[np.ndarray]:
+    """Set one exposure on all cameras and return one grouped frame pass."""
+    for handle in handles:
+        adapter.set_exposure(handle, exposure)
+    for _ in range(settle_frames):
+        trigger_and_read(handles, adapter, timeout_ms)
+    return trigger_and_read(handles, adapter, timeout_ms)
+
+
+def _image_clip_pct(image: np.ndarray, threshold: int = 250) -> float:
+    """Return the percentage of grayscale pixels at or above the clip threshold."""
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    return float(np.mean(gray >= threshold) * 100.0)
+
+
+def capture_hdr_round(
+    handles: Sequence[CameraHandle], adapter: CameraAdapter, config: HdrCaptureConfig
+) -> list[HdrViewResult]:
+    """Capture and fuse one complete short/long HDR pair for every camera."""
+    for attempt_index in range(config.hdr_max_retries + 1):
+        short_images = capture_exposure_pass(
+            handles,
+            adapter,
+            config.short_exposure,
+            config.hdr_settle_frames,
+            config.timeout_ms,
+        )
+        long_images = capture_exposure_pass(
+            handles,
+            adapter,
+            config.long_exposure,
+            config.hdr_settle_frames,
+            config.timeout_ms,
+        )
+        results: list[HdrViewResult] = []
+        for camera_slot, (short_image, long_image) in enumerate(
+            zip(short_images, long_images, strict=True)
+        ):
+            fused_image = fuse_exposures(
+                [short_image, long_image],
+                method="selective",
+                align=config.align_hdr,
+                short_dark_threshold=config.short_dark_threshold,
+                long_clip_threshold=config.long_clip_threshold,
+                blend_width=config.blend_width,
+                blur_size=config.blur_size,
+            )
+            results.append(
+                HdrViewResult(
+                    camera_slot=camera_slot,
+                    short_image=short_image,
+                    long_image=long_image,
+                    fused_image=fused_image,
+                    fused_clip_pct=_image_clip_pct(fused_image),
+                    attempt=attempt_index + 1,
+                )
+            )
+        if all(result.fused_clip_pct <= config.hdr_max_clip_pct for result in results):
+            return results
+        if attempt_index == config.hdr_max_retries:
+            return results
+    raise RuntimeError("unreachable HDR retry state")
 
 
 def close_cameras(handles: Sequence[CameraHandle], adapter: CameraAdapter) -> None:
