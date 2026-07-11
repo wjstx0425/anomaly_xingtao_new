@@ -2,6 +2,19 @@
 
 ## ZS32 three-camera grouped HDR capture (2026-07-11)
 
+### Serial-bound safe camera lifecycle follow-up (Task 2, 2026-07-11)
+
+- `HikvisionAdapter.open(device, gain)` must not configure `AcquisitionFrameRateEnable` or
+  `AcquisitionFrameRate`; application-level pacing remains separate from camera-node setup.
+- After `CreateHandle` succeeds, every setup failure including `KeyboardInterrupt` must independently attempt
+  `TriggerMode=0`, `CloseDevice`, and `DestroyHandle`. Normal/context cleanup uses reverse camera order and attempts
+  stop (when started), restore, close, and destroy even if an earlier cleanup operation fails.
+- Float camera writes query their SDK range through `self.sdk.MVCC_FLOATVALUE` and `MV_CC_GetFloatValue`, keeping the
+  module importable without the Hikvision SDK. Gain and every exposure write reject out-of-range and non-finite values.
+- Cleanup failures are aggregated. With no primary error they raise after all handles are processed; with a capture or
+  setup error they are reported as an exception note so the original exception identity is preserved.
+- This task is unit/static only and must not connect to cameras; hardware validation remains a separate explicit task.
+
 - Core module: `capture_data/collect_multicamera_dataset.py`; thin numbered wrapper:
   `pipeline/1_collect_multicamera_data.py`.
 - The six canonical view names are `front`, `front_left`, `front_right`, `back`, `back_left`, and `back_right`.

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import csv
 import ctypes
+import math
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -27,11 +28,15 @@ class FakeAdapter:
         fail_open: int | None = None,
         fail_start: int | None = None,
         fail_read: int | None = None,
+        fail_stop: int | None = None,
+        fail_restore: int | None = None,
     ) -> None:
         self.events: list[str] = []
         self.fail_open = fail_open
         self.fail_start = fail_start
         self.fail_read = fail_read
+        self.fail_stop = fail_stop
+        self.fail_restore = fail_restore
         self.exposures: dict[int, float] = {}
 
     def list_devices(self) -> list[multicam.DeviceDescription]:
@@ -67,6 +72,13 @@ class FakeAdapter:
 
     def stop(self, handle: multicam.CameraHandle) -> None:
         self.events.append(f"stop:{handle.device.index}")
+        if handle.device.index == self.fail_stop:
+            raise RuntimeError("stop failed")
+
+    def restore_continuous(self, handle: multicam.CameraHandle) -> None:
+        self.events.append(f"restore:{handle.device.index}")
+        if handle.device.index == self.fail_restore:
+            raise RuntimeError("restore failed")
 
     def close(self, handle: multicam.CameraHandle) -> None:
         self.events.append(f"close:{handle.device.index}")
@@ -97,6 +109,10 @@ class _SdkFrameInfo(ctypes.Structure):
     _fields_: list[tuple[str, object]] = []
 
 
+class _SdkFloatValue(ctypes.Structure):
+    _fields_ = [("fCurValue", ctypes.c_float), ("fMax", ctypes.c_float), ("fMin", ctypes.c_float)]
+
+
 class FakeSdk:
     """Small ctypes-compatible SDK double for enumeration snapshot tests."""
 
@@ -106,11 +122,21 @@ class FakeSdk:
     MV_CC_DEVICE_INFO = _SdkDeviceInfo
     MV_CC_DEVICE_INFO_LIST = _SdkDeviceInfoList
     MV_FRAME_OUT_INFO_EX = _SdkFrameInfo
+    MVCC_FLOATVALUE = _SdkFloatValue
 
-    def __init__(self, devices: list[multicam.DeviceDescription]) -> None:
+    def __init__(
+        self,
+        devices: list[multicam.DeviceDescription],
+        *,
+        fail_event: str | None = None,
+        interrupt_event: str | None = None,
+    ) -> None:
         self.enum_calls = 0
         self.created_serials: list[str] = []
         self.float_names: list[str] = []
+        self.events: list[str] = []
+        self.fail_event = fail_event
+        self.interrupt_event = interrupt_event
         self._infos: list[_SdkDeviceInfo] = []
         for device in devices:
             info = _SdkDeviceInfo()
@@ -120,7 +146,16 @@ class FakeSdk:
             self._infos.append(info)
         sdk = self
 
+        def record(event: str) -> int:
+            sdk.events.append(event)
+            if event == sdk.interrupt_event:
+                raise KeyboardInterrupt
+            return 1 if event == sdk.fail_event else 0
+
         class Camera:
+            def __init__(self) -> None:
+                self.serial = "unbound"
+
             @staticmethod
             def MV_CC_EnumDevices(_device_types: int, device_list: _SdkDeviceInfoList) -> int:
                 sdk.enum_calls += 1
@@ -129,33 +164,39 @@ class FakeSdk:
                 return 0
 
             def MV_CC_CreateHandle(self, info: _SdkDeviceInfo) -> int:
-                sdk.created_serials.append(multicam._decode_sdk_text(info.SpecialInfo.stUsb3VInfo.chSerialNumber))
-                return 0
+                self.serial = multicam._decode_sdk_text(info.SpecialInfo.stUsb3VInfo.chSerialNumber)
+                sdk.created_serials.append(self.serial)
+                return record(f"create:{self.serial}")
 
             def MV_CC_OpenDevice(self, _access: int, _key: int) -> int:
-                return 0
+                return record(f"open:{self.serial}")
 
-            def MV_CC_SetEnumValue(self, _name: str, _value: int) -> int:
-                return 0
+            def MV_CC_SetEnumValue(self, name: str, value: int) -> int:
+                return record(f"enum:{self.serial}:{name}:{value}")
 
             def MV_CC_SetFloatValue(self, name: str, _value: float) -> int:
                 sdk.float_names.append(name)
-                return 0
+                return record(f"float:{self.serial}:{name}:{_value:g}")
+
+            def MV_CC_GetFloatValue(self, name: str, value: _SdkFloatValue) -> int:
+                value.fMin = 0.0
+                value.fMax = 100000.0 if name == "ExposureTime" else 24.0
+                return record(f"get_float:{self.serial}:{name}")
 
             def MV_CC_SetBoolValue(self, _name: str, _value: bool) -> int:
                 return 0
 
             def MV_CC_StartGrabbing(self) -> int:
-                return 0
+                return record(f"start:{self.serial}")
 
             def MV_CC_StopGrabbing(self) -> int:
-                return 0
+                return record(f"stop:{self.serial}")
 
             def MV_CC_CloseDevice(self) -> int:
-                return 0
+                return record(f"close:{self.serial}")
 
             def MV_CC_DestroyHandle(self) -> int:
-                return 0
+                return record(f"destroy:{self.serial}")
 
         self.MvCamera = Camera
 
@@ -651,7 +692,7 @@ def test_trigger_and_read_groups_all_triggers_before_reads() -> None:
     assert len(frames) == 3
 
 
-@pytest.mark.parametrize((failure, failed_index), [("open", 2), ("start", 2)])
+@pytest.mark.parametrize(("failure", "failed_index"), [("open", 2), ("start", 2)])
 def test_open_cameras_cleans_up_partial_setup_in_reverse_order(failure: str, failed_index: int) -> None:
     """Successfully created handles should be cleaned exactly once after setup failure."""
     adapter = FakeAdapter(
@@ -664,28 +705,143 @@ def test_open_cameras_cleans_up_partial_setup_in_reverse_order(failure: str, fai
             pytest.fail("setup failure should prevent entering the context")
 
     cleanup_events = [
-        event for event in adapter.events if event.split(":", maxsplit=1)[0] in {"stop", "close", "destroy"}
+        event
+        for event in adapter.events
+        if event.split(":", maxsplit=1)[0] in {"stop", "restore", "close", "destroy"}
     ]
     if failure == "open":
         assert cleanup_events == [
             "stop:1",
+            "restore:1",
             "close:1",
             "destroy:1",
             "stop:0",
+            "restore:0",
             "close:0",
             "destroy:0",
         ]
     else:
         assert cleanup_events == [
+            "restore:2",
             "close:2",
             "destroy:2",
             "stop:1",
+            "restore:1",
             "close:1",
             "destroy:1",
             "stop:0",
+            "restore:0",
             "close:0",
             "destroy:0",
         ]
+
+
+def test_open_cameras_restores_every_camera_after_normal_exit() -> None:
+    """A successful session should stop, restore, close, and destroy every camera."""
+    adapter = FakeAdapter()
+
+    with multicam.open_cameras(make_devices(), adapter, gain=0.0):
+        adapter.events.append("capture")
+
+    assert adapter.events[-13:] == [
+        "capture",
+        "stop:2",
+        "restore:2",
+        "close:2",
+        "destroy:2",
+        "stop:1",
+        "restore:1",
+        "close:1",
+        "destroy:1",
+        "stop:0",
+        "restore:0",
+        "close:0",
+        "destroy:0",
+    ]
+
+
+@pytest.mark.parametrize("error_type", [RuntimeError, KeyboardInterrupt])
+def test_open_cameras_preserves_capture_base_exception_and_restores_all(error_type: type[BaseException]) -> None:
+    """Capture errors and interrupts should retain their identity after complete cleanup."""
+    adapter = FakeAdapter()
+
+    with pytest.raises(error_type, match="capture failed"):
+        with multicam.open_cameras(make_devices(), adapter, gain=0.0):
+            raise error_type("capture failed")
+
+    assert adapter.events[-12:] == [
+        "stop:2",
+        "restore:2",
+        "close:2",
+        "destroy:2",
+        "stop:1",
+        "restore:1",
+        "close:1",
+        "destroy:1",
+        "stop:0",
+        "restore:0",
+        "close:0",
+        "destroy:0",
+    ]
+
+
+def test_close_cameras_reports_stop_failure_after_finishing_all_cleanup() -> None:
+    """A stop failure must not block restore or cleanup of later cameras."""
+    adapter = FakeAdapter(fail_stop=2)
+    handles = make_handles(adapter)
+    for handle in handles:
+        handle.started = True
+
+    with pytest.raises(RuntimeError, match="stop failed"):
+        multicam.close_cameras(handles, adapter)
+
+    assert adapter.events == [
+        "stop:2",
+        "restore:2",
+        "close:2",
+        "destroy:2",
+        "stop:1",
+        "restore:1",
+        "close:1",
+        "destroy:1",
+        "stop:0",
+        "restore:0",
+        "close:0",
+        "destroy:0",
+    ]
+
+
+def test_close_cameras_reports_restore_failure_after_close_destroy_and_other_cameras() -> None:
+    """A restore failure must not block close, destroy, or cleanup of another camera."""
+    adapter = FakeAdapter(fail_restore=1)
+    handles = make_handles(adapter)
+
+    with pytest.raises(RuntimeError, match="restore failed"):
+        multicam.close_cameras(handles, adapter)
+
+    assert adapter.events == [
+        "restore:2",
+        "close:2",
+        "destroy:2",
+        "restore:1",
+        "close:1",
+        "destroy:1",
+        "restore:0",
+        "close:0",
+        "destroy:0",
+    ]
+
+
+def test_cleanup_error_is_reported_without_overriding_capture_error() -> None:
+    """Cleanup diagnostics should attach to, rather than replace, the capture exception."""
+    adapter = FakeAdapter(fail_restore=2)
+
+    with pytest.raises(ValueError, match="primary capture failure") as raised:
+        with multicam.open_cameras(make_devices(), adapter, gain=0.0):
+            raise ValueError("primary capture failure")
+
+    assert any("restore failed" in note for note in raised.value.__notes__)
+    assert adapter.events[-3:] == ["restore:0", "close:0", "destroy:0"]
 
 
 def test_select_devices_by_serial_ignores_enumeration_order() -> None:
@@ -794,6 +950,32 @@ def test_parser_rejects_hdr_only_flags_in_single_exposure_mode(hdr_only_flag: st
         multicam.build_parser().parse_args(["--label", "normal", hdr_only_flag])
 
 
+@pytest.mark.parametrize(
+    "invalid_option",
+    [
+        ["--group-count", "0"],
+        ["--images-per-group", "-1"],
+        ["--timeout-ms", "0"],
+        ["--exposure", "0"],
+        ["--short-exposure", "-1"],
+        ["--long-exposure", "0"],
+    ],
+)
+def test_parser_rejects_invalid_capture_ranges(invalid_option: list[str]) -> None:
+    """Invalid counts, timeouts, and exposures should fail before SDK loading."""
+    with pytest.raises(SystemExit):
+        multicam.build_parser().parse_args(["--label", "normal", *invalid_option])
+
+
+def test_parser_rejects_negative_future_capture_interval_default() -> None:
+    """Task 2 validation should protect the interval option introduced by Task 3."""
+    parser = multicam.build_parser()
+    parser.set_defaults(capture_interval=-0.1)
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--label", "normal"])
+
+
 def test_parser_rejects_removed_device_indices_option() -> None:
     """Formal capture should bind cameras only by stable serial identity."""
     with pytest.raises(SystemExit):
@@ -852,6 +1034,136 @@ def test_hikvision_adapter_open_rejects_cached_serial_mismatch() -> None:
 
     assert sdk.enum_calls == 1
     assert sdk.created_serials == []
+
+
+def test_hikvision_adapter_open_uses_range_validation_without_hardware_fps() -> None:
+    """Camera setup should validate gain and never touch hardware frame-rate nodes."""
+    sdk = FakeSdk(make_devices())
+    adapter = multicam.HikvisionAdapter(sdk)
+    device = adapter.list_devices()[0]
+
+    handle = adapter.open(device, gain=3.5)
+
+    assert sdk.events == [
+        "create:DA9805574",
+        "open:DA9805574",
+        "enum:DA9805574:ExposureAuto:0",
+        "enum:DA9805574:GainAuto:0",
+        "get_float:DA9805574:Gain",
+        "float:DA9805574:Gain:3.5",
+        "enum:DA9805574:TriggerMode:1",
+        "enum:DA9805574:TriggerSource:7",
+    ]
+    assert "AcquisitionFrameRate" not in sdk.float_names
+    assert all("AcquisitionFrameRateEnable" not in event for event in sdk.events)
+
+    adapter.restore_continuous(handle)
+    adapter.close(handle)
+    adapter.destroy(handle)
+
+
+def test_hikvision_adapter_restores_raw_handle_when_open_device_fails() -> None:
+    """A created raw handle should be restored, closed, and destroyed after open failure."""
+    sdk = FakeSdk(make_devices(), fail_event="open:DA9805574")
+    adapter = multicam.HikvisionAdapter(sdk)
+    device = adapter.list_devices()[0]
+
+    with pytest.raises(RuntimeError, match="OpenDevice failed"):
+        adapter.open(device, gain=0.0)
+
+    assert sdk.events == [
+        "create:DA9805574",
+        "open:DA9805574",
+        "enum:DA9805574:TriggerMode:0",
+        "close:DA9805574",
+        "destroy:DA9805574",
+    ]
+
+
+@pytest.mark.parametrize("interrupt", [False, True])
+def test_hikvision_adapter_restores_after_failure_following_trigger_mode(interrupt: bool) -> None:
+    """Any BaseException after software trigger setup should roll the raw handle back."""
+    event = "enum:DA9805574:TriggerSource:7"
+    sdk = FakeSdk(
+        make_devices(),
+        fail_event=None if interrupt else event,
+        interrupt_event=event if interrupt else None,
+    )
+    adapter = multicam.HikvisionAdapter(sdk)
+    device = adapter.list_devices()[0]
+    expected_error: type[BaseException] = KeyboardInterrupt if interrupt else RuntimeError
+
+    with pytest.raises(expected_error):
+        adapter.open(device, gain=0.0)
+
+    assert sdk.events == [
+        "create:DA9805574",
+        "open:DA9805574",
+        "enum:DA9805574:ExposureAuto:0",
+        "enum:DA9805574:GainAuto:0",
+        "get_float:DA9805574:Gain",
+        "float:DA9805574:Gain:0",
+        "enum:DA9805574:TriggerMode:1",
+        "enum:DA9805574:TriggerSource:7",
+        "enum:DA9805574:TriggerMode:0",
+        "close:DA9805574",
+        "destroy:DA9805574",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "minimum", "maximum"),
+    [
+        ("Gain", -0.5, 0.0, 24.0),
+        ("Gain", 25.0, 0.0, 24.0),
+        ("ExposureTime", 100001.0, 0.0, 100000.0),
+    ],
+)
+def test_validate_float_range_reports_parameter_value_and_bounds(
+    name: str, value: float, minimum: float, maximum: float
+) -> None:
+    """SDK range errors should expose the requested parameter and legal bounds."""
+    sdk = FakeSdk(make_devices())
+    adapter = multicam.HikvisionAdapter(sdk)
+    device = adapter.list_devices()[0]
+    handle = adapter.open(device, gain=0.0)
+
+    with pytest.raises(
+        ValueError,
+        match=rf"{name}.*{value}.*{minimum}.*{maximum}",
+    ):
+        adapter.validate_float_range(handle.cam, name, value)
+
+
+@pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf])
+def test_validate_float_range_rejects_non_finite_values(value: float) -> None:
+    """NaN and infinities must be rejected before a camera node is written."""
+    sdk = FakeSdk(make_devices())
+    adapter = multicam.HikvisionAdapter(sdk)
+    device = adapter.list_devices()[0]
+    handle = adapter.open(device, gain=0.0)
+
+    with pytest.raises(ValueError, match="Gain.*finite"):
+        adapter.validate_float_range(handle.cam, "Gain", value)
+
+
+def test_set_exposure_validates_every_write() -> None:
+    """Single and HDR callers share one range check before each exposure write."""
+    sdk = FakeSdk(make_devices())
+    adapter = multicam.HikvisionAdapter(sdk)
+    device = adapter.list_devices()[0]
+    handle = adapter.open(device, gain=0.0)
+    sdk.events.clear()
+
+    adapter.set_exposure(handle, 7000.0)
+    adapter.set_exposure(handle, 40000.0)
+
+    assert sdk.events == [
+        "get_float:DA9805574:ExposureTime",
+        "float:DA9805574:ExposureTime:7000",
+        "get_float:DA9805574:ExposureTime",
+        "float:DA9805574:ExposureTime:40000",
+    ]
 
 
 def test_main_normalizes_default_fps_for_capture_pacing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1029,14 +1341,17 @@ def test_main_cleans_up_cameras_on_keyboard_interrupt(monkeypatch: pytest.Monkey
     assert adapter.events.count("open:0") == 1
     assert adapter.events.count("open:1") == 1
     assert adapter.events.count("open:2") == 1
-    assert adapter.events[-9:] == [
+    assert adapter.events[-12:] == [
         "stop:2",
+        "restore:2",
         "close:2",
         "destroy:2",
         "stop:1",
+        "restore:1",
         "close:1",
         "destroy:1",
         "stop:0",
+        "restore:0",
         "close:0",
         "destroy:0",
     ]

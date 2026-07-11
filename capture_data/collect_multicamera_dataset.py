@@ -13,6 +13,8 @@ import argparse
 import csv
 import ctypes
 import importlib
+import logging
+import math
 import re
 import sys
 import time
@@ -33,6 +35,7 @@ else:
 
 SDK_PATH = "/opt/MVS/Samples/64/Python/MvImport"
 FRAME_BUFFER_SIZE = 50 * 1024 * 1024
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -83,6 +86,8 @@ class CameraAdapter(Protocol):
     def set_exposure(self, handle: CameraHandle, exposure: float) -> None: ...
 
     def stop(self, handle: CameraHandle) -> None: ...
+
+    def restore_continuous(self, handle: CameraHandle) -> None: ...
 
     def close(self, handle: CameraHandle) -> None: ...
 
@@ -159,32 +164,50 @@ class HikvisionAdapter:
                 f"requested {device.serial}, enumerated {cached_serial}"
             )
         cam = self.sdk.MvCamera()
-        created = False
+        handle: CameraHandle | None = None
         try:
             self._check(cam.MV_CC_CreateHandle(info), "CreateHandle", device)
-            created = True
+            handle = CameraHandle(device=device, cam=cam, frame_info=None, data_buf=None, started=False)
             self._check(cam.MV_CC_OpenDevice(self.sdk.MV_ACCESS_Exclusive, 0), "OpenDevice", device)
-            for name, value in (("ExposureAuto", 0), ("GainAuto", 0), ("TriggerMode", 1), ("TriggerSource", 7)):
+            for name, value in (("ExposureAuto", 0), ("GainAuto", 0)):
                 self._check(cam.MV_CC_SetEnumValue(name, value), name, device)
+            self.validate_float_range(cam, "Gain", gain)
             self._check(cam.MV_CC_SetFloatValue("Gain", float(gain)), "Gain", device)
-        except Exception:
-            if created:
-                try:
-                    cam.MV_CC_CloseDevice()
-                except Exception:
-                    pass
-                try:
-                    cam.MV_CC_DestroyHandle()
-                except Exception:
-                    pass
+            for name, value in (("TriggerMode", 1), ("TriggerSource", 7)):
+                self._check(cam.MV_CC_SetEnumValue(name, value), name, device)
+            handle.frame_info = self.sdk.MV_FRAME_OUT_INFO_EX()
+            handle.data_buf = (ctypes.c_ubyte * FRAME_BUFFER_SIZE)()
+        except BaseException as error:
+            if handle is not None:
+                cleanup_errors = _cleanup_camera_handles([handle], self, include_stop=False)
+                _report_cleanup_errors(error, cleanup_errors)
             raise
-        return CameraHandle(
-            device=device,
-            cam=cam,
-            frame_info=self.sdk.MV_FRAME_OUT_INFO_EX(),
-            data_buf=(ctypes.c_ubyte * FRAME_BUFFER_SIZE)(),
-            started=False,
-        )
+        if handle is None:  # pragma: no cover - CreateHandle success always assigns it
+            raise RuntimeError("camera handle setup ended without a handle")
+        return handle
+
+    def validate_float_range(self, cam: object, name: str, value: float) -> None:
+        """Validate a finite float value against one SDK camera node range.
+
+        Args:
+            cam: Open Hikvision SDK camera object.
+            name: Float node name.
+            value: Requested node value.
+
+        Raises:
+            RuntimeError: If the SDK range query fails.
+            ValueError: If the value is non-finite or outside the SDK range.
+        """
+        if not math.isfinite(value):
+            raise ValueError(f"{name} requested value {value} must be finite")
+        float_value = self.sdk.MVCC_FLOATVALUE()
+        self._check(cam.MV_CC_GetFloatValue(name, float_value), f"GetFloatValue({name})")
+        minimum = float(float_value.fMin)
+        maximum = float(float_value.fMax)
+        if value < minimum or value > maximum:
+            raise ValueError(
+                f"{name} requested value {value} is outside SDK range [{minimum}, {maximum}]"
+            )
 
     def start(self, handle: CameraHandle) -> None:
         """Start acquisition on one camera."""
@@ -197,6 +220,7 @@ class HikvisionAdapter:
 
     def set_exposure(self, handle: CameraHandle, exposure: float) -> None:
         """Set a manual exposure time in microseconds."""
+        self.validate_float_range(handle.cam, "ExposureTime", exposure)
         self._check(
             handle.cam.MV_CC_SetFloatValue("ExposureTime", float(exposure)),
             "ExposureTime",
@@ -220,6 +244,17 @@ class HikvisionAdapter:
         """Stop acquisition."""
         self._check(handle.cam.MV_CC_StopGrabbing(), "StopGrabbing", handle.device)
         handle.started = False
+
+    def restore_continuous(self, handle: CameraHandle) -> None:
+        """Restore continuous acquisition before releasing a camera.
+
+        Args:
+            handle: Camera whose trigger mode should be disabled.
+
+        Raises:
+            RuntimeError: If the SDK cannot disable trigger mode.
+        """
+        self._check(handle.cam.MV_CC_SetEnumValue("TriggerMode", 0), "TriggerMode", handle.device)
 
     def close(self, handle: CameraHandle) -> None:
         """Close the camera device."""
@@ -376,22 +411,69 @@ def capture_hdr_round(
     raise RuntimeError("unreachable HDR retry state")
 
 
-def close_cameras(handles: Sequence[CameraHandle], adapter: CameraAdapter) -> None:
-    """Best-effort cleanup of camera resources in reverse setup order."""
+def _cleanup_camera_handles(
+    handles: Sequence[CameraHandle],
+    adapter: CameraAdapter,
+    *,
+    include_stop: bool = True,
+) -> list[tuple[str, DeviceDescription, BaseException]]:
+    """Attempt every cleanup operation and return all failures."""
+    errors: list[tuple[str, DeviceDescription, BaseException]] = []
     for handle in reversed(handles):
-        if handle.started:
+        operations: list[tuple[str, Callable[[CameraHandle], None]]] = []
+        if include_stop and handle.started:
+            operations.append(("stop", adapter.stop))
+        operations.extend(
+            (
+                ("restore", adapter.restore_continuous),
+                ("close", adapter.close),
+                ("destroy", adapter.destroy),
+            )
+        )
+        for operation, callback in operations:
             try:
-                adapter.stop(handle)
-            except Exception:
-                pass
-        try:
-            adapter.close(handle)
-        except Exception:
-            pass
-        try:
-            adapter.destroy(handle)
-        except Exception:
-            pass
+                callback(handle)
+            except BaseException as error:
+                errors.append((operation, handle.device, error))
+    return errors
+
+
+def _cleanup_message(errors: Sequence[tuple[str, DeviceDescription, BaseException]]) -> str:
+    """Format cleanup failures with camera identities."""
+    details = "; ".join(
+        f"{operation} device {device.index} serial {device.serial}: {error}"
+        for operation, device, error in errors
+    )
+    return f"camera cleanup failed: {details}"
+
+
+def _report_cleanup_errors(
+    primary_error: BaseException,
+    cleanup_errors: Sequence[tuple[str, DeviceDescription, BaseException]],
+) -> None:
+    """Report cleanup failures without replacing an active primary exception."""
+    if not cleanup_errors:
+        return
+    message = _cleanup_message(cleanup_errors)
+    if hasattr(primary_error, "add_note"):
+        primary_error.add_note(message)
+    else:  # pragma: no cover - Python 3.10 compatibility
+        LOGGER.error(message)
+
+
+def close_cameras(handles: Sequence[CameraHandle], adapter: CameraAdapter) -> None:
+    """Clean every camera in reverse order and report all cleanup failures.
+
+    Args:
+        handles: Camera handles to release.
+        adapter: Camera operations used for cleanup.
+
+    Raises:
+        RuntimeError: After all cleanup attempts if any operation failed.
+    """
+    errors = _cleanup_camera_handles(handles, adapter)
+    if errors:
+        raise RuntimeError(_cleanup_message(errors)) from errors[0][2]
 
 
 @contextmanager
@@ -406,7 +488,10 @@ def open_cameras(
             handles.append(handle)
             adapter.start(handle)
         yield handles
-    finally:
+    except BaseException as error:
+        _report_cleanup_errors(error, _cleanup_camera_handles(handles, adapter))
+        raise
+    else:
         close_cameras(handles, adapter)
 
 
@@ -861,6 +946,20 @@ class _CaptureArgumentParser(argparse.ArgumentParser):
                 self.error("--save-hdr-sources and --align-hdr require --hdr")
             if parsed.label == "defect" and not parsed.defect_type.strip():
                 self.error("the following arguments are required for defect capture: --defect-type")
+            positive_options = (
+                ("group_count", "--group-count"),
+                ("images_per_group", "--images-per-group"),
+                ("timeout_ms", "--timeout-ms"),
+                ("exposure", "--exposure"),
+                ("short_exposure", "--short-exposure"),
+                ("long_exposure", "--long-exposure"),
+            )
+            for attribute, option in positive_options:
+                if getattr(parsed, attribute) <= 0:
+                    self.error(f"{option} must be greater than zero")
+            capture_interval = getattr(parsed, "capture_interval", None)
+            if capture_interval is not None and capture_interval < 0:
+                self.error("--capture-interval must be greater than or equal to zero")
         return parsed
 
 
