@@ -4,6 +4,10 @@
 
 ### Serial-bound safe camera lifecycle follow-up (Task 2, 2026-07-11)
 
+- Reviewer follow-up: `_CaptureArgumentParser.parse_args()` now normalizes an omitted `--fps` to `10.0` and rejects
+  non-finite or non-positive `--exposure`, `--short-exposure`, `--long-exposure`, and `--fps` values before
+  `HikvisionAdapter.load()` can run. Keep this validation in the SDK-free parser rather than moving it back into
+  `main()`.
 - `HikvisionAdapter.open(device, gain)` must not configure `AcquisitionFrameRateEnable` or
   `AcquisitionFrameRate`; application-level pacing remains separate from camera-node setup.
 - After `CreateHandle` succeeds, every setup failure including `KeyboardInterrupt` must independently attempt

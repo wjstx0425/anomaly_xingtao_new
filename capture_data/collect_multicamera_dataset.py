@@ -939,6 +939,7 @@ class _CaptureArgumentParser(argparse.ArgumentParser):
     ) -> argparse.Namespace:
         """Allow discovery alone while validating capture-specific options."""
         parsed = super().parse_args(args, namespace)
+        parsed.fps = 10.0 if parsed.fps is None else parsed.fps
         if not parsed.list_devices:
             if parsed.label is None:
                 self.error("the following arguments are required: --label")
@@ -946,16 +947,23 @@ class _CaptureArgumentParser(argparse.ArgumentParser):
                 self.error("--save-hdr-sources and --align-hdr require --hdr")
             if parsed.label == "defect" and not parsed.defect_type.strip():
                 self.error("the following arguments are required for defect capture: --defect-type")
-            positive_options = (
+            positive_integer_options = (
                 ("group_count", "--group-count"),
                 ("images_per_group", "--images-per-group"),
                 ("timeout_ms", "--timeout-ms"),
+            )
+            for attribute, option in positive_integer_options:
+                if getattr(parsed, attribute) <= 0:
+                    self.error(f"{option} must be greater than zero")
+            positive_float_options = (
                 ("exposure", "--exposure"),
                 ("short_exposure", "--short-exposure"),
                 ("long_exposure", "--long-exposure"),
+                ("fps", "--fps"),
             )
-            for attribute, option in positive_options:
-                if getattr(parsed, attribute) <= 0:
+            for attribute, option in positive_float_options:
+                value = getattr(parsed, attribute)
+                if not math.isfinite(value) or value <= 0:
                     self.error(f"{option} must be greater than zero")
             capture_interval = getattr(parsed, "capture_interval", None)
             if capture_interval is not None and capture_interval < 0:
@@ -1014,9 +1022,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"{device.index}\t{device.model}\t{device.serial}")
         return 0
 
-    args.fps = 10.0 if args.fps is None else args.fps
-    if args.fps <= 0:
-        parser.error("--fps must be greater than zero")
     try:
         devices = select_devices_by_serial(
             CameraSerials(args.front_serial, args.left_serial, args.right_serial),

@@ -920,7 +920,7 @@ def test_parser_exposes_capture_schema_and_hdr_defaults() -> None:
     assert args.short_exposure == 7000.0
     assert args.long_exposure == 40000.0
     assert args.gain is None
-    assert args.fps is None
+    assert args.fps == 10.0
     assert args.hdr_settle_frames == 5
     assert args.timeout_ms == 3000
     assert args.short_dark_threshold == 70.0
@@ -959,6 +959,10 @@ def test_parser_rejects_hdr_only_flags_in_single_exposure_mode(hdr_only_flag: st
         ["--exposure", "0"],
         ["--short-exposure", "-1"],
         ["--long-exposure", "0"],
+        ["--exposure", "nan"],
+        ["--short-exposure", "nan"],
+        ["--long-exposure", "nan"],
+        ["--fps", "nan"],
     ],
 )
 def test_parser_rejects_invalid_capture_ranges(invalid_option: list[str]) -> None:
@@ -974,6 +978,22 @@ def test_parser_rejects_negative_future_capture_interval_default() -> None:
 
     with pytest.raises(SystemExit):
         parser.parse_args(["--label", "normal"])
+
+
+@pytest.mark.parametrize("option", ["--exposure", "--short-exposure", "--long-exposure", "--fps"])
+def test_main_rejects_non_finite_positive_float_before_sdk_load(
+    option: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-finite positive-float options must fail before the Hikvision SDK is loaded."""
+
+    def fail_sdk_load() -> FakeAdapter:
+        raise AssertionError("HikvisionAdapter.load must not run for invalid CLI input")
+
+    monkeypatch.setattr(multicam.HikvisionAdapter, "load", fail_sdk_load)
+
+    with pytest.raises(SystemExit):
+        multicam.main(["--label", "normal", option, "nan"])
 
 
 def test_parser_rejects_removed_device_indices_option() -> None:
