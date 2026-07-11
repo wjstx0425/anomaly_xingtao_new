@@ -181,7 +181,7 @@ HDR 功能没有删除。需要时在上述命令中显式增加 `--hdr`，并�
 `images-per-group`；然后将同一工件翻到背面，再连续采完所有图像。每个
 image index 的正面三图与背面三图共用一个 `sample_id`。
 
-对于 normal，六个融合图目录是：
+对于 normal，六个最终图像目录是：
 
 ```text
 <root>/left/front/normal/<session_id>/images
@@ -197,8 +197,9 @@ image index 的正面三图与背面三图共用一个 `sample_id`。
 与 fused 图保存在同一视图目录，manifest 的 `source_short` 和 `source_long`
 列会记录对应路径。
 
-现场先以 `--list-devices` 确认索引后再采集。图像过暗或过曝时，优先调整
-`--short-exposure` 和 `--long-exposure`；还可按需调整 `--short-dark-threshold`、
+现场先以 `--list-devices` 确认三个目标序列号都在线后再采集。单曝光图像过暗或
+过曝时调整 `--exposure`；HDR 模式再调整 `--short-exposure` 和 `--long-exposure`，
+还可按需调整 `--short-dark-threshold`、
 `--long-clip-threshold`、`--blend-width`、`--blur-size`、`--hdr-max-clip-pct` 和
 `--hdr-max-retries`。
 

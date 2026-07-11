@@ -1,5 +1,14 @@
 # AGENTS Memory
 
+## ZS32 serial-bound three-camera capture
+
+- The runnable entrypoint is `pipeline/1_collect_multicamera_data.py`; its default mode is single exposure, while `--hdr` explicitly enables the retained HDR path.
+- Camera roles are bound by USB serial, not enumeration index: front `DA9805574`, left `DA9625347`, right `DB0998274`.
+- The collector no longer writes `AcquisitionFrameRate` or accepts `--fps`; `--capture-interval` is application-side pacing only.
+- Every grouped pass keeps `trigger x3 -> read x3`. Single images use `_single.png`; HDR keeps fused/source outputs.
+- Cleanup independently attempts stop, `TriggerMode=Off`, close, and destroy so one failure does not skip later cleanup.
+- Codex performed offline parser/direct assertions, compile, help, and diff checks after commit `c9f1e38f`; per user request, post-fix hardware acceptance remains user-owned.
+
 ## ZS32 three-camera grouped HDR capture (2026-07-11)
 
 ### Serial-bound safe camera lifecycle follow-up (Task 2, 2026-07-11)
