@@ -44,6 +44,18 @@ class DeviceDescription:
     serial: str
 
 
+@dataclass(frozen=True)
+class CameraSerials:
+    """USB serial identities ordered by physical camera slot."""
+
+    front: str
+    left: str
+    right: str
+
+
+DEFAULT_SERIALS = CameraSerials("DA9805574", "DA9625347", "DB0998274")
+
+
 @dataclass
 class CameraHandle:
     """Resources owned by one opened camera."""
@@ -60,7 +72,7 @@ class CameraAdapter(Protocol):
 
     def list_devices(self) -> list[DeviceDescription]: ...
 
-    def open(self, device: DeviceDescription, gain: float, fps: float) -> CameraHandle: ...
+    def open(self, device: DeviceDescription, gain: float) -> CameraHandle: ...
 
     def start(self, handle: CameraHandle) -> None: ...
 
@@ -87,6 +99,7 @@ class HikvisionAdapter:
 
     def __init__(self, sdk: object) -> None:
         self.sdk = sdk
+        self._device_list: object | None = None
 
     @classmethod
     def load(cls) -> HikvisionAdapter:
@@ -106,6 +119,7 @@ class HikvisionAdapter:
         device_list = self.sdk.MV_CC_DEVICE_INFO_LIST()
         device_types = self.sdk.MV_GIGE_DEVICE | self.sdk.MV_USB_DEVICE
         self._check(self.sdk.MvCamera.MV_CC_EnumDevices(device_types, device_list), "EnumDevices")
+        self._device_list = device_list
         devices: list[DeviceDescription] = []
         for index in range(device_list.nDeviceNum):
             info = ctypes.cast(
@@ -124,16 +138,26 @@ class HikvisionAdapter:
             )
         return devices
 
-    def open(self, device: DeviceDescription, gain: float, fps: float) -> CameraHandle:
+    def open(self, device: DeviceDescription, gain: float) -> CameraHandle:
         """Create, open, and configure a camera for software triggering."""
-        device_list = self.sdk.MV_CC_DEVICE_INFO_LIST()
-        device_types = self.sdk.MV_GIGE_DEVICE | self.sdk.MV_USB_DEVICE
-        self._check(self.sdk.MvCamera.MV_CC_EnumDevices(device_types, device_list), "EnumDevices", device)
+        if self._device_list is None:
+            raise RuntimeError("list_devices() must be called before open()")
+        device_list = self._device_list
         if device.index < 0 or device.index >= device_list.nDeviceNum:
             raise RuntimeError(f"device index {device.index} serial {device.serial} is unavailable")
         info = ctypes.cast(
             device_list.pDeviceInfo[device.index], ctypes.POINTER(self.sdk.MV_CC_DEVICE_INFO)
         ).contents
+        if info.nTLayerType == self.sdk.MV_GIGE_DEVICE:
+            transport = info.SpecialInfo.stGigEInfo
+        else:
+            transport = info.SpecialInfo.stUsb3VInfo
+        cached_serial = _decode_sdk_text(transport.chSerialNumber)
+        if cached_serial != device.serial:
+            raise RuntimeError(
+                f"cached device serial mismatch for index {device.index}: "
+                f"requested {device.serial}, enumerated {cached_serial}"
+            )
         cam = self.sdk.MvCamera()
         created = False
         try:
@@ -143,8 +167,6 @@ class HikvisionAdapter:
             for name, value in (("ExposureAuto", 0), ("GainAuto", 0), ("TriggerMode", 1), ("TriggerSource", 7)):
                 self._check(cam.MV_CC_SetEnumValue(name, value), name, device)
             self._check(cam.MV_CC_SetFloatValue("Gain", float(gain)), "Gain", device)
-            self._check(cam.MV_CC_SetBoolValue("AcquisitionFrameRateEnable", True), "FrameRateEnable", device)
-            self._check(cam.MV_CC_SetFloatValue("AcquisitionFrameRate", float(fps)), "FrameRate", device)
         except Exception:
             if created:
                 try:
@@ -374,13 +396,13 @@ def close_cameras(handles: Sequence[CameraHandle], adapter: CameraAdapter) -> No
 
 @contextmanager
 def open_cameras(
-    devices: Sequence[DeviceDescription], adapter: CameraAdapter, gain: float, fps: float
+    devices: Sequence[DeviceDescription], adapter: CameraAdapter, gain: float
 ) -> Iterator[list[CameraHandle]]:
     """Open and start cameras, cleaning partial setup on every exit path."""
     handles: list[CameraHandle] = []
     try:
         for device in devices:
-            handle = adapter.open(device, gain, fps)
+            handle = adapter.open(device, gain)
             handles.append(handle)
             adapter.start(handle)
         yield handles
@@ -778,22 +800,35 @@ def capture_group(
     return statuses
 
 
-def validate_devices(devices: Sequence[int]) -> tuple[int, int, int]:
-    """Validate and preserve the physical ordering of three camera indices.
+def select_devices_by_serial(
+    serials: CameraSerials, available_devices: Sequence[DeviceDescription]
+) -> list[DeviceDescription]:
+    """Resolve physical camera slots from one SDK enumeration snapshot.
 
     Args:
-        devices: Device indices ordered as front, left-side, and right-side camera slots.
+        serials: Requested serials ordered as front, left, and right camera slots.
+        available_devices: Devices from one SDK enumeration snapshot.
 
     Returns:
-        The three device indices with their input order preserved.
+        Three device descriptions ordered as front, left, and right.
 
     Raises:
-        ValueError: If the input does not contain exactly three unique indices.
+        ValueError: If requested or enumerated identities are ambiguous or missing.
     """
-    if len(devices) != 3 or len(set(devices)) != 3:
-        msg = "--devices requires exactly three unique device indices"
-        raise ValueError(msg)
-    return devices[0], devices[1], devices[2]
+    requested = (serials.front, serials.left, serials.right)
+    if len(set(requested)) != len(requested):
+        raise ValueError("requested camera serials must be unique")
+    counts: dict[str, int] = {}
+    for device in available_devices:
+        counts[device.serial] = counts.get(device.serial, 0) + 1
+    duplicates = sorted(serial for serial, count in counts.items() if count > 1)
+    if duplicates:
+        raise ValueError(f"enumeration contains duplicate camera serials: {duplicates}")
+    by_serial = {device.serial: device for device in available_devices}
+    missing = [serial for serial in requested if serial not in by_serial]
+    if missing:
+        raise ValueError(f"camera serials are unavailable: {missing}")
+    return [by_serial[serial] for serial in requested]
 
 
 def view_for(round_name: str, camera_slot: int) -> str:
@@ -817,13 +852,13 @@ class _CaptureArgumentParser(argparse.ArgumentParser):
         args: Sequence[str] | None = None,
         namespace: argparse.Namespace | None = None,
     ) -> argparse.Namespace:
-        """Allow discovery alone while requiring label and HDR for capture."""
+        """Allow discovery alone while validating capture-specific options."""
         parsed = super().parse_args(args, namespace)
         if not parsed.list_devices:
             if parsed.label is None:
                 self.error("the following arguments are required: --label")
-            if not parsed.hdr:
-                self.error("the following arguments are required: --hdr")
+            if not parsed.hdr and (parsed.save_hdr_sources or parsed.align_hdr):
+                self.error("--save-hdr-sources and --align-hdr require --hdr")
             if parsed.label == "defect" and not parsed.defect_type.strip():
                 self.error("the following arguments are required for defect capture: --defect-type")
         return parsed
@@ -835,8 +870,10 @@ def build_parser() -> argparse.ArgumentParser:
     Returns:
         The configured argument parser.
     """
-    parser = _CaptureArgumentParser(description="Collect six-view ZS32 HDR images from three cameras.")
-    parser.add_argument("--devices", nargs=3, type=int, default=[0, 1, 2])
+    parser = _CaptureArgumentParser(description="Collect six-view ZS32 images from three cameras.")
+    parser.add_argument("--front-serial", default=DEFAULT_SERIALS.front)
+    parser.add_argument("--left-serial", default=DEFAULT_SERIALS.left)
+    parser.add_argument("--right-serial", default=DEFAULT_SERIALS.right)
     parser.add_argument("--hand", choices=("left",), default="left")
     parser.add_argument("--label", choices=("normal", "defect"))
     parser.add_argument("--defect-type", default="")
@@ -846,6 +883,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--manual-load", action="store_true")
 
     parser.add_argument("--hdr", action="store_true")
+    parser.add_argument("--exposure", type=float, default=4000.0)
     parser.add_argument("--short-exposure", type=float, default=7000.0)
     parser.add_argument("--long-exposure", type=float, default=40000.0)
     parser.add_argument("--gain", type=float)
@@ -866,18 +904,6 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _selected_devices(
-    requested_indices: Sequence[int], available_devices: Sequence[DeviceDescription]
-) -> list[DeviceDescription]:
-    """Resolve requested camera indices against one enumeration snapshot."""
-    requested = validate_devices(requested_indices)
-    by_index = {device.index: device for device in available_devices}
-    missing = [index for index in requested if index not in by_index]
-    if missing:
-        raise ValueError(f"camera device indices are unavailable: {missing}")
-    return [by_index[index] for index in requested]
-
-
 def main(argv: Sequence[str] | None = None) -> int:
     """Run device discovery or one interactive six-view capture session."""
     parser = build_parser()
@@ -893,7 +919,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.fps <= 0:
         parser.error("--fps must be greater than zero")
     try:
-        devices = _selected_devices(args.devices, available_devices)
+        devices = select_devices_by_serial(
+            CameraSerials(args.front_serial, args.left_serial, args.right_serial),
+            available_devices,
+        )
     except ValueError as error:
         parser.error(str(error))
     paths = create_session(args, datetime.now())
@@ -902,7 +931,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             devices,
             adapter,
             gain=0.0 if args.gain is None else args.gain,
-            fps=args.fps,
         ) as handles:
             pacer = TriggerPassPacer(args.fps)
             for group_index in range(1, args.group_count + 1):

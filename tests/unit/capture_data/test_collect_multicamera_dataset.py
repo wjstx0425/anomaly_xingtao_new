@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import csv
+import ctypes
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -38,7 +39,7 @@ class FakeAdapter:
         self.events.append("list")
         return make_devices()
 
-    def open(self, device: multicam.DeviceDescription, gain: float, fps: float) -> multicam.CameraHandle:
+    def open(self, device: multicam.DeviceDescription, gain: float) -> multicam.CameraHandle:
         self.events.append(f"open:{device.index}")
         if device.index == self.fail_open:
             raise RuntimeError("open failed")
@@ -74,9 +75,95 @@ class FakeAdapter:
         self.events.append(f"destroy:{handle.device.index}")
 
 
+class _SdkTransport(ctypes.Structure):
+    _fields_ = [("chModelName", ctypes.c_char * 64), ("chSerialNumber", ctypes.c_char * 64)]
+
+
+class _SdkSpecialInfo(ctypes.Union):
+    _fields_ = [("stGigEInfo", _SdkTransport), ("stUsb3VInfo", _SdkTransport)]
+
+
+class _SdkDeviceInfo(ctypes.Structure):
+    _fields_ = [("nTLayerType", ctypes.c_uint), ("SpecialInfo", _SdkSpecialInfo)]
+
+
+class _SdkDeviceInfoList:
+    def __init__(self) -> None:
+        self.nDeviceNum = 0
+        self.pDeviceInfo: list[ctypes.POINTER[_SdkDeviceInfo]] = []
+
+
+class _SdkFrameInfo(ctypes.Structure):
+    _fields_: list[tuple[str, object]] = []
+
+
+class FakeSdk:
+    """Small ctypes-compatible SDK double for enumeration snapshot tests."""
+
+    MV_GIGE_DEVICE = 1
+    MV_USB_DEVICE = 2
+    MV_ACCESS_Exclusive = 1
+    MV_CC_DEVICE_INFO = _SdkDeviceInfo
+    MV_CC_DEVICE_INFO_LIST = _SdkDeviceInfoList
+    MV_FRAME_OUT_INFO_EX = _SdkFrameInfo
+
+    def __init__(self, devices: list[multicam.DeviceDescription]) -> None:
+        self.enum_calls = 0
+        self.created_serials: list[str] = []
+        self.float_names: list[str] = []
+        self._infos: list[_SdkDeviceInfo] = []
+        for device in devices:
+            info = _SdkDeviceInfo()
+            info.nTLayerType = self.MV_USB_DEVICE
+            info.SpecialInfo.stUsb3VInfo.chModelName = device.model.encode()
+            info.SpecialInfo.stUsb3VInfo.chSerialNumber = device.serial.encode()
+            self._infos.append(info)
+        sdk = self
+
+        class Camera:
+            @staticmethod
+            def MV_CC_EnumDevices(_device_types: int, device_list: _SdkDeviceInfoList) -> int:
+                sdk.enum_calls += 1
+                device_list.nDeviceNum = len(sdk._infos)
+                device_list.pDeviceInfo = [ctypes.pointer(info) for info in sdk._infos]
+                return 0
+
+            def MV_CC_CreateHandle(self, info: _SdkDeviceInfo) -> int:
+                sdk.created_serials.append(multicam._decode_sdk_text(info.SpecialInfo.stUsb3VInfo.chSerialNumber))
+                return 0
+
+            def MV_CC_OpenDevice(self, _access: int, _key: int) -> int:
+                return 0
+
+            def MV_CC_SetEnumValue(self, _name: str, _value: int) -> int:
+                return 0
+
+            def MV_CC_SetFloatValue(self, name: str, _value: float) -> int:
+                sdk.float_names.append(name)
+                return 0
+
+            def MV_CC_SetBoolValue(self, _name: str, _value: bool) -> int:
+                return 0
+
+            def MV_CC_StartGrabbing(self) -> int:
+                return 0
+
+            def MV_CC_StopGrabbing(self) -> int:
+                return 0
+
+            def MV_CC_CloseDevice(self) -> int:
+                return 0
+
+            def MV_CC_DestroyHandle(self) -> int:
+                return 0
+
+        self.MvCamera = Camera
+
+
 def make_devices() -> list[multicam.DeviceDescription]:
     """Create three deterministic fake device descriptions."""
-    return [multicam.DeviceDescription(index, f"model-{index}", f"serial-{index}") for index in range(3)]
+    serials = ("DA9805574", "DA9625347", "DB0998274")
+    return [multicam.DeviceDescription(index, f"model-{index}", serial) for index, serial in enumerate(serials)]
 
 
 def make_hdr_config(**overrides: object) -> SimpleNamespace:
@@ -133,7 +220,7 @@ def make_round_results(round_offset: int = 0) -> list[multicam.HdrViewResult]:
 
 def make_handles(adapter: FakeAdapter) -> list[multicam.CameraHandle]:
     """Open three fake handles and clear setup events."""
-    handles = [adapter.open(device, gain=0.0, fps=10.0) for device in make_devices()]
+    handles = [adapter.open(device, gain=0.0) for device in make_devices()]
     adapter.events.clear()
     return handles
 
@@ -546,7 +633,7 @@ def test_capture_sample_rolls_back_published_files_when_replace_fails(
 def test_trigger_and_read_groups_all_triggers_before_reads() -> None:
     """All cameras should receive a trigger before any camera is read."""
     adapter = FakeAdapter()
-    handles = [adapter.open(device, gain=0.0, fps=10.0) for device in make_devices()]
+    handles = [adapter.open(device, gain=0.0) for device in make_devices()]
     adapter.events.clear()
 
     frames = multicam.trigger_and_read(handles, adapter, timeout_ms=3000)
@@ -573,7 +660,7 @@ def test_open_cameras_cleans_up_partial_setup_in_reverse_order(failure: str, fai
     )
 
     with pytest.raises(RuntimeError, match=f"{failure} failed"):
-        with multicam.open_cameras(make_devices(), adapter, gain=0.0, fps=10.0):
+        with multicam.open_cameras(make_devices(), adapter, gain=0.0):
             pytest.fail("setup failure should prevent entering the context")
 
     cleanup_events = [
@@ -601,9 +688,21 @@ def test_open_cameras_cleans_up_partial_setup_in_reverse_order(failure: str, fai
         ]
 
 
-def test_default_device_order_maps_to_six_views() -> None:
-    """The three camera slots should keep their physical meaning in both rounds."""
-    assert multicam.validate_devices([0, 1, 2]) == (0, 1, 2)
+def test_select_devices_by_serial_ignores_enumeration_order() -> None:
+    """Physical camera slots should be selected independently of SDK order."""
+    available = [
+        multicam.DeviceDescription(0, "right-model", "DB0998274"),
+        multicam.DeviceDescription(1, "front-model", "DA9805574"),
+        multicam.DeviceDescription(2, "left-model", "DA9625347"),
+    ]
+
+    selected = multicam.select_devices_by_serial(multicam.DEFAULT_SERIALS, available)
+
+    assert [device.serial for device in selected] == ["DA9805574", "DA9625347", "DB0998274"]
+
+
+def test_serial_selected_camera_slots_map_to_six_views() -> None:
+    """The serial-selected camera slots should keep their meaning in both rounds."""
     assert [multicam.view_for("front", slot) for slot in range(3)] == [
         "front",
         "front_left",
@@ -616,18 +715,35 @@ def test_default_device_order_maps_to_six_views() -> None:
     ]
 
 
-@pytest.mark.parametrize("devices", [[], [0, 1], [0, 1, 2, 3], [0, 0, 2]])
-def test_validate_devices_rejects_non_unique_triples(devices: list[int]) -> None:
-    """Device selection must contain exactly three unique indices."""
-    with pytest.raises(ValueError, match="exactly three unique"):
-        multicam.validate_devices(devices)
+def test_select_devices_by_serial_rejects_duplicate_requested_serials() -> None:
+    """One physical camera cannot occupy multiple requested slots."""
+    requested = multicam.CameraSerials("DA9805574", "DA9805574", "DB0998274")
+
+    with pytest.raises(ValueError, match="requested camera serials must be unique"):
+        multicam.select_devices_by_serial(requested, make_devices())
+
+
+def test_select_devices_by_serial_rejects_missing_serials() -> None:
+    """Every requested physical camera must exist in the enumeration snapshot."""
+    available = make_devices()[:2]
+
+    with pytest.raises(ValueError, match="camera serials are unavailable.*DB0998274"):
+        multicam.select_devices_by_serial(multicam.DEFAULT_SERIALS, available)
+
+
+def test_select_devices_by_serial_rejects_duplicate_enumerated_serials() -> None:
+    """An ambiguous SDK snapshot must not silently select one duplicate serial."""
+    available = [*make_devices(), multicam.DeviceDescription(9, "duplicate", "DA9805574")]
+
+    with pytest.raises(ValueError, match="enumeration contains duplicate camera serials.*DA9805574"):
+        multicam.select_devices_by_serial(multicam.DEFAULT_SERIALS, available)
 
 
 def test_parser_rejects_non_left_hand() -> None:
     """The first ZS32 release should accept only left-hand samples."""
     with pytest.raises(SystemExit):
         multicam.build_parser().parse_args(
-            ["--devices", "0", "1", "2", "--hand", "right", "--label", "normal", "--hdr"]
+            ["--hand", "right", "--label", "normal", "--hdr"]
         )
 
 
@@ -635,13 +751,16 @@ def test_parser_exposes_capture_schema_and_hdr_defaults() -> None:
     """The pure parser should expose the agreed multi-camera HDR CLI schema."""
     args = multicam.build_parser().parse_args(["--label", "normal", "--hdr"])
 
-    assert args.devices == [0, 1, 2]
+    assert args.front_serial == "DA9805574"
+    assert args.left_serial == "DA9625347"
+    assert args.right_serial == "DB0998274"
     assert args.hand == "left"
     assert args.defect_type == ""
     assert args.part_id == "part001"
     assert args.group_count == 1
     assert args.images_per_group == 1
     assert args.manual_load is False
+    assert args.exposure == 4000.0
     assert args.short_exposure == 7000.0
     assert args.long_exposure == 40000.0
     assert args.gain is None
@@ -660,10 +779,25 @@ def test_parser_exposes_capture_schema_and_hdr_defaults() -> None:
     assert args.list_devices is False
 
 
-def test_parser_requires_hdr_for_capture() -> None:
-    """Single-exposure capture is deliberately outside the first release."""
+def test_single_exposure_is_default_capture_mode() -> None:
+    """Capture should default to one 4000 microsecond exposure without HDR."""
+    args = multicam.build_parser().parse_args(["--label", "normal"])
+
+    assert args.hdr is False
+    assert args.exposure == 4000.0
+
+
+@pytest.mark.parametrize("hdr_only_flag", ["--save-hdr-sources", "--align-hdr"])
+def test_parser_rejects_hdr_only_flags_in_single_exposure_mode(hdr_only_flag: str) -> None:
+    """Artifact and fusion flags must not be silently ignored outside HDR mode."""
     with pytest.raises(SystemExit):
-        multicam.build_parser().parse_args(["--label", "normal"])
+        multicam.build_parser().parse_args(["--label", "normal", hdr_only_flag])
+
+
+def test_parser_rejects_removed_device_indices_option() -> None:
+    """Formal capture should bind cameras only by stable serial identity."""
+    with pytest.raises(SystemExit):
+        multicam.build_parser().parse_args(["--label", "normal", "--devices", "0", "1", "2"])
 
 
 def test_parser_accepts_list_devices_without_capture_arguments() -> None:
@@ -683,27 +817,57 @@ def test_main_lists_devices_without_opening_cameras(
     assert multicam.main(["--list-devices"]) == 0
 
     assert capsys.readouterr().out.splitlines() == [
-        "0\tmodel-0\tserial-0",
-        "1\tmodel-1\tserial-1",
-        "2\tmodel-2\tserial-2",
+        "0\tmodel-0\tDA9805574",
+        "1\tmodel-1\tDA9625347",
+        "2\tmodel-2\tDB0998274",
     ]
     assert adapter.events == ["list"]
 
 
-def test_main_normalizes_default_fps_for_camera_and_capture_config(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The default frame rate should be identical in adapter setup and HDR pacing config."""
+def test_capture_startup_enumerates_sdk_exactly_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """All three camera handles must come from one cached SDK enumeration snapshot."""
+    enumerated = [make_devices()[2], make_devices()[0], make_devices()[1]]
+    sdk = FakeSdk(enumerated)
+    adapter = multicam.HikvisionAdapter(sdk)
+    monkeypatch.setattr(multicam.HikvisionAdapter, "load", lambda: adapter)
+    monkeypatch.setattr(multicam, "create_session", lambda *_args: object())
+    monkeypatch.setattr(multicam, "capture_group", lambda *_args, **_kwargs: [True])
+
+    assert multicam.main(["--label", "normal"]) == 0
+
+    assert sdk.enum_calls == 1
+    assert sdk.created_serials == ["DA9805574", "DA9625347", "DB0998274"]
+    assert "AcquisitionFrameRate" not in sdk.float_names
+
+
+def test_hikvision_adapter_open_rejects_cached_serial_mismatch() -> None:
+    """A stale or mismatched description must never open a different cached camera."""
+    sdk = FakeSdk(make_devices())
+    adapter = multicam.HikvisionAdapter(sdk)
+    adapter.list_devices()
+    mismatched = multicam.DeviceDescription(0, "model-0", "wrong-serial")
+
+    with pytest.raises(RuntimeError, match="serial mismatch.*wrong-serial.*DA9805574"):
+        adapter.open(mismatched, gain=0.0)
+
+    assert sdk.enum_calls == 1
+    assert sdk.created_serials == []
+
+
+def test_main_normalizes_default_fps_for_capture_pacing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The default frame rate should configure application-level HDR pacing."""
     adapter = FakeAdapter()
     captured_fps: list[float] = []
+    opened_serials: list[str] = []
 
     @contextmanager
     def fake_open_cameras(
         devices: list[multicam.DeviceDescription],
         camera_adapter: FakeAdapter,
         gain: float,
-        fps: float,
     ) -> object:
-        del devices, camera_adapter, gain
-        captured_fps.append(fps)
+        del camera_adapter, gain
+        opened_serials.extend(device.serial for device in devices)
         yield []
 
     def fake_capture_group(
@@ -725,13 +889,14 @@ def test_main_normalizes_default_fps_for_camera_and_capture_config(monkeypatch: 
     monkeypatch.setattr(multicam, "capture_group", fake_capture_group)
 
     assert multicam.main(["--label", "normal", "--hdr"]) == 0
-    assert captured_fps == [10.0, 10.0]
+    assert captured_fps == [10.0]
+    assert opened_serials == ["DA9805574", "DA9625347", "DB0998274"]
 
 
 def test_parser_requires_defect_type_for_defect_capture() -> None:
     """Defect samples must name their defect class."""
     with pytest.raises(SystemExit):
-        multicam.build_parser().parse_args(["--label", "defect", "--hdr"])
+        multicam.build_parser().parse_args(["--label", "defect"])
 
 
 def test_capture_sample_prompts_before_front_and_back_rounds(
