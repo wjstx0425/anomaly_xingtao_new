@@ -5,6 +5,9 @@
 
 from __future__ import annotations
 
+import csv
+from datetime import datetime
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -87,6 +90,38 @@ def make_hdr_config(**overrides: object) -> SimpleNamespace:
     }
     values.update(overrides)
     return SimpleNamespace(**values)
+
+
+def make_storage_args(root: Path, **overrides: object) -> SimpleNamespace:
+    """Create capture and storage arguments for an isolated session."""
+    values = vars(make_hdr_config()).copy()
+    values.update(
+        {
+            "root": str(root),
+            "hand": "left",
+            "label": "normal",
+            "defect_type": "",
+            "part_id": "part001",
+            "save_hdr_sources": False,
+        }
+    )
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def make_round_results(round_offset: int = 0) -> list[multicam.HdrViewResult]:
+    """Create three deterministic in-memory HDR results."""
+    return [
+        multicam.HdrViewResult(
+            camera_slot=slot,
+            short_image=np.full((2, 2, 3), round_offset + slot, dtype=np.uint8),
+            long_image=np.full((2, 2, 3), round_offset + slot + 10, dtype=np.uint8),
+            fused_image=np.full((2, 2, 3), round_offset + slot + 20, dtype=np.uint8),
+            fused_clip_pct=float(slot),
+            attempt=1,
+        )
+        for slot in range(3)
+    ]
 
 
 def make_handles(adapter: FakeAdapter) -> list[multicam.CameraHandle]:
@@ -184,6 +219,105 @@ def test_capture_hdr_round_does_not_return_partial_results_after_timeout() -> No
 
     with pytest.raises(RuntimeError, match="read timed out"):
         multicam.capture_hdr_round(handles, adapter, make_hdr_config())
+
+
+def test_capture_sample_writes_one_complete_six_view_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two successful rounds should create one explicitly complete six-view sample."""
+    args = make_storage_args(tmp_path, save_hdr_sources=True)
+    paths = multicam.create_session(args, datetime(2026, 7, 11, 12, 34, 56, 123456))
+    adapter = FakeAdapter()
+    handles = make_handles(adapter)
+    rounds = iter([make_round_results(), make_round_results(30)])
+    monkeypatch.setattr(multicam, "capture_hdr_round", lambda *_args: next(rounds))
+
+    assert multicam.capture_sample(handles, adapter, args, paths, "group001", 1) is True
+
+    assert set(paths.view_dirs) == {
+        "front",
+        "front_left",
+        "front_right",
+        "back",
+        "back_left",
+        "back_right",
+    }
+    assert all(len(list(directory.glob("*_fused.png"))) == 1 for directory in paths.view_dirs.values())
+    assert all(len(list(directory.glob("*_short.png"))) == 1 for directory in paths.view_dirs.values())
+    assert all(len(list(directory.glob("*_long.png"))) == 1 for directory in paths.view_dirs.values())
+    with paths.manifest_path.open(newline="", encoding="utf-8") as file:
+        rows = list(csv.DictReader(file))
+    image_rows = [row for row in rows if row["record_type"] == "image"]
+    summary = [row for row in rows if row["record_type"] == "sample"]
+    assert len(image_rows) == 6
+    assert len({row["session_id"] for row in image_rows}) == 1
+    assert len({row["sample_id"] for row in image_rows}) == 1
+    assert {row["group_id"] for row in image_rows} == {"group001"}
+    assert {row["sample_status"] for row in image_rows} == {"complete"}
+    assert all(row["source_short"] and row["source_long"] for row in image_rows)
+    assert len(summary) == 1 and summary[0]["sample_status"] == "complete"
+
+
+def test_capture_sample_records_imwrite_failure_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A false imwrite result must make the sample incomplete with precise context."""
+    args = make_storage_args(tmp_path)
+    paths = multicam.create_session(args, datetime(2026, 7, 11, 12, 34, 56, 1))
+    adapter = FakeAdapter()
+    handles = make_handles(adapter)
+    monkeypatch.setattr(multicam, "capture_hdr_round", lambda *_args: make_round_results())
+    writes = 0
+
+    def fail_second_write(_path: str, _image: np.ndarray) -> bool:
+        nonlocal writes
+        writes += 1
+        return writes != 2
+
+    monkeypatch.setattr(multicam.cv2, "imwrite", fail_second_write)
+
+    assert multicam.capture_sample(handles, adapter, args, paths, "group001", 2) is False
+
+    with paths.manifest_path.open(newline="", encoding="utf-8") as file:
+        summary = [row for row in csv.DictReader(file) if row["record_type"] == "sample"][0]
+    assert summary["sample_status"] == "incomplete"
+    assert summary["failed_round"] == "front"
+    assert summary["failed_view"] == "front_left"
+    assert summary["failed_device_index"] == "1"
+    assert "cv2.imwrite returned false" in summary["error"]
+
+
+def test_capture_sample_records_back_capture_failure_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A back-round camera failure must not promote the saved front round to complete."""
+    args = make_storage_args(tmp_path)
+    paths = multicam.create_session(args, datetime(2026, 7, 11, 12, 34, 56, 2))
+    adapter = FakeAdapter()
+    handles = make_handles(adapter)
+    calls = 0
+
+    def capture(*_args: object) -> list[multicam.HdrViewResult]:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("GetOneFrameTimeout failed for device 2 serial serial-2")
+        return make_round_results()
+
+    monkeypatch.setattr(multicam, "capture_hdr_round", capture)
+
+    assert multicam.capture_sample(handles, adapter, args, paths, "group009", 3) is False
+
+    with paths.manifest_path.open(newline="", encoding="utf-8") as file:
+        rows = list(csv.DictReader(file))
+    front_rows = [row for row in rows if row["record_type"] == "image"]
+    summary = [row for row in rows if row["record_type"] == "sample"][0]
+    assert len(front_rows) == 3
+    assert {row["sample_status"] for row in front_rows} == {"incomplete"}
+    assert summary["failed_round"] == "back"
+    assert summary["failed_view"] == "back_right"
+    assert summary["failed_device_index"] == "2"
+    assert "GetOneFrameTimeout failed" in summary["error"]
 
 
 def test_trigger_and_read_groups_all_triggers_before_reads() -> None:

@@ -10,12 +10,15 @@ the mapping and CLI contract remain testable on machines without the MVS SDK.
 from __future__ import annotations
 
 import argparse
+import csv
 import ctypes
 import importlib
+import re
 import sys
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 
@@ -344,6 +347,235 @@ ROUND_VIEWS: dict[str, tuple[str, str, str]] = {
     "front": ("front", "front_left", "front_right"),
     "back": ("back", "back_left", "back_right"),
 }
+
+MANIFEST_COLUMNS = (
+    "record_type",
+    "session_id",
+    "sample_id",
+    "group_id",
+    "image_index",
+    "round",
+    "view",
+    "device_index",
+    "camera_serial",
+    "file",
+    "source_short",
+    "source_long",
+    "short_exposure",
+    "long_exposure",
+    "hdr_attempt",
+    "fused_clip_pct",
+    "captured_at",
+    "sample_status",
+    "failed_round",
+    "failed_view",
+    "failed_device_index",
+    "error",
+)
+
+
+@dataclass(frozen=True)
+class SessionPaths:
+    """Directories and manifest shared by one capture program run."""
+
+    session_id: str
+    root: Path
+    view_dirs: dict[str, Path]
+    manifest_path: Path
+
+
+class RoundStorageError(RuntimeError):
+    """A round image could not be persisted with its capture identity."""
+
+    def __init__(self, message: str, round_name: str, view: str, device_index: int) -> None:
+        super().__init__(message)
+        self.round_name = round_name
+        self.view = view
+        self.device_index = device_index
+
+
+def create_session(args: argparse.Namespace, now: datetime) -> SessionPaths:
+    """Create the six view directories and one microsecond-resolution manifest path."""
+    session_id = now.strftime("%Y%m%d_%H%M%S_%f")
+    root = Path(args.root)
+    view_dirs: dict[str, Path] = {}
+    for view in (*ROUND_VIEWS["front"], *ROUND_VIEWS["back"]):
+        label_parts = (args.label,) if args.label == "normal" else (args.label, args.defect_type)
+        directory = root / args.hand / view
+        for part in label_parts:
+            directory /= part
+        directory = directory / session_id / "images"
+        directory.mkdir(parents=True, exist_ok=True)
+        view_dirs[view] = directory
+    manifest_path = root / "manifests" / f"{session_id}.csv"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    return SessionPaths(session_id, root, view_dirs, manifest_path)
+
+
+def _image_name(args: argparse.Namespace, view: str, group_id: str, image_index: int, kind: str) -> str:
+    label = args.label if args.label == "normal" else f"{args.label}_{args.defect_type}"
+    return f"{args.hand}_{view}_{label}_{args.part_id}_{group_id}_{image_index:06d}_{kind}.png"
+
+
+def _write_round_images(
+    images: Sequence[tuple[Path, np.ndarray, str, int]], round_name: str
+) -> None:
+    """Write a complete round through temporary files before publishing any image."""
+    staged: list[tuple[Path, Path]] = []
+    try:
+        for destination, image, view, device_index in images:
+            temporary = destination.with_name(f".{destination.stem}.tmp{destination.suffix}")
+            staged.append((temporary, destination))
+            if not cv2.imwrite(str(temporary), image):
+                raise RoundStorageError(
+                    f"cv2.imwrite returned false for {destination}", round_name, view, device_index
+                )
+        for temporary, destination in staged:
+            temporary.replace(destination)
+    except Exception:
+        for temporary, _ in staged:
+            temporary.unlink(missing_ok=True)
+        raise
+
+
+def save_round(
+    results: Sequence[HdrViewResult],
+    round_name: str,
+    sample_id: str,
+    group_id: str,
+    image_index: int,
+    handles: Sequence[CameraHandle],
+    args: argparse.Namespace,
+    paths: SessionPaths,
+) -> list[dict[str, str]]:
+    """Atomically store one three-view HDR round and return its manifest rows."""
+    if len(results) != 3:
+        raise RuntimeError(f"{round_name} round returned {len(results)} results instead of 3")
+    captured_at = datetime.now().isoformat(timespec="microseconds")
+    writes: list[tuple[Path, np.ndarray, str, int]] = []
+    rows: list[dict[str, str]] = []
+    for result in results:
+        slot = result.camera_slot
+        view = view_for(round_name, slot)
+        handle = handles[slot]
+        fused_path = paths.view_dirs[view] / _image_name(args, view, group_id, image_index, "fused")
+        short_path = paths.view_dirs[view] / _image_name(args, view, group_id, image_index, "short")
+        long_path = paths.view_dirs[view] / _image_name(args, view, group_id, image_index, "long")
+        writes.append((fused_path, result.fused_image, view, handle.device.index))
+        if args.save_hdr_sources:
+            writes.extend(
+                (
+                    (short_path, result.short_image, view, handle.device.index),
+                    (long_path, result.long_image, view, handle.device.index),
+                )
+            )
+        rows.append(
+            {
+                "record_type": "image",
+                "session_id": paths.session_id,
+                "sample_id": sample_id,
+                "group_id": group_id,
+                "image_index": str(image_index),
+                "round": round_name,
+                "view": view,
+                "device_index": str(handle.device.index),
+                "camera_serial": handle.device.serial,
+                "file": str(fused_path),
+                "source_short": str(short_path) if args.save_hdr_sources else "",
+                "source_long": str(long_path) if args.save_hdr_sources else "",
+                "short_exposure": str(args.short_exposure),
+                "long_exposure": str(args.long_exposure),
+                "hdr_attempt": str(result.attempt),
+                "fused_clip_pct": str(result.fused_clip_pct),
+                "captured_at": captured_at,
+                "sample_status": "incomplete",
+                "failed_round": "",
+                "failed_view": "",
+                "failed_device_index": "",
+                "error": "",
+            }
+        )
+    _write_round_images(writes, round_name)
+    return rows
+
+
+def _failure_identity(
+    error: Exception, round_name: str, handles: Sequence[CameraHandle]
+) -> tuple[str, str]:
+    if isinstance(error, RoundStorageError):
+        return error.view, str(error.device_index)
+    match = re.search(r"device\s+(\d+)", str(error), flags=re.IGNORECASE)
+    if match is None:
+        return "", ""
+    device_index = int(match.group(1))
+    for slot, handle in enumerate(handles):
+        if handle.device.index == device_index:
+            return view_for(round_name, slot), str(device_index)
+    return "", str(device_index)
+
+
+def _write_manifest(paths: SessionPaths, rows: Sequence[dict[str, str]]) -> None:
+    with paths.manifest_path.open("a", newline="", encoding="utf-8") as file:
+        writer = csv.DictWriter(file, fieldnames=MANIFEST_COLUMNS)
+        if file.tell() == 0:
+            writer.writeheader()
+        writer.writerows(rows)
+
+
+def capture_sample(
+    handles: Sequence[CameraHandle],
+    adapter: CameraAdapter,
+    args: argparse.Namespace,
+    paths: SessionPaths,
+    group_id: str,
+    image_index: int,
+) -> bool:
+    """Capture a paired front/back sample and record explicit completeness."""
+    sample_id = f"{args.part_id}_{group_id}_{image_index:06d}"
+    rows: list[dict[str, str]] = []
+    current_round = "front"
+    try:
+        for current_round in ("front", "back"):
+            results = capture_hdr_round(handles, adapter, args)
+            rows.extend(
+                save_round(results, current_round, sample_id, group_id, image_index, handles, args, paths)
+            )
+    except Exception as error:
+        failed_view, failed_device = _failure_identity(error, current_round, handles)
+        for row in rows:
+            row["sample_status"] = "incomplete"
+        rows.append(
+            {
+                **dict.fromkeys(MANIFEST_COLUMNS, ""),
+                "record_type": "sample",
+                "session_id": paths.session_id,
+                "sample_id": sample_id,
+                "group_id": group_id,
+                "image_index": str(image_index),
+                "sample_status": "incomplete",
+                "failed_round": current_round,
+                "failed_view": failed_view,
+                "failed_device_index": failed_device,
+                "error": str(error),
+            }
+        )
+        _write_manifest(paths, rows)
+        return False
+    for row in rows:
+        row["sample_status"] = "complete"
+    rows.append(
+        {
+            **dict.fromkeys(MANIFEST_COLUMNS, ""),
+            "record_type": "sample",
+            "session_id": paths.session_id,
+            "sample_id": sample_id,
+            "group_id": group_id,
+            "image_index": str(image_index),
+            "sample_status": "complete",
+        }
+    )
+    _write_manifest(paths, rows)
+    return True
 
 
 def validate_devices(devices: Sequence[int]) -> tuple[int, int, int]:
