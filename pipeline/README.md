@@ -16,6 +16,7 @@ uv sync
 | --- | --- | --- |
 | `0_run_all.py` | 串联多个阶段 | 已经确认单步命令正确后再使用 |
 | `1_collect_data.py` | 采集原始大图 | normal/defect 原始数据采集 |
+| `1_collect_multicamera_data.py` | 三相机采集 ZS32 正反面六视图 HDR | 静止工件人工翻面、单终端成组采集 |
 | `2_process_data.py` | 裁成单零件图片，可 mask 孔 | 自动预设裁剪或手动画框 |
 | `3_train_model.py` | 预处理、训练、评估 | 单模型或指定模型训练的主入口 |
 | `4_inference.py` | 离线推理并输出复核图 | 复核新图片、stress normal、real defects |
@@ -133,6 +134,80 @@ git diff --cached --stat
 | `--root` | 原始数据根目录 |
 | `--hdr` | 开启短曝光/长曝光融合 |
 | `--save-hdr-sources` | 同时保存短曝光和长曝光原图 |
+
+### ZS32 三相机六视图 HDR 采集
+
+先确认 SDK 当前枚举到的设备索引、型号和序列号：
+
+```bash
+.venv/bin/python pipeline/1_collect_multicamera_data.py --list-devices
+```
+
+正常样本的完整命令：
+
+```bash
+.venv/bin/python pipeline/1_collect_multicamera_data.py \
+  --devices 0 1 2 \
+  --hand left \
+  --label normal \
+  --part-id part001 \
+  --group-count 10 \
+  --images-per-group 1 \
+  --manual-load \
+  --hdr \
+  --save-hdr-sources \
+  --align-hdr \
+  --short-exposure 7000 \
+  --long-exposure 40000 \
+  --hdr-settle-frames 5 \
+  --gain 0 \
+  --fps 10 \
+  --root ./dataset/zs32_multiview
+```
+
+采集缺陷样本时将 `--label normal` 改为 `--label defect` 并增加非空的
+`--defect-type <缺陷类型>`。采集模式必须显式传入 `--hdr`；首版不支持单曝光采集。
+
+`--devices` 的顺序表示物理相机槽位，不是六个独立设备：
+
+| 相机槽位 | 默认设备 | 正面轮视图 | 翻面后视图 |
+| --- | --- | --- | --- |
+| 中央 | `device 0` | `front` | `back` |
+| 左侧 | `device 1` | `front_left` | `back_left` |
+| 右侧 | `device 2` | `front_right` | `back_right` |
+
+每个 group 只提示两次：首先按提示放好正面，连续采完该 group 的所有
+`images-per-group`；然后将同一工件翻到背面，再连续采完所有图像。每个
+image index 的正面三图与背面三图共用一个 `sample_id`。
+
+对于 normal，六个融合图目录是：
+
+```text
+<root>/left/front/normal/<session_id>/images
+<root>/left/front_left/normal/<session_id>/images
+<root>/left/front_right/normal/<session_id>/images
+<root>/left/back/normal/<session_id>/images
+<root>/left/back_left/normal/<session_id>/images
+<root>/left/back_right/normal/<session_id>/images
+```
+
+缺陷样本在视图目录下使用 `defect/<defect-type>/<session_id>/images`。会话 manifest
+写入 `<root>/manifests/<session_id>.csv`。传入 `--save-hdr-sources` 时，短、长曝光原图
+与 fused 图保存在同一视图目录，manifest 的 `source_short` 和 `source_long`
+列会记录对应路径。
+
+现场先以 `--list-devices` 确认索引后再采集。图像过暗或过曝时，优先调整
+`--short-exposure` 和 `--long-exposure`；还可按需调整 `--short-dark-threshold`、
+`--long-clip-threshold`、`--blend-width`、`--blur-size`、`--hdr-max-clip-pct` 和
+`--hdr-max-retries`。
+
+manifest 只有在同一 `sample_id` 的六个标准视图都成功保存后才标记
+`sample_status=complete`。任一轮采集、读图或写盘失败都保留可用行，同时写入
+`sample_status=incomplete`、`failed_round`、`failed_view`、`failed_device_index` 和
+`error`；下游不应将 incomplete 样本当成完整六视图。
+
+该实现使用软件触发：每次先向三台相机发送触发，再依次读图。这适合静止工件，
+但不是硬件同步；对运动件或要求严格同时曝光的场景，需改用共享硬件触发/同步线。
 
 ## 2. 处理数据
 

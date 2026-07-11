@@ -1,16 +1,30 @@
 # AGENTS Memory
 
-## ZS32 three-camera grouped HDR capture
+## ZS32 three-camera grouped HDR capture (2026-07-11)
 
-- On 2026-07-11, `capture_data/collect_multicamera_dataset.py` gained the Task 3 HDR round primitive.
+- Core module: `capture_data/collect_multicamera_dataset.py`; thin numbered wrapper:
+  `pipeline/1_collect_multicamera_data.py`.
+- The six canonical view names are `front`, `front_left`, `front_right`, `back`, `back_left`, and `back_right`.
+- Default `--devices 0 1 2` mapping: device 0 is the central camera (`front`/`back`), device 1 is the left-side
+  camera (`front_left`/`back_left`), and device 2 is the right-side camera (`front_right`/`back_right`). Always run
+  `pipeline/1_collect_multicamera_data.py --list-devices` before capture because SDK enumeration indices may change.
+- Each group has two placement prompts: capture every front image index first, flip the same static part, then
+  capture every back image index. Matching front/back image indices retain one paired `sample_id`.
 - `capture_exposure_pass()` sets one exposure on all handles, discards configured settle passes using grouped
-  trigger/read ordering, then returns one grouped final pass.
-- `capture_hdr_round()` captures the full three-camera short/long pair, fuses frames by physical camera slot with
-  selective exposure fusion, and retries the complete pair when any fused view exceeds `hdr_max_clip_pct`.
-- Any camera read exception propagates and no partial `HdrViewResult` list is returned. `attempt` is one-based and
-  shared by all three results in a successful/final round.
-- The local uv environment did not include pytest during Task 3; validation used `py_compile` and a direct Python
-  assertion harness covering exact event order, fusion pairing/options, whole-pair retry, and timeout propagation.
+  trigger/read ordering, then returns one grouped final pass. `capture_hdr_round()` captures the full three-camera
+  short/long pair, fuses by physical camera slot, and retries the complete pair when any fused view exceeds
+  `hdr_max_clip_pct`. Any camera read exception propagates without returning a partial `HdrViewResult` list.
+- Software triggering sends all three triggers before reading frames. It is suitable for static parts but is not
+  hardware synchronization; moving parts or strict simultaneous exposure require shared hardware trigger wiring.
+- A sample is `complete` only when all six distinct canonical views were stored. Failures remain explicit as an
+  `incomplete` sample row with round/view/device/error diagnostics in `<root>/manifests/<session_id>.csv`.
+- Static verification commands for this implementation:
+  - `.venv/bin/python -m pytest tests/unit/capture_data/test_collect_multicamera_dataset.py tests/unit/pipeline/test_pipeline_wrappers.py -v`
+  - `.venv/bin/python -m compileall capture_data/collect_multicamera_dataset.py pipeline/1_collect_multicamera_data.py`
+- Hardware smoke-test verification (Task 7): **pending; not run as part of Task 6**.
+  - Smoke-test output path: **pending Task 7**.
+  - Connected camera serials: **pending Task 7 device discovery**.
+  - Measured capture results: **pending Task 7; do not infer success from unit/static tests**.
 
 ## GitHub upload guardrails
 
@@ -318,9 +332,3 @@
   - Stage 24 (`pipeline/24_visualize_traditional_results.py`) renders contact sheets that display `GT` separately from `Evidence`, avoiding misleading labels such as `geometry less` as a defect class.
   - Stage 24 also writes per-case localization images under `visual_reports*/localization/`: it uses precise stage-20 `evidence_path` overlays when available and falls back to 4x8 `region=rXX_cYY` heat boxes from the geometry reason. Red means `missing_mask`, blue means `extra_mask`.
   - Example semantic smoke output: `results/c789_traditional/top_defect_semantic_v2/`; visual report: `results/c789_traditional/visual_reports_semantic/top_defect_semantic_v2_defect-all_page01.jpg`.
-- ZS32 multi-camera capture CLI on 2026-07-11:
-  - Core entrypoint: `capture_data/collect_multicamera_dataset.py`; thin numbered wrapper: `pipeline/1_collect_multicamera_data.py`.
-  - `--list-devices` is SDK-lazy and prints tab-separated device index, model, and serial without opening cameras.
-  - Capture requires `--hdr`; `--label defect` also requires a non-empty `--defect-type`.
-  - Each group prompts once for front and once for back, captures all image-index front rounds before all back rounds, and preserves one paired sample ID per image index. `capture_sample(...)` remains available for single-sample reuse.
-  - `KeyboardInterrupt` exits with status 130 after best-effort camera cleanup.
