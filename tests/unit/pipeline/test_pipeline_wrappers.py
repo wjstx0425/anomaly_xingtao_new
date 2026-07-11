@@ -9,6 +9,7 @@ import importlib.util
 import sys
 from pathlib import Path
 from types import ModuleType
+from unittest.mock import patch
 
 import cv2
 import numpy as np
@@ -26,6 +27,31 @@ def _load_module(name: str, relative_path: str) -> ModuleType:
     sys.path.insert(0, str(script_path.parent))
     spec.loader.exec_module(module)
     return module
+
+
+def test_multicamera_collection_wrapper_forwards_arguments_unchanged() -> None:
+    """The numbered wrapper should delegate every capture option unchanged."""
+    wrapper = _load_module("pipeline_collect_multicamera", "pipeline/1_collect_multicamera_data.py")
+    argv = [
+        "pipeline/1_collect_multicamera_data.py",
+        "--devices",
+        "0",
+        "1",
+        "2",
+        "--hand",
+        "left",
+        "--label",
+        "normal",
+        "--hdr",
+    ]
+
+    with patch.object(wrapper, "run_repo_script") as run_repo_script, patch.object(sys, "argv", argv):
+        wrapper.main()
+
+    run_repo_script.assert_called_once_with(
+        "capture_data/collect_multicamera_dataset.py",
+        ["--devices", "0", "1", "2", "--hand", "left", "--label", "normal", "--hdr"],
+    )
 
 
 def test_with_default_command_inserts_all_for_workflow_options() -> None:

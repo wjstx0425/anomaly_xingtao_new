@@ -15,7 +15,7 @@ import ctypes
 import importlib
 import re
 import sys
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -25,7 +25,10 @@ from typing import Protocol
 import cv2
 import numpy as np
 
-from capture_data.exposure_fusion import fuse_exposures
+if __package__:
+    from capture_data.exposure_fusion import fuse_exposures
+else:
+    from exposure_fusion import fuse_exposures
 
 SDK_PATH = "/opt/MVS/Samples/64/Python/MvImport"
 FRAME_BUFFER_SIZE = 50 * 1024 * 1024
@@ -53,6 +56,8 @@ class CameraHandle:
 
 class CameraAdapter(Protocol):
     """Camera operations used by grouped acquisition and lifecycle helpers."""
+
+    def list_devices(self) -> list[DeviceDescription]: ...
 
     def open(self, device: DeviceDescription, gain: float, fps: float) -> CameraHandle: ...
 
@@ -553,6 +558,7 @@ def capture_sample(
     paths: SessionPaths,
     group_id: str,
     image_index: int,
+    prompt: Callable[[str], object] | None = None,
 ) -> bool:
     """Capture a paired front/back sample and record explicit completeness."""
     sample_id = f"{args.part_id}_{group_id}_{image_index:06d}"
@@ -560,6 +566,13 @@ def capture_sample(
     current_round = "front"
     try:
         for current_round in ("front", "back"):
+            if prompt is not None:
+                prompt_text = (
+                    "放好 ZS32 左手件正面后按 Enter 或 s..."
+                    if current_round == "front"
+                    else "将同一个 ZS32 左手件翻到背面后按 Enter 或 s..."
+                )
+                prompt(prompt_text)
             results = capture_hdr_round(handles, adapter, args)
             rows.extend(
                 save_round(results, current_round, sample_id, group_id, image_index, handles, args, paths)
@@ -671,6 +684,8 @@ class _CaptureArgumentParser(argparse.ArgumentParser):
                 self.error("the following arguments are required: --label")
             if not parsed.hdr:
                 self.error("the following arguments are required: --hdr")
+            if parsed.label == "defect" and not parsed.defect_type.strip():
+                self.error("the following arguments are required for defect capture: --defect-type")
         return parsed
 
 
@@ -709,3 +724,59 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--root", default="./dataset")
     parser.add_argument("--list-devices", action="store_true")
     return parser
+
+
+def _selected_devices(
+    requested_indices: Sequence[int], available_devices: Sequence[DeviceDescription]
+) -> list[DeviceDescription]:
+    """Resolve requested camera indices against one enumeration snapshot."""
+    requested = validate_devices(requested_indices)
+    by_index = {device.index: device for device in available_devices}
+    missing = [index for index in requested if index not in by_index]
+    if missing:
+        raise ValueError(f"camera device indices are unavailable: {missing}")
+    return [by_index[index] for index in requested]
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Run device discovery or one interactive six-view capture session."""
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    adapter = HikvisionAdapter.load()
+    available_devices = adapter.list_devices()
+    if args.list_devices:
+        for device in available_devices:
+            print(f"{device.index}\t{device.model}\t{device.serial}")
+        return 0
+
+    try:
+        devices = _selected_devices(args.devices, available_devices)
+    except ValueError as error:
+        parser.error(str(error))
+    paths = create_session(args, datetime.now())
+    try:
+        with open_cameras(
+            devices,
+            adapter,
+            gain=0.0 if args.gain is None else args.gain,
+            fps=10.0 if args.fps is None else args.fps,
+        ) as handles:
+            for group_index in range(1, args.group_count + 1):
+                group_id = f"group{group_index:03d}"
+                for image_index in range(1, args.images_per_group + 1):
+                    capture_sample(
+                        handles,
+                        adapter,
+                        args,
+                        paths,
+                        group_id,
+                        image_index,
+                        prompt=input,
+                    )
+    except KeyboardInterrupt:
+        return 130
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

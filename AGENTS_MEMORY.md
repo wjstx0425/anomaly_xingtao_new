@@ -318,3 +318,8 @@
   - Stage 24 (`pipeline/24_visualize_traditional_results.py`) renders contact sheets that display `GT` separately from `Evidence`, avoiding misleading labels such as `geometry less` as a defect class.
   - Stage 24 also writes per-case localization images under `visual_reports*/localization/`: it uses precise stage-20 `evidence_path` overlays when available and falls back to 4x8 `region=rXX_cYY` heat boxes from the geometry reason. Red means `missing_mask`, blue means `extra_mask`.
   - Example semantic smoke output: `results/c789_traditional/top_defect_semantic_v2/`; visual report: `results/c789_traditional/visual_reports_semantic/top_defect_semantic_v2_defect-all_page01.jpg`.
+- ZS32 multi-camera capture CLI on 2026-07-11:
+  - Core entrypoint: `capture_data/collect_multicamera_dataset.py`; thin numbered wrapper: `pipeline/1_collect_multicamera_data.py`.
+  - `--list-devices` is SDK-lazy and prints tab-separated device index, model, and serial without opening cameras.
+  - Capture requires `--hdr`; `--label defect` also requires a non-empty `--defect-type`.
+  - The operator is prompted separately for the front and back of the same left-hand ZS32 part, and `KeyboardInterrupt` exits with status 130 after best-effort camera cleanup.

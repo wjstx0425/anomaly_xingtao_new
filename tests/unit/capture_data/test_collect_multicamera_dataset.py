@@ -32,6 +32,11 @@ class FakeAdapter:
         self.fail_read = fail_read
         self.exposures: dict[int, float] = {}
 
+    def list_devices(self) -> list[multicam.DeviceDescription]:
+        """Return deterministic fake devices."""
+        self.events.append("list")
+        return make_devices()
+
     def open(self, device: multicam.DeviceDescription, gain: float, fps: float) -> multicam.CameraHandle:
         self.events.append(f"open:{device.index}")
         if device.index == self.fail_open:
@@ -550,3 +555,74 @@ def test_parser_accepts_list_devices_without_capture_arguments() -> None:
     args = multicam.build_parser().parse_args(["--list-devices"])
 
     assert args.list_devices is True
+
+
+def test_main_lists_devices_without_opening_cameras(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Discovery should print stable identities and avoid camera setup."""
+    adapter = FakeAdapter()
+    monkeypatch.setattr(multicam.HikvisionAdapter, "load", lambda: adapter)
+
+    assert multicam.main(["--list-devices"]) == 0
+
+    assert capsys.readouterr().out.splitlines() == [
+        "0\tmodel-0\tserial-0",
+        "1\tmodel-1\tserial-1",
+        "2\tmodel-2\tserial-2",
+    ]
+    assert adapter.events == ["list"]
+
+
+def test_parser_requires_defect_type_for_defect_capture() -> None:
+    """Defect samples must name their defect class."""
+    with pytest.raises(SystemExit):
+        multicam.build_parser().parse_args(["--label", "defect", "--hdr"])
+
+
+def test_capture_sample_prompts_before_front_and_back_rounds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One paired sample should request placement immediately before each side."""
+    args = make_storage_args(tmp_path)
+    paths = multicam.create_session(args, datetime(2026, 7, 11, 12, 34, 56, 5))
+    adapter = FakeAdapter()
+    handles = make_handles(adapter)
+    prompts: list[str] = []
+    monkeypatch.setattr(multicam, "capture_hdr_round", lambda *_args: make_round_results())
+    monkeypatch.setattr(multicam, "save_round", lambda *_args: [])
+    monkeypatch.setattr(multicam, "_write_manifest", lambda *_args: None)
+
+    multicam.capture_sample(handles, adapter, args, paths, "group001", 1, prompt=prompts.append)
+
+    assert prompts == [
+        "放好 ZS32 左手件正面后按 Enter 或 s...",
+        "将同一个 ZS32 左手件翻到背面后按 Enter 或 s...",
+    ]
+
+
+def test_main_cleans_up_cameras_on_keyboard_interrupt(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An operator interrupt should return cleanly through the camera context."""
+    adapter = FakeAdapter()
+    monkeypatch.setattr(multicam.HikvisionAdapter, "load", lambda: adapter)
+    monkeypatch.setattr(multicam, "create_session", lambda *_args: object())
+
+    def interrupt(*_args: object, **_kwargs: object) -> bool:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(multicam, "capture_sample", interrupt)
+    assert multicam.main(["--label", "normal", "--hdr"]) == 130
+    assert adapter.events.count("open:0") == 1
+    assert adapter.events.count("open:1") == 1
+    assert adapter.events.count("open:2") == 1
+    assert adapter.events[-9:] == [
+        "stop:2",
+        "close:2",
+        "destroy:2",
+        "stop:1",
+        "close:1",
+        "destroy:1",
+        "stop:0",
+        "close:0",
+        "destroy:0",
+    ]
