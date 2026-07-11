@@ -300,22 +300,22 @@ class HdrCaptureConfig(Protocol):
     blur_size: int
     hdr_max_retries: int
     hdr_max_clip_pct: float
-    fps: float
+    capture_interval: float
 
 
-class TriggerPassPacer:
-    """Keep grouped software-trigger passes at or below a configured frame rate."""
+class GroupedTriggerPacer:
+    """Keep a minimum application-level delay between grouped trigger passes."""
 
     def __init__(
         self,
-        fps: float,
+        interval_seconds: float,
         *,
         monotonic: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
-        if fps <= 0:
-            raise ValueError("fps must be greater than zero")
-        self._interval = 1.0 / fps
+        if not math.isfinite(interval_seconds) or interval_seconds < 0:
+            raise ValueError("capture interval must be greater than or equal to zero")
+        self._interval = interval_seconds
         self._monotonic = monotonic
         self._sleep = sleep
         self._last_pass_at: float | None = None
@@ -337,7 +337,7 @@ def capture_exposure_pass(
     exposure: float,
     settle_frames: int,
     timeout_ms: int,
-    pacer: TriggerPassPacer,
+    pacer: GroupedTriggerPacer,
 ) -> list[np.ndarray]:
     """Set one exposure on all cameras and return one grouped frame pass."""
     for handle in handles:
@@ -360,10 +360,10 @@ def capture_hdr_round(
     adapter: CameraAdapter,
     config: HdrCaptureConfig,
     *,
-    pacer: TriggerPassPacer | None = None,
+    pacer: GroupedTriggerPacer | None = None,
 ) -> list[HdrViewResult]:
     """Capture and fuse one complete short/long HDR pair for every camera."""
-    pacer = TriggerPassPacer(config.fps) if pacer is None else pacer
+    pacer = GroupedTriggerPacer(config.capture_interval) if pacer is None else pacer
     for attempt_index in range(config.hdr_max_retries + 1):
         short_images = capture_exposure_pass(
             handles,
@@ -409,6 +409,43 @@ def capture_hdr_round(
         if attempt_index == config.hdr_max_retries:
             return results
     raise RuntimeError("unreachable HDR retry state")
+
+
+@dataclass(frozen=True)
+class SingleViewResult:
+    """One single-exposure image for a physical camera slot."""
+
+    camera_slot: int
+    final_image: np.ndarray
+    source_short: np.ndarray | None = None
+    source_long: np.ndarray | None = None
+
+
+def capture_single_round(
+    handles: Sequence[CameraHandle],
+    adapter: CameraAdapter,
+    exposure: float,
+    timeout_ms: int,
+    pacer: GroupedTriggerPacer,
+) -> list[SingleViewResult]:
+    """Set all exposures, then trigger all cameras before reading any camera."""
+    for handle in handles:
+        adapter.set_exposure(handle, exposure)
+    pacer.wait()
+    images = trigger_and_read(handles, adapter, timeout_ms)
+    return [SingleViewResult(slot, image) for slot, image in enumerate(images)]
+
+
+def capture_round(
+    handles: Sequence[CameraHandle],
+    adapter: CameraAdapter,
+    args: argparse.Namespace,
+    pacer: GroupedTriggerPacer,
+) -> list[HdrViewResult] | list[SingleViewResult]:
+    """Dispatch one round to explicit HDR or the default single-exposure path."""
+    if args.hdr:
+        return capture_hdr_round(handles, adapter, args, pacer=pacer)
+    return capture_single_round(handles, adapter, args.exposure, args.timeout_ms, pacer)
 
 
 def _cleanup_camera_handles(
@@ -510,6 +547,9 @@ MANIFEST_COLUMNS = (
     "view",
     "device_index",
     "camera_serial",
+    "capture_mode",
+    "exposure",
+    "gain",
     "file",
     "source_short",
     "source_long",
@@ -609,7 +649,7 @@ def _write_round_images(
 
 
 def save_round(
-    results: Sequence[HdrViewResult],
+    results: Sequence[HdrViewResult] | Sequence[SingleViewResult],
     round_name: str,
     sample_id: str,
     group_id: str,
@@ -618,7 +658,7 @@ def save_round(
     args: argparse.Namespace,
     paths: SessionPaths,
 ) -> list[dict[str, str]]:
-    """Atomically store one three-view HDR round and return its manifest rows."""
+    """Atomically store one three-view round and return its manifest rows."""
     if len(results) != 3:
         raise RuntimeError(f"{round_name} round returned {len(results)} results instead of 3")
     slots = {result.camera_slot for result in results}
@@ -634,11 +674,16 @@ def save_round(
         slot = result.camera_slot
         view = view_for(round_name, slot)
         handle = handles[slot]
-        fused_path = paths.view_dirs[view] / _image_name(args, view, group_id, image_index, "fused")
+        is_hdr = isinstance(result, HdrViewResult)
+        final_kind = "fused" if is_hdr else "single"
+        final_path = paths.view_dirs[view] / _image_name(
+            args, view, group_id, image_index, final_kind
+        )
         short_path = paths.view_dirs[view] / _image_name(args, view, group_id, image_index, "short")
         long_path = paths.view_dirs[view] / _image_name(args, view, group_id, image_index, "long")
-        writes.append((fused_path, result.fused_image, view, handle.device.index))
-        if args.save_hdr_sources:
+        final_image = result.fused_image if is_hdr else result.final_image
+        writes.append((final_path, final_image, view, handle.device.index))
+        if is_hdr and args.save_hdr_sources:
             writes.extend(
                 (
                     (short_path, result.short_image, view, handle.device.index),
@@ -656,13 +701,16 @@ def save_round(
                 "view": view,
                 "device_index": str(handle.device.index),
                 "camera_serial": handle.device.serial,
-                "file": str(fused_path),
-                "source_short": str(short_path) if args.save_hdr_sources else "",
-                "source_long": str(long_path) if args.save_hdr_sources else "",
-                "short_exposure": str(args.short_exposure),
-                "long_exposure": str(args.long_exposure),
-                "hdr_attempt": str(result.attempt),
-                "fused_clip_pct": str(result.fused_clip_pct),
+                "capture_mode": "hdr_fused" if is_hdr else "single",
+                "exposure": "" if is_hdr else str(args.exposure),
+                "gain": str(0.0 if args.gain is None else args.gain),
+                "file": str(final_path),
+                "source_short": str(short_path) if is_hdr and args.save_hdr_sources else "",
+                "source_long": str(long_path) if is_hdr and args.save_hdr_sources else "",
+                "short_exposure": str(args.short_exposure) if is_hdr else "",
+                "long_exposure": str(args.long_exposure) if is_hdr else "",
+                "hdr_attempt": str(result.attempt) if is_hdr else "",
+                "fused_clip_pct": str(result.fused_clip_pct) if is_hdr else "",
                 "captured_at": captured_at,
                 "sample_status": "incomplete",
                 "failed_round": "",
@@ -708,7 +756,7 @@ def capture_sample(
     prompt: Callable[[str], object] | None = None,
 ) -> bool:
     """Capture a paired front/back sample and record explicit completeness."""
-    pacer = TriggerPassPacer(args.fps)
+    pacer = GroupedTriggerPacer(args.capture_interval)
     sample_id = f"{args.part_id}_{group_id}_{image_index:06d}"
     rows: list[dict[str, str]] = []
     current_round = "front"
@@ -721,7 +769,7 @@ def capture_sample(
                     else "将同一个 ZS32 左手件翻到背面后按 Enter 或 s..."
                 )
                 prompt(prompt_text)
-            results = capture_hdr_round(handles, adapter, args, pacer=pacer)
+            results = capture_round(handles, adapter, args, pacer)
             rows.extend(
                 save_round(results, current_round, sample_id, group_id, image_index, handles, args, paths)
             )
@@ -737,6 +785,7 @@ def capture_sample(
                 "sample_id": sample_id,
                 "group_id": group_id,
                 "image_index": str(image_index),
+                "capture_mode": "hdr_fused" if args.hdr else "single",
                 "sample_status": "incomplete",
                 "failed_round": current_round,
                 "failed_view": failed_view,
@@ -763,6 +812,7 @@ def capture_sample(
                 "sample_id": sample_id,
                 "group_id": group_id,
                 "image_index": str(image_index),
+                "capture_mode": "hdr_fused" if args.hdr else "single",
                 "sample_status": "incomplete",
                 "error": str(error),
             }
@@ -779,6 +829,7 @@ def capture_sample(
             "sample_id": sample_id,
             "group_id": group_id,
             "image_index": str(image_index),
+            "capture_mode": "hdr_fused" if args.hdr else "single",
             "sample_status": "complete",
         }
     )
@@ -794,14 +845,14 @@ def capture_group(
     group_id: str,
     prompt: Callable[[str], object] | None = None,
     *,
-    pacer: TriggerPassPacer | None = None,
+    pacer: GroupedTriggerPacer | None = None,
 ) -> list[bool]:
     """Capture every sample in a group front-first, then back-first.
 
     The placement prompt belongs to the physical group transition, while each
     image index retains its own sample ID across the two capture rounds.
     """
-    pacer = TriggerPassPacer(args.fps) if pacer is None else pacer
+    pacer = GroupedTriggerPacer(args.capture_interval) if pacer is None else pacer
     image_indices = range(1, args.images_per_group + 1)
     rows_by_index: dict[int, list[dict[str, str]]] = {index: [] for index in image_indices}
     failures: dict[int, tuple[str, Exception]] = {}
@@ -814,7 +865,7 @@ def capture_group(
         for image_index in image_indices:
             sample_id = f"{args.part_id}_{group_id}_{image_index:06d}"
             try:
-                results = capture_hdr_round(handles, adapter, args, pacer=pacer)
+                results = capture_round(handles, adapter, args, pacer)
                 rows_by_index[image_index].extend(
                     save_round(
                         results,
@@ -848,6 +899,7 @@ def capture_group(
                     "sample_id": sample_id,
                     "group_id": group_id,
                     "image_index": str(image_index),
+                    "capture_mode": "hdr_fused" if args.hdr else "single",
                     "sample_status": "complete",
                 }
             )
@@ -873,6 +925,7 @@ def capture_group(
                     "sample_id": sample_id,
                     "group_id": group_id,
                     "image_index": str(image_index),
+                    "capture_mode": "hdr_fused" if args.hdr else "single",
                     "sample_status": "incomplete",
                     "failed_round": round_name,
                     "failed_view": failed_view,
@@ -939,7 +992,6 @@ class _CaptureArgumentParser(argparse.ArgumentParser):
     ) -> argparse.Namespace:
         """Allow discovery alone while validating capture-specific options."""
         parsed = super().parse_args(args, namespace)
-        parsed.fps = 10.0 if parsed.fps is None else parsed.fps
         if not parsed.list_devices:
             if parsed.label is None:
                 self.error("the following arguments are required: --label")
@@ -959,14 +1011,13 @@ class _CaptureArgumentParser(argparse.ArgumentParser):
                 ("exposure", "--exposure"),
                 ("short_exposure", "--short-exposure"),
                 ("long_exposure", "--long-exposure"),
-                ("fps", "--fps"),
             )
             for attribute, option in positive_float_options:
                 value = getattr(parsed, attribute)
                 if not math.isfinite(value) or value <= 0:
                     self.error(f"{option} must be greater than zero")
-            capture_interval = getattr(parsed, "capture_interval", None)
-            if capture_interval is not None and capture_interval < 0:
+            capture_interval = parsed.capture_interval
+            if not math.isfinite(capture_interval) or capture_interval < 0:
                 self.error("--capture-interval must be greater than or equal to zero")
         return parsed
 
@@ -994,7 +1045,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--short-exposure", type=float, default=7000.0)
     parser.add_argument("--long-exposure", type=float, default=40000.0)
     parser.add_argument("--gain", type=float)
-    parser.add_argument("--fps", type=float)
+    parser.add_argument(
+        "--capture-interval",
+        type=float,
+        default=0.2,
+        help="minimum seconds between grouped software-trigger passes",
+    )
     parser.add_argument("--hdr-settle-frames", type=int, default=5)
     parser.add_argument("--timeout-ms", type=int, default=3000)
     parser.add_argument("--short-dark-threshold", type=float, default=70.0)
@@ -1036,7 +1092,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             adapter,
             gain=0.0 if args.gain is None else args.gain,
         ) as handles:
-            pacer = TriggerPassPacer(args.fps)
+            pacer = GroupedTriggerPacer(args.capture_interval)
             for group_index in range(1, args.group_count + 1):
                 group_id = f"group{group_index:03d}"
                 capture_group(

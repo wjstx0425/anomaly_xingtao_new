@@ -135,7 +135,7 @@ git diff --cached --stat
 | `--hdr` | 开启短曝光/长曝光融合 |
 | `--save-hdr-sources` | 同时保存短曝光和长曝光原图 |
 
-### ZS32 三相机六视图 HDR 采集
+### ZS32 三相机六视图采集
 
 先确认 SDK 当前枚举到的设备索引、型号和序列号：
 
@@ -143,38 +143,39 @@ git diff --cached --stat
 .venv/bin/python pipeline/1_collect_multicamera_data.py --list-devices
 ```
 
-正常样本的完整命令：
+三个视角按相机序列号固定绑定：正面 `DA9805574`、左侧 `DA9625347`、
+右侧 `DB0998274`，不依赖可能变化的 SDK 设备编号。先用默认单曝光跑通流程：
 
 ```bash
 .venv/bin/python pipeline/1_collect_multicamera_data.py \
-  --devices 0 1 2 \
   --hand left \
   --label normal \
-  --part-id part001 \
-  --group-count 10 \
+  --part-id zs32_test \
+  --group-count 1 \
   --images-per-group 1 \
   --manual-load \
-  --hdr \
-  --save-hdr-sources \
-  --align-hdr \
-  --short-exposure 7000 \
-  --long-exposure 40000 \
-  --hdr-settle-frames 5 \
+  --exposure 4000 \
   --gain 0 \
-  --fps 10 \
-  --root ./dataset/zs32_multiview
+  --capture-interval 0.2 \
+  --timeout-ms 3000 \
+  --root /tmp/zs32_three_camera_test
 ```
 
 采集缺陷样本时将 `--label normal` 改为 `--label defect` 并增加非空的
-`--defect-type <缺陷类型>`。采集模式必须显式传入 `--hdr`；首版不支持单曝光采集。
+`--defect-type <缺陷类型>`。单曝光图像文件名以 `_single.png` 结尾，manifest 的
+`capture_mode=single`，并且 `source_short`、`source_long` 为空。
 
-`--devices` 的顺序表示物理相机槽位，不是六个独立设备：
+物理相机槽位和六视图的关系如下：
 
-| 相机槽位 | 默认设备 | 正面轮视图 | 翻面后视图 |
+| 相机槽位 | 固定序列号 | 正面轮视图 | 翻面后视图 |
 | --- | --- | --- | --- |
-| 中央 | `device 0` | `front` | `back` |
-| 左侧 | `device 1` | `front_left` | `back_left` |
-| 右侧 | `device 2` | `front_right` | `back_right` |
+| 中央 | `DA9805574` | `front` | `back` |
+| 左侧 | `DA9625347` | `front_left` | `back_left` |
+| 右侧 | `DB0998274` | `front_right` | `back_right` |
+
+HDR 功能没有删除。需要时在上述命令中显式增加 `--hdr`，并按需加入
+`--save-hdr-sources --short-exposure 7000 --long-exposure 40000`。程序不再向相机写入
+硬件帧率；`--capture-interval` 仅表示相邻软件触发批次之间的最小等待秒数。
 
 每个 group 只提示两次：首先按提示放好正面，连续采完该 group 的所有
 `images-per-group`；然后将同一工件翻到背面，再连续采完所有图像。每个

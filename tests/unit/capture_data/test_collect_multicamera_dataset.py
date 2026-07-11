@@ -221,7 +221,7 @@ def make_hdr_config(**overrides: object) -> SimpleNamespace:
         "blur_size": 31,
         "hdr_max_retries": 0,
         "hdr_max_clip_pct": 12.0,
-        "fps": 10.0,
+        "capture_interval": 0.1,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -237,6 +237,9 @@ def make_storage_args(root: Path, **overrides: object) -> SimpleNamespace:
             "label": "normal",
             "defect_type": "",
             "part_id": "part001",
+            "hdr": True,
+            "exposure": 4000.0,
+            "gain": None,
             "save_hdr_sources": False,
         }
     )
@@ -257,6 +260,44 @@ def make_round_results(round_offset: int = 0) -> list[multicam.HdrViewResult]:
         )
         for slot in range(3)
     ]
+
+
+def test_single_round_sets_all_exposures_before_grouped_trigger_and_read() -> None:
+    """Single exposure keeps the three cameras in one grouped acquisition pass."""
+    adapter = FakeAdapter()
+    handles = [
+        multicam.CameraHandle(device, object(), object(), bytearray(8), started=True)
+        for device in make_devices()
+    ]
+
+    results = multicam.capture_single_round(
+        handles,
+        adapter,
+        exposure=4000.0,
+        timeout_ms=3000,
+        pacer=multicam.GroupedTriggerPacer(0.0),
+    )
+
+    assert adapter.events == [
+        "exposure:0:4000",
+        "exposure:1:4000",
+        "exposure:2:4000",
+        "trigger:0",
+        "trigger:1",
+        "trigger:2",
+        "read:0",
+        "read:1",
+        "read:2",
+    ]
+    assert [result.camera_slot for result in results] == [0, 1, 2]
+    assert all(result.source_short is None and result.source_long is None for result in results)
+
+
+def test_parser_uses_application_capture_interval_without_hardware_fps() -> None:
+    args = multicam.build_parser().parse_args(["--label", "normal"])
+
+    assert args.capture_interval == 0.2
+    assert not hasattr(args, "fps")
 
 
 def make_handles(adapter: FakeAdapter) -> list[multicam.CameraHandle]:
@@ -337,7 +378,7 @@ def test_capture_hdr_round_paces_settle_short_and_long_trigger_passes(
         now += seconds
 
     monkeypatch.setattr(multicam, "fuse_exposures", lambda images, **kwargs: images[0])
-    pacer = multicam.TriggerPassPacer(10.0, monotonic=monotonic, sleep=sleep)
+    pacer = multicam.GroupedTriggerPacer(0.1, monotonic=monotonic, sleep=sleep)
 
     multicam.capture_hdr_round(handles, adapter, make_hdr_config(hdr_settle_frames=1), pacer=pacer)
 
@@ -379,7 +420,7 @@ def test_capture_group_paces_across_adjacent_hdr_rounds(
     monkeypatch.setattr(multicam, "fuse_exposures", lambda images, **kwargs: images[0])
     monkeypatch.setattr(multicam, "save_round", lambda *_args: [])
     monkeypatch.setattr(multicam, "_write_manifest", lambda *_args: None)
-    pacer = multicam.TriggerPassPacer(10.0, monotonic=monotonic, sleep=sleep)
+    pacer = multicam.GroupedTriggerPacer(0.1, monotonic=monotonic, sleep=sleep)
 
     multicam.capture_group(handles, adapter, args, paths, "group001", pacer=pacer)
 
@@ -414,7 +455,7 @@ def test_capture_hdr_round_retry_keeps_using_the_supplied_pacer(
         return np.full((1, 1, 3), 255 if fusion_count == 1 else 0, dtype=np.uint8)
 
     monkeypatch.setattr(multicam, "fuse_exposures", fake_fuse)
-    pacer = multicam.TriggerPassPacer(10.0, monotonic=monotonic, sleep=sleep)
+    pacer = multicam.GroupedTriggerPacer(0.1, monotonic=monotonic, sleep=sleep)
 
     multicam.capture_hdr_round(
         handles,
@@ -426,11 +467,11 @@ def test_capture_hdr_round_retry_keeps_using_the_supplied_pacer(
     assert sleeps == pytest.approx([0.1, 0.1, 0.1])
 
 
-@pytest.mark.parametrize("fps", [0.0, -1.0])
-def test_trigger_pass_pacer_rejects_non_positive_fps(fps: float) -> None:
-    """Invalid frame rates should fail explicitly instead of dividing by zero."""
-    with pytest.raises(ValueError, match="fps must be greater than zero"):
-        multicam.TriggerPassPacer(fps)
+@pytest.mark.parametrize("interval", [-1.0, float("nan")])
+def test_grouped_trigger_pacer_rejects_invalid_interval(interval: float) -> None:
+    """Negative or non-finite application pacing intervals are invalid."""
+    with pytest.raises(ValueError, match="capture interval"):
+        multicam.GroupedTriggerPacer(interval)
 
 
 def test_capture_hdr_round_retries_the_complete_pair_when_any_view_is_clipped(
@@ -479,7 +520,7 @@ def test_capture_sample_writes_one_complete_six_view_session(
     adapter = FakeAdapter()
     handles = make_handles(adapter)
     rounds = iter([make_round_results(), make_round_results(30)])
-    monkeypatch.setattr(multicam, "capture_hdr_round", lambda *_args, **_kwargs: next(rounds))
+    monkeypatch.setattr(multicam, "capture_round", lambda *_args, **_kwargs: next(rounds))
 
     assert multicam.capture_sample(handles, adapter, args, paths, "group001", 1) is True
 
@@ -515,7 +556,7 @@ def test_capture_sample_records_imwrite_failure_context(
     paths = multicam.create_session(args, datetime(2026, 7, 11, 12, 34, 56, 1))
     adapter = FakeAdapter()
     handles = make_handles(adapter)
-    monkeypatch.setattr(multicam, "capture_hdr_round", lambda *_args, **_kwargs: make_round_results())
+    monkeypatch.setattr(multicam, "capture_round", lambda *_args, **_kwargs: make_round_results())
     writes = 0
 
     def fail_second_write(_path: str, _image: np.ndarray) -> bool:
@@ -553,7 +594,7 @@ def test_capture_sample_records_back_capture_failure_context(
             raise RuntimeError("GetOneFrameTimeout failed for device 2 serial serial-2")
         return make_round_results()
 
-    monkeypatch.setattr(multicam, "capture_hdr_round", capture)
+    monkeypatch.setattr(multicam, "capture_round", capture)
 
     assert multicam.capture_sample(handles, adapter, args, paths, "group009", 3) is False
 
@@ -599,7 +640,7 @@ def test_capture_sample_checks_six_distinct_views_before_complete(
     paths = multicam.create_session(args, datetime(2026, 7, 11, 12, 34, 56, 4))
     adapter = FakeAdapter()
     handles = make_handles(adapter)
-    monkeypatch.setattr(multicam, "capture_hdr_round", lambda *_args, **_kwargs: make_round_results())
+    monkeypatch.setattr(multicam, "capture_round", lambda *_args, **_kwargs: make_round_results())
 
     def malformed_save_round(
         results: object,
@@ -645,7 +686,7 @@ def test_capture_sample_rolls_back_published_files_when_replace_fails(
     paths = multicam.create_session(args, datetime(2026, 7, 11, 12, 34, 56, 5))
     adapter = FakeAdapter()
     handles = make_handles(adapter)
-    monkeypatch.setattr(multicam, "capture_hdr_round", lambda *_args, **_kwargs: make_round_results())
+    monkeypatch.setattr(multicam, "capture_round", lambda *_args, **_kwargs: make_round_results())
     original_replace = Path.replace
     replacements = 0
 
@@ -920,7 +961,7 @@ def test_parser_exposes_capture_schema_and_hdr_defaults() -> None:
     assert args.short_exposure == 7000.0
     assert args.long_exposure == 40000.0
     assert args.gain is None
-    assert args.fps == 10.0
+    assert args.capture_interval == 0.2
     assert args.hdr_settle_frames == 5
     assert args.timeout_ms == 3000
     assert args.short_dark_threshold == 70.0
@@ -962,7 +1003,7 @@ def test_parser_rejects_hdr_only_flags_in_single_exposure_mode(hdr_only_flag: st
         ["--exposure", "nan"],
         ["--short-exposure", "nan"],
         ["--long-exposure", "nan"],
-        ["--fps", "nan"],
+        ["--capture-interval", "nan"],
     ],
 )
 def test_parser_rejects_invalid_capture_ranges(invalid_option: list[str]) -> None:
@@ -980,7 +1021,9 @@ def test_parser_rejects_negative_future_capture_interval_default() -> None:
         parser.parse_args(["--label", "normal"])
 
 
-@pytest.mark.parametrize("option", ["--exposure", "--short-exposure", "--long-exposure", "--fps"])
+@pytest.mark.parametrize(
+    "option", ["--exposure", "--short-exposure", "--long-exposure", "--capture-interval"]
+)
 def test_main_rejects_non_finite_positive_float_before_sdk_load(
     option: str,
     monkeypatch: pytest.MonkeyPatch,
@@ -1186,10 +1229,10 @@ def test_set_exposure_validates_every_write() -> None:
     ]
 
 
-def test_main_normalizes_default_fps_for_capture_pacing(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_main_normalizes_default_capture_interval_for_capture_pacing(monkeypatch: pytest.MonkeyPatch) -> None:
     """The default frame rate should configure application-level HDR pacing."""
     adapter = FakeAdapter()
-    captured_fps: list[float] = []
+    captured_intervals: list[float] = []
     opened_serials: list[str] = []
 
     @contextmanager
@@ -1210,10 +1253,10 @@ def test_main_normalizes_default_fps_for_capture_pacing(monkeypatch: pytest.Monk
         group_id: object,
         prompt: object,
         *,
-        pacer: multicam.TriggerPassPacer,
+        pacer: multicam.GroupedTriggerPacer,
     ) -> None:
         del handles, camera_adapter, paths, group_id, prompt, pacer
-        captured_fps.append(config.fps)
+        captured_intervals.append(config.capture_interval)
 
     monkeypatch.setattr(multicam.HikvisionAdapter, "load", lambda: adapter)
     monkeypatch.setattr(multicam, "create_session", lambda *args: SimpleNamespace())
@@ -1221,7 +1264,7 @@ def test_main_normalizes_default_fps_for_capture_pacing(monkeypatch: pytest.Monk
     monkeypatch.setattr(multicam, "capture_group", fake_capture_group)
 
     assert multicam.main(["--label", "normal", "--hdr"]) == 0
-    assert captured_fps == [10.0]
+    assert captured_intervals == [0.2]
     assert opened_serials == ["DA9805574", "DA9625347", "DB0998274"]
 
 
@@ -1240,7 +1283,7 @@ def test_capture_sample_prompts_before_front_and_back_rounds(
     adapter = FakeAdapter()
     handles = make_handles(adapter)
     prompts: list[str] = []
-    monkeypatch.setattr(multicam, "capture_hdr_round", lambda *_args, **_kwargs: make_round_results())
+    monkeypatch.setattr(multicam, "capture_round", lambda *_args, **_kwargs: make_round_results())
     monkeypatch.setattr(multicam, "save_round", lambda *_args: [])
     monkeypatch.setattr(multicam, "_write_manifest", lambda *_args: None)
 
@@ -1262,7 +1305,7 @@ def test_capture_group_prompts_once_and_captures_all_fronts_before_backs(
     handles = make_handles(adapter)
     prompts: list[str] = []
     saved_rounds: list[tuple[str, str, int]] = []
-    monkeypatch.setattr(multicam, "capture_hdr_round", lambda *_args, **_kwargs: make_round_results())
+    monkeypatch.setattr(multicam, "capture_round", lambda *_args, **_kwargs: make_round_results())
 
     def record_round(
         _results: object,
@@ -1341,7 +1384,7 @@ def test_main_prompts_twice_per_group_only_for_manual_load(
 
     assert multicam.main(argv) == 0
     assert len(received_prompts) == 2
-    assert isinstance(received_pacers[0], multicam.TriggerPassPacer)
+    assert isinstance(received_pacers[0], multicam.GroupedTriggerPacer)
     assert received_pacers[1] is received_pacers[0]
     assert all(callable(prompt) if manual_load else prompt is None for prompt in received_prompts)
     assert len(prompt_calls) == expected_prompt_count
