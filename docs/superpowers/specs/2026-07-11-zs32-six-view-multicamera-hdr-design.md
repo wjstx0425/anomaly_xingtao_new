@@ -23,7 +23,37 @@
 | `DA9625347` | 左侧面 | `front_left` | `back_left` |
 | `DB0998274` | 右侧面 | `front_right` | `back_right` |
 
-零件目录固定使用 `hand=left`；命令行仍显式保留 `--hand left`，并拒绝其他值，避免数据写入错误的手性目录。
+命令行显式要求零件手性，支持 `--hand left` 和 `--hand right`，并把两类数据写入各自的 `left/`、`right/` 目录，避免训练数据混合。
+
+## 右手件批量正常数据
+
+右手件使用与左手件相同的三台物理相机、序列号绑定、六视角名称和正反面翻转流程，只把 hand 目录改为 `right`。本次已确认的正式批量参数为：
+
+- 正常工件 `100` 个；
+- 每个视角、每个工件 `1` 张最终图像；
+- HDR 短曝光 `1500 us`；
+- HDR 长曝光 `6000 us`；
+- `hdr-settle-frames=1`；
+- 输出根目录 `/home/yunjing/anomalib/dataset`；
+- 不默认保存 HDR 短、长曝光源图，只保存 `600` 张融合图；需要源图时显式增加 `--save-hdr-sources`。
+
+```bash
+.venv/bin/python pipeline/1_collect_multicamera_data.py \
+  --hand right \
+  --label normal \
+  --part-id zs32_right_normal \
+  --group-count 100 \
+  --images-per-group 1 \
+  --manual-load \
+  --hdr \
+  --short-exposure 1500 \
+  --long-exposure 6000 \
+  --gain 0 \
+  --capture-interval 0.2 \
+  --hdr-settle-frames 1 \
+  --timeout-ms 3000 \
+  --root /home/yunjing/anomalib/dataset
+```
 
 ## 入口与模块边界
 
