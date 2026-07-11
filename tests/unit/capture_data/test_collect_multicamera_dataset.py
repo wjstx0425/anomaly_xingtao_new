@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import csv
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -92,6 +93,7 @@ def make_hdr_config(**overrides: object) -> SimpleNamespace:
         "blur_size": 31,
         "hdr_max_retries": 0,
         "hdr_max_clip_pct": 12.0,
+        "fps": 10.0,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -187,6 +189,51 @@ def test_capture_hdr_round_groups_exposures_and_fuses_matching_camera_frames(
     ] * 3
     assert [result.camera_slot for result in results] == [0, 1, 2]
     assert [result.attempt for result in results] == [1, 1, 1]
+
+
+def test_capture_hdr_round_paces_settle_short_and_long_trigger_passes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Adjacent grouped trigger passes should respect the configured frame interval."""
+    adapter = FakeAdapter()
+    handles = make_handles(adapter)
+    now = 0.0
+    sleeps: list[float] = []
+
+    def monotonic() -> float:
+        return now
+
+    def sleep(seconds: float) -> None:
+        nonlocal now
+        sleeps.append(seconds)
+        now += seconds
+
+    monkeypatch.setattr(multicam, "fuse_exposures", lambda images, **kwargs: images[0])
+    pacer = multicam.TriggerPassPacer(10.0, monotonic=monotonic, sleep=sleep)
+
+    multicam.capture_hdr_round(handles, adapter, make_hdr_config(hdr_settle_frames=1), pacer=pacer)
+
+    assert sleeps == pytest.approx([0.1, 0.1, 0.1])
+    acquisition_events = [event for event in adapter.events if event.startswith(("trigger", "read"))]
+    assert acquisition_events == [
+        event
+        for _ in range(4)
+        for event in (
+            "trigger:0",
+            "trigger:1",
+            "trigger:2",
+            "read:0",
+            "read:1",
+            "read:2",
+        )
+    ]
+
+
+@pytest.mark.parametrize("fps", [0.0, -1.0])
+def test_trigger_pass_pacer_rejects_non_positive_fps(fps: float) -> None:
+    """Invalid frame rates should fail explicitly instead of dividing by zero."""
+    with pytest.raises(ValueError, match="fps must be greater than zero"):
+        multicam.TriggerPassPacer(fps)
 
 
 def test_capture_hdr_round_retries_the_complete_pair_when_any_view_is_clipped(
@@ -572,6 +619,42 @@ def test_main_lists_devices_without_opening_cameras(
         "2\tmodel-2\tserial-2",
     ]
     assert adapter.events == ["list"]
+
+
+def test_main_normalizes_default_fps_for_camera_and_capture_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The default frame rate should be identical in adapter setup and HDR pacing config."""
+    adapter = FakeAdapter()
+    captured_fps: list[float] = []
+
+    @contextmanager
+    def fake_open_cameras(
+        devices: list[multicam.DeviceDescription],
+        camera_adapter: FakeAdapter,
+        gain: float,
+        fps: float,
+    ) -> object:
+        del devices, camera_adapter, gain
+        captured_fps.append(fps)
+        yield []
+
+    def fake_capture_group(
+        handles: object,
+        camera_adapter: object,
+        config: SimpleNamespace,
+        paths: object,
+        group_id: object,
+        prompt: object,
+    ) -> None:
+        del handles, camera_adapter, paths, group_id, prompt
+        captured_fps.append(config.fps)
+
+    monkeypatch.setattr(multicam.HikvisionAdapter, "load", lambda: adapter)
+    monkeypatch.setattr(multicam, "create_session", lambda *args: SimpleNamespace())
+    monkeypatch.setattr(multicam, "open_cameras", fake_open_cameras)
+    monkeypatch.setattr(multicam, "capture_group", fake_capture_group)
+
+    assert multicam.main(["--label", "normal", "--hdr"]) == 0
+    assert captured_fps == [10.0, 10.0]
 
 
 def test_parser_requires_defect_type_for_defect_capture() -> None:

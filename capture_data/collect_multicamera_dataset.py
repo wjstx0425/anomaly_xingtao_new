@@ -15,6 +15,7 @@ import ctypes
 import importlib
 import re
 import sys
+import time
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -242,6 +243,35 @@ class HdrCaptureConfig(Protocol):
     blur_size: int
     hdr_max_retries: int
     hdr_max_clip_pct: float
+    fps: float
+
+
+class TriggerPassPacer:
+    """Keep grouped software-trigger passes at or below a configured frame rate."""
+
+    def __init__(
+        self,
+        fps: float,
+        *,
+        monotonic: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
+        if fps <= 0:
+            raise ValueError("fps must be greater than zero")
+        self._interval = 1.0 / fps
+        self._monotonic = monotonic
+        self._sleep = sleep
+        self._last_pass_at: float | None = None
+
+    def wait(self) -> None:
+        """Wait until the next grouped trigger pass is allowed to start."""
+        now = self._monotonic()
+        if self._last_pass_at is not None:
+            remaining = self._interval - (now - self._last_pass_at)
+            if remaining > 0:
+                self._sleep(remaining)
+                now = self._monotonic()
+        self._last_pass_at = now
 
 
 def capture_exposure_pass(
@@ -250,12 +280,15 @@ def capture_exposure_pass(
     exposure: float,
     settle_frames: int,
     timeout_ms: int,
+    pacer: TriggerPassPacer,
 ) -> list[np.ndarray]:
     """Set one exposure on all cameras and return one grouped frame pass."""
     for handle in handles:
         adapter.set_exposure(handle, exposure)
     for _ in range(settle_frames):
+        pacer.wait()
         trigger_and_read(handles, adapter, timeout_ms)
+    pacer.wait()
     return trigger_and_read(handles, adapter, timeout_ms)
 
 
@@ -266,9 +299,14 @@ def _image_clip_pct(image: np.ndarray, threshold: int = 250) -> float:
 
 
 def capture_hdr_round(
-    handles: Sequence[CameraHandle], adapter: CameraAdapter, config: HdrCaptureConfig
+    handles: Sequence[CameraHandle],
+    adapter: CameraAdapter,
+    config: HdrCaptureConfig,
+    *,
+    pacer: TriggerPassPacer | None = None,
 ) -> list[HdrViewResult]:
     """Capture and fuse one complete short/long HDR pair for every camera."""
+    pacer = TriggerPassPacer(config.fps) if pacer is None else pacer
     for attempt_index in range(config.hdr_max_retries + 1):
         short_images = capture_exposure_pass(
             handles,
@@ -276,6 +314,7 @@ def capture_hdr_round(
             config.short_exposure,
             config.hdr_settle_frames,
             config.timeout_ms,
+            pacer,
         )
         long_images = capture_exposure_pass(
             handles,
@@ -283,6 +322,7 @@ def capture_hdr_round(
             config.long_exposure,
             config.hdr_settle_frames,
             config.timeout_ms,
+            pacer,
         )
         results: list[HdrViewResult] = []
         for camera_slot, (short_image, long_image) in enumerate(
@@ -845,6 +885,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"{device.index}\t{device.model}\t{device.serial}")
         return 0
 
+    args.fps = 10.0 if args.fps is None else args.fps
+    if args.fps <= 0:
+        parser.error("--fps must be greater than zero")
     try:
         devices = _selected_devices(args.devices, available_devices)
     except ValueError as error:
@@ -855,7 +898,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             devices,
             adapter,
             gain=0.0 if args.gain is None else args.gain,
-            fps=10.0 if args.fps is None else args.fps,
+            fps=args.fps,
         ) as handles:
             for group_index in range(1, args.group_count + 1):
                 group_id = f"group{group_index:03d}"
