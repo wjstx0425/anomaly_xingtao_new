@@ -177,6 +177,30 @@ HDR 功能没有删除。需要时在上述命令中显式增加 `--hdr`，并�
 `--save-hdr-sources --short-exposure 7000 --long-exposure 40000`。程序不再向相机写入
 硬件帧率；`--capture-interval` 仅表示相邻软件触发批次之间的最小等待秒数。
 
+右手件 100 组正常 HDR 批量采集（每个视角 1 张、只保存融合图）：
+
+```bash
+.venv/bin/python pipeline/1_collect_multicamera_data.py \
+  --hand right \
+  --label normal \
+  --part-id zs32_right_normal \
+  --group-count 100 \
+  --images-per-group 1 \
+  --manual-load \
+  --hdr \
+  --short-exposure 1500 \
+  --long-exposure 6000 \
+  --gain 0 \
+  --capture-interval 0.2 \
+  --hdr-settle-frames 1 \
+  --timeout-ms 3000 \
+  --root /home/yunjing/anomalib/dataset
+```
+
+输出位于 `/home/yunjing/anomalib/dataset/right/<view>/normal/<session_id>/images`，
+100 个工件共生成 600 张 HDR 融合图。需要同时保存 1200 张短、长曝光源图时，再增加
+`--save-hdr-sources`。
+
 每个 group 只提示两次：首先按提示放好正面，连续采完该 group 的所有
 `images-per-group`；然后将同一工件翻到背面，再连续采完所有图像。每个
 image index 的正面三图与背面三图共用一个 `sample_id`。

@@ -984,6 +984,23 @@ def test_single_exposure_is_default_capture_mode() -> None:
     assert args.exposure == 4000.0
 
 
+def test_parser_accepts_right_hand_hdr_capture() -> None:
+    """Right-hand ZS32 batches should use the existing HDR capture path."""
+    args = multicam.build_parser().parse_args(["--hand", "right", "--label", "normal", "--hdr"])
+
+    assert args.hand == "right"
+    assert args.hdr is True
+
+
+def test_create_session_uses_right_hand_directory(tmp_path: Path) -> None:
+    """Every right-hand view should be stored below the right directory."""
+    args = make_storage_args(tmp_path, hand="right")
+
+    paths = multicam.create_session(args, datetime(2026, 7, 11, 16, 30, 0))
+
+    assert all(path.is_relative_to(tmp_path / "right") for path in paths.view_dirs.values())
+
+
 @pytest.mark.parametrize("hdr_only_flag", ["--save-hdr-sources", "--align-hdr"])
 def test_parser_rejects_hdr_only_flags_in_single_exposure_mode(hdr_only_flag: str) -> None:
     """Artifact and fusion flags must not be silently ignored outside HDR mode."""

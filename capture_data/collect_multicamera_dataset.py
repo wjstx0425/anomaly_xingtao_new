@@ -1032,7 +1032,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--front-serial", default=DEFAULT_SERIALS.front)
     parser.add_argument("--left-serial", default=DEFAULT_SERIALS.left)
     parser.add_argument("--right-serial", default=DEFAULT_SERIALS.right)
-    parser.add_argument("--hand", choices=("left",), default="left")
+    parser.add_argument("--hand", choices=("left", "right"), default="left")
     parser.add_argument("--label", choices=("normal", "defect"))
     parser.add_argument("--defect-type", default="")
     parser.add_argument("--part-id", default="part001")

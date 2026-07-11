@@ -8,6 +8,7 @@
 - Every grouped pass keeps `trigger x3 -> read x3`. Single images use `_single.png`; HDR keeps fused/source outputs.
 - Cleanup independently attempts stop, `TriggerMode=Off`, close, and destroy so one failure does not skip later cleanup.
 - Codex performed offline parser/direct assertions, compile, help, and diff checks after commit `c9f1e38f`; per user request, post-fix hardware acceptance remains user-owned.
+- Right-hand capture uses the same serial-bound cameras and six views with `--hand right`. The confirmed normal HDR batch is 100 groups, one image per view, short/long exposures `1500/6000 us`, and root `/home/yunjing/anomalib/dataset`; source exposure images are off unless `--save-hdr-sources` is passed.
 
 ## ZS32 three-camera grouped HDR capture (2026-07-11)
 
