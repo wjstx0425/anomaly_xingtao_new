@@ -322,4 +322,5 @@
   - Core entrypoint: `capture_data/collect_multicamera_dataset.py`; thin numbered wrapper: `pipeline/1_collect_multicamera_data.py`.
   - `--list-devices` is SDK-lazy and prints tab-separated device index, model, and serial without opening cameras.
   - Capture requires `--hdr`; `--label defect` also requires a non-empty `--defect-type`.
-  - The operator is prompted separately for the front and back of the same left-hand ZS32 part, and `KeyboardInterrupt` exits with status 130 after best-effort camera cleanup.
+  - Each group prompts once for front and once for back, captures all image-index front rounds before all back rounds, and preserves one paired sample ID per image index. `capture_sample(...)` remains available for single-sample reuse.
+  - `KeyboardInterrupt` exits with status 130 after best-effort camera cleanup.

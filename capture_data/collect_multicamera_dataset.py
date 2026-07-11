@@ -638,6 +638,102 @@ def capture_sample(
     return True
 
 
+def capture_group(
+    handles: Sequence[CameraHandle],
+    adapter: CameraAdapter,
+    args: argparse.Namespace,
+    paths: SessionPaths,
+    group_id: str,
+    prompt: Callable[[str], object] | None = None,
+) -> list[bool]:
+    """Capture every sample in a group front-first, then back-first.
+
+    The placement prompt belongs to the physical group transition, while each
+    image index retains its own sample ID across the two capture rounds.
+    """
+    image_indices = range(1, args.images_per_group + 1)
+    rows_by_index: dict[int, list[dict[str, str]]] = {index: [] for index in image_indices}
+    failures: dict[int, tuple[str, Exception]] = {}
+    for round_name, prompt_text in (
+        ("front", "放好 ZS32 左手件正面后按 Enter 或 s..."),
+        ("back", "将同一个 ZS32 左手件翻到背面后按 Enter 或 s..."),
+    ):
+        if prompt is not None:
+            prompt(prompt_text)
+        for image_index in image_indices:
+            sample_id = f"{args.part_id}_{group_id}_{image_index:06d}"
+            try:
+                results = capture_hdr_round(handles, adapter, args)
+                rows_by_index[image_index].extend(
+                    save_round(
+                        results,
+                        round_name,
+                        sample_id,
+                        group_id,
+                        image_index,
+                        handles,
+                        args,
+                        paths,
+                    )
+                )
+            except Exception as error:
+                failures.setdefault(image_index, (round_name, error))
+
+    statuses: list[bool] = []
+    expected_views = set(ROUND_VIEWS["front"] + ROUND_VIEWS["back"])
+    for image_index in image_indices:
+        sample_id = f"{args.part_id}_{group_id}_{image_index:06d}"
+        rows = rows_by_index[image_index]
+        failure = failures.get(image_index)
+        stored_views = {row["view"] for row in rows if row["record_type"] == "image"}
+        if failure is None and len(rows) == 6 and stored_views == expected_views:
+            for row in rows:
+                row["sample_status"] = "complete"
+            rows.append(
+                {
+                    **dict.fromkeys(MANIFEST_COLUMNS, ""),
+                    "record_type": "sample",
+                    "session_id": paths.session_id,
+                    "sample_id": sample_id,
+                    "group_id": group_id,
+                    "image_index": str(image_index),
+                    "sample_status": "complete",
+                }
+            )
+            statuses.append(True)
+        else:
+            if failure is None:
+                round_name = ""
+                error = RuntimeError(
+                    "sample requires exactly six distinct canonical views before completion; "
+                    f"got {sorted(stored_views)}"
+                )
+                failed_view = failed_device = ""
+            else:
+                round_name, error = failure
+                failed_view, failed_device = _failure_identity(error, round_name, handles)
+            for row in rows:
+                row["sample_status"] = "incomplete"
+            rows.append(
+                {
+                    **dict.fromkeys(MANIFEST_COLUMNS, ""),
+                    "record_type": "sample",
+                    "session_id": paths.session_id,
+                    "sample_id": sample_id,
+                    "group_id": group_id,
+                    "image_index": str(image_index),
+                    "sample_status": "incomplete",
+                    "failed_round": round_name,
+                    "failed_view": failed_view,
+                    "failed_device_index": failed_device,
+                    "error": str(error),
+                }
+            )
+            statuses.append(False)
+        _write_manifest(paths, rows)
+    return statuses
+
+
 def validate_devices(devices: Sequence[int]) -> tuple[int, int, int]:
     """Validate and preserve the physical ordering of three camera indices.
 
@@ -763,16 +859,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         ) as handles:
             for group_index in range(1, args.group_count + 1):
                 group_id = f"group{group_index:03d}"
-                for image_index in range(1, args.images_per_group + 1):
-                    capture_sample(
-                        handles,
-                        adapter,
-                        args,
-                        paths,
-                        group_id,
-                        image_index,
-                        prompt=input,
-                    )
+                capture_group(handles, adapter, args, paths, group_id, prompt=input)
     except KeyboardInterrupt:
         return 130
     return 0

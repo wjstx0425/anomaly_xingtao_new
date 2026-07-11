@@ -601,6 +601,60 @@ def test_capture_sample_prompts_before_front_and_back_rounds(
     ]
 
 
+def test_capture_group_prompts_once_and_captures_all_fronts_before_backs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A group should be placed once per side while preserving paired sample IDs."""
+    args = make_storage_args(tmp_path, images_per_group=3)
+    paths = multicam.create_session(args, datetime(2026, 7, 11, 12, 34, 56, 6))
+    adapter = FakeAdapter()
+    handles = make_handles(adapter)
+    prompts: list[str] = []
+    saved_rounds: list[tuple[str, str, int]] = []
+    monkeypatch.setattr(multicam, "capture_hdr_round", lambda *_args: make_round_results())
+
+    def record_round(
+        _results: object,
+        round_name: str,
+        sample_id: str,
+        _group_id: str,
+        image_index: int,
+        *_args: object,
+    ) -> list[dict[str, str]]:
+        saved_rounds.append((round_name, sample_id, image_index))
+        return [
+            {
+                **dict.fromkeys(multicam.MANIFEST_COLUMNS, ""),
+                "record_type": "image",
+                "sample_id": sample_id,
+                "round": round_name,
+                "view": view,
+            }
+            for view in multicam.ROUND_VIEWS[round_name]
+        ]
+
+    monkeypatch.setattr(multicam, "save_round", record_round)
+    monkeypatch.setattr(multicam, "_write_manifest", lambda *_args: None)
+
+    assert multicam.capture_group(
+        handles, adapter, args, paths, "group001", prompt=prompts.append
+    ) == [True, True, True]
+
+    assert prompts == [
+        "放好 ZS32 左手件正面后按 Enter 或 s...",
+        "将同一个 ZS32 左手件翻到背面后按 Enter 或 s...",
+    ]
+    assert [round_name for round_name, _, _ in saved_rounds] == ["front"] * 3 + ["back"] * 3
+    assert saved_rounds == [
+        ("front", "part001_group001_000001", 1),
+        ("front", "part001_group001_000002", 2),
+        ("front", "part001_group001_000003", 3),
+        ("back", "part001_group001_000001", 1),
+        ("back", "part001_group001_000002", 2),
+        ("back", "part001_group001_000003", 3),
+    ]
+
+
 def test_main_cleans_up_cameras_on_keyboard_interrupt(monkeypatch: pytest.MonkeyPatch) -> None:
     """An operator interrupt should return cleanly through the camera context."""
     adapter = FakeAdapter()
@@ -610,7 +664,7 @@ def test_main_cleans_up_cameras_on_keyboard_interrupt(monkeypatch: pytest.Monkey
     def interrupt(*_args: object, **_kwargs: object) -> bool:
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(multicam, "capture_sample", interrupt)
+    monkeypatch.setattr(multicam, "capture_group", interrupt)
     assert multicam.main(["--label", "normal", "--hdr"]) == 130
     assert adapter.events.count("open:0") == 1
     assert adapter.events.count("open:1") == 1
