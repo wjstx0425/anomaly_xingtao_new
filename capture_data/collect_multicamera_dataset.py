@@ -601,6 +601,7 @@ def capture_sample(
     prompt: Callable[[str], object] | None = None,
 ) -> bool:
     """Capture a paired front/back sample and record explicit completeness."""
+    pacer = TriggerPassPacer(args.fps)
     sample_id = f"{args.part_id}_{group_id}_{image_index:06d}"
     rows: list[dict[str, str]] = []
     current_round = "front"
@@ -613,7 +614,7 @@ def capture_sample(
                     else "将同一个 ZS32 左手件翻到背面后按 Enter 或 s..."
                 )
                 prompt(prompt_text)
-            results = capture_hdr_round(handles, adapter, args)
+            results = capture_hdr_round(handles, adapter, args, pacer=pacer)
             rows.extend(
                 save_round(results, current_round, sample_id, group_id, image_index, handles, args, paths)
             )
@@ -685,12 +686,15 @@ def capture_group(
     paths: SessionPaths,
     group_id: str,
     prompt: Callable[[str], object] | None = None,
+    *,
+    pacer: TriggerPassPacer | None = None,
 ) -> list[bool]:
     """Capture every sample in a group front-first, then back-first.
 
     The placement prompt belongs to the physical group transition, while each
     image index retains its own sample ID across the two capture rounds.
     """
+    pacer = TriggerPassPacer(args.fps) if pacer is None else pacer
     image_indices = range(1, args.images_per_group + 1)
     rows_by_index: dict[int, list[dict[str, str]]] = {index: [] for index in image_indices}
     failures: dict[int, tuple[str, Exception]] = {}
@@ -703,7 +707,7 @@ def capture_group(
         for image_index in image_indices:
             sample_id = f"{args.part_id}_{group_id}_{image_index:06d}"
             try:
-                results = capture_hdr_round(handles, adapter, args)
+                results = capture_hdr_round(handles, adapter, args, pacer=pacer)
                 rows_by_index[image_index].extend(
                     save_round(
                         results,
@@ -900,9 +904,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             gain=0.0 if args.gain is None else args.gain,
             fps=args.fps,
         ) as handles:
+            pacer = TriggerPassPacer(args.fps)
             for group_index in range(1, args.group_count + 1):
                 group_id = f"group{group_index:03d}"
-                capture_group(handles, adapter, args, paths, group_id, prompt=input if args.manual_load else None)
+                capture_group(
+                    handles,
+                    adapter,
+                    args,
+                    paths,
+                    group_id,
+                    prompt=input if args.manual_load else None,
+                    pacer=pacer,
+                )
     except KeyboardInterrupt:
         return 130
     return 0

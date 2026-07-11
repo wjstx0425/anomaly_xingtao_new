@@ -14,6 +14,10 @@
   trigger/read ordering, then returns one grouped final pass. `capture_hdr_round()` captures the full three-camera
   short/long pair, fuses by physical camera slot, and retries the complete pair when any fused view exceeds
   `hdr_max_clip_pct`. Any camera read exception propagates without returning a partial `HdrViewResult` list.
+- `TriggerPassPacer` must live for the full open-camera session: `main()` creates it once and passes it through every
+  `capture_group()`, while compatibility `capture_sample()` creates one shared across its front/back rounds. Do not
+  recreate it at HDR-round or group boundaries, because that clears `_last_pass_at` and can allow adjacent software
+  triggers inside the camera frame interval, causing `MV_E_NODATA`.
 - Software triggering sends all three triggers before reading frames. It is suitable for static parts but is not
   hardware synchronization; moving parts or strict simultaneous exposure require shared hardware trigger wiring.
 - A sample is `complete` only when all six distinct canonical views were stored. Failures remain explicit as an
