@@ -421,21 +421,39 @@ def _write_round_images(
     images: Sequence[tuple[Path, np.ndarray, str, int]], round_name: str
 ) -> None:
     """Write a complete round through temporary files before publishing any image."""
-    staged: list[tuple[Path, Path]] = []
+    staged: list[tuple[Path, Path, str, int]] = []
+    published: list[Path] = []
+    current_view = ""
+    current_device_index = -1
     try:
         for destination, image, view, device_index in images:
+            current_view = view
+            current_device_index = device_index
             temporary = destination.with_name(f".{destination.stem}.tmp{destination.suffix}")
-            staged.append((temporary, destination))
+            staged.append((temporary, destination, view, device_index))
             if not cv2.imwrite(str(temporary), image):
                 raise RoundStorageError(
                     f"cv2.imwrite returned false for {destination}", round_name, view, device_index
                 )
-        for temporary, destination in staged:
+        for temporary, destination, view, device_index in staged:
+            current_view = view
+            current_device_index = device_index
             temporary.replace(destination)
-    except Exception:
-        for temporary, _ in staged:
+            published.append(destination)
+    except Exception as error:
+        for temporary, _, _, _ in staged:
             temporary.unlink(missing_ok=True)
-        raise
+        for destination in published:
+            destination.unlink(missing_ok=True)
+        if isinstance(error, RoundStorageError):
+            raise
+        raise RoundStorageError(
+            f"failed to publish {round_name} view {current_view} for device "
+            f"{current_device_index}: {error}",
+            round_name,
+            current_view,
+            current_device_index,
+        ) from error
 
 
 def save_round(
@@ -451,6 +469,12 @@ def save_round(
     """Atomically store one three-view HDR round and return its manifest rows."""
     if len(results) != 3:
         raise RuntimeError(f"{round_name} round returned {len(results)} results instead of 3")
+    slots = {result.camera_slot for result in results}
+    expected_slots = {0, 1, 2}
+    if slots != expected_slots:
+        raise RuntimeError(
+            f"{round_name} round camera slots must be exactly {expected_slots}, got {slots}"
+        )
     captured_at = datetime.now().isoformat(timespec="microseconds")
     writes: list[tuple[Path, np.ndarray, str, int]] = []
     rows: list[dict[str, str]] = []
@@ -556,6 +580,29 @@ def capture_sample(
                 "failed_round": current_round,
                 "failed_view": failed_view,
                 "failed_device_index": failed_device,
+                "error": str(error),
+            }
+        )
+        _write_manifest(paths, rows)
+        return False
+    expected_views = set(ROUND_VIEWS["front"] + ROUND_VIEWS["back"])
+    stored_views = {row["view"] for row in rows if row["record_type"] == "image"}
+    if len(rows) != 6 or stored_views != expected_views:
+        error = RuntimeError(
+            "sample requires exactly six distinct canonical views before completion; "
+            f"got {sorted(stored_views)}"
+        )
+        for row in rows:
+            row["sample_status"] = "incomplete"
+        rows.append(
+            {
+                **dict.fromkeys(MANIFEST_COLUMNS, ""),
+                "record_type": "sample",
+                "session_id": paths.session_id,
+                "sample_id": sample_id,
+                "group_id": group_id,
+                "image_index": str(image_index),
+                "sample_status": "incomplete",
                 "error": str(error),
             }
         )

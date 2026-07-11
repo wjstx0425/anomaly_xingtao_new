@@ -320,6 +320,108 @@ def test_capture_sample_records_back_capture_failure_context(
     assert "GetOneFrameTimeout failed" in summary["error"]
 
 
+def test_save_round_rejects_duplicate_camera_slots(tmp_path: Path) -> None:
+    """A three-result round must still contain each physical camera slot exactly once."""
+    args = make_storage_args(tmp_path)
+    paths = multicam.create_session(args, datetime(2026, 7, 11, 12, 34, 56, 3))
+    adapter = FakeAdapter()
+    handles = make_handles(adapter)
+    results = make_round_results()
+    results[1] = multicam.HdrViewResult(
+        camera_slot=0,
+        short_image=results[1].short_image,
+        long_image=results[1].long_image,
+        fused_image=results[1].fused_image,
+        fused_clip_pct=results[1].fused_clip_pct,
+        attempt=results[1].attempt,
+    )
+
+    with pytest.raises(RuntimeError, match=r"camera slots.*\{0, 1, 2\}"):
+        multicam.save_round(results, "front", "sample", "group001", 4, handles, args, paths)
+
+    assert not list(tmp_path.rglob("*.png"))
+
+
+def test_capture_sample_checks_six_distinct_views_before_complete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Malformed stored rows must not promote a sample to complete."""
+    args = make_storage_args(tmp_path)
+    paths = multicam.create_session(args, datetime(2026, 7, 11, 12, 34, 56, 4))
+    adapter = FakeAdapter()
+    handles = make_handles(adapter)
+    monkeypatch.setattr(multicam, "capture_hdr_round", lambda *_args: make_round_results())
+
+    def malformed_save_round(
+        results: object,
+        round_name: str,
+        sample_id: str,
+        group_id: str,
+        image_index: int,
+        round_handles: object,
+        round_args: object,
+        round_paths: multicam.SessionPaths,
+    ) -> list[dict[str, str]]:
+        del results, round_handles, round_args
+        return [
+            {
+                **dict.fromkeys(multicam.MANIFEST_COLUMNS, ""),
+                "record_type": "image",
+                "session_id": round_paths.session_id,
+                "sample_id": sample_id,
+                "group_id": group_id,
+                "image_index": str(image_index),
+                "round": round_name,
+                "view": multicam.ROUND_VIEWS[round_name][0],
+                "sample_status": "incomplete",
+            }
+        ] * 3
+
+    monkeypatch.setattr(multicam, "save_round", malformed_save_round)
+
+    assert multicam.capture_sample(handles, adapter, args, paths, "group001", 5) is False
+
+    with paths.manifest_path.open(newline="", encoding="utf-8") as file:
+        rows = list(csv.DictReader(file))
+    summary = [row for row in rows if row["record_type"] == "sample"][0]
+    assert summary["sample_status"] == "incomplete"
+    assert "six distinct canonical views" in summary["error"]
+
+
+def test_capture_sample_rolls_back_published_files_when_replace_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A mid-publish failure must leave no round files and retain failure identity."""
+    args = make_storage_args(tmp_path)
+    paths = multicam.create_session(args, datetime(2026, 7, 11, 12, 34, 56, 5))
+    adapter = FakeAdapter()
+    handles = make_handles(adapter)
+    monkeypatch.setattr(multicam, "capture_hdr_round", lambda *_args: make_round_results())
+    original_replace = Path.replace
+    replacements = 0
+
+    def fail_second_replace(source: Path, destination: Path) -> Path:
+        nonlocal replacements
+        replacements += 1
+        if replacements == 2:
+            raise OSError("simulated publish failure")
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(Path, "replace", fail_second_replace)
+
+    assert multicam.capture_sample(handles, adapter, args, paths, "group001", 6) is False
+
+    assert not list(tmp_path.rglob("*.png"))
+    with paths.manifest_path.open(newline="", encoding="utf-8") as file:
+        rows = list(csv.DictReader(file))
+    summary = [row for row in rows if row["record_type"] == "sample"][0]
+    assert summary["sample_status"] == "incomplete"
+    assert summary["failed_round"] == "front"
+    assert summary["failed_view"] == "front_left"
+    assert summary["failed_device_index"] == "1"
+    assert "simulated publish failure" in summary["error"]
+
+
 def test_trigger_and_read_groups_all_triggers_before_reads() -> None:
     """All cameras should receive a trigger before any camera is read."""
     adapter = FakeAdapter()
