@@ -381,3 +381,6 @@
   - Output: `dataset/zs32_yolo_labeling`; verified `660` PNG hard links, `110` physical groups, `left=486`, `right=174`, with source/output inode identity for every manifest row.
   - Label Studio document root: `/home/yunjing/anomalib/dataset/zs32_yolo_labeling`; Source Storage path: `/home/yunjing/anomalib/dataset/zs32_yolo_labeling/images`.
   - Use Import method `Files`, filter `.*\.png$`, and the generated single-class `label_studio_config.xml` with rectangle label `defect`.
+  - Completed Label Studio YOLO export: `dataset/zs32_yolo_labeling/project-10-at-2026-07-12-12-29-b424b36b`; it contains `414` labeled images and `488` valid class-0 boxes. Missing label files were confirmed as intentional no-visible-defect views.
+  - Stage 28 (`pipeline/28_prepare_zs32_yolo_dataset.py`) builds `dataset/zs32_six_view_yolo` and excludes `left/20260711_181850_552955/less/group027` entirely.
+  - Verified stage-28 output: `2010` image/label pairs (`train=1398`, `val=306`, `test=306`), `222` source groups, `654` defect views, `678` real right normals, `678` horizontally mirrored left normals, `488` boxes, `0` invalid labels, and `0` group leakage. Real images are hard-linked; only mirrored normals consume new image storage (about `21G` total output tree accounting for hard links).

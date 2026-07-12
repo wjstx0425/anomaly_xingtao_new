@@ -42,6 +42,7 @@ uv sync
 | `25_prepare_yolo_same_dist_dataset.py` | 构建同分布 YOLO 验证集 | 按 `gNNN` 采集组拆分，train 增强、val 不增强 |
 | `26_prepare_yolo_roi_dataset.py` | 构建 ROI-level YOLO 数据集 | GT-centered 诊断 ROI 或 tiled 部署 ROI |
 | `27_prepare_zs32_label_studio.py` | 准备 ZS32 Label Studio 本地文件目录 | 汇总六视图缺陷图并生成 manifest 和标注界面配置 |
+| `28_prepare_zs32_yolo_dataset.py` | 构建 ZS32 六视角 YOLO 数据集 | 合并 Label Studio 框、空视角、真实/镜像正常负样本并按工件拆分 |
 
 最常用流程：
 
@@ -1558,6 +1559,17 @@ Expected tasks: 660
 
 把 `dataset/zs32_yolo_labeling/label_studio_config.xml` 的完整内容粘贴到 Labeling Interface。
 每个任务对应一个特定视图；如果该视图中看不到缺陷，也要提交空 annotation，不要跳过任务。
+
+标注完成并导出 YOLO 格式后，使用 stage 28 构建可直接训练的数据集：
+
+```bash
+.venv/bin/python pipeline/28_prepare_zs32_yolo_dataset.py
+```
+
+默认读取 `dataset/zs32_yolo_labeling/project-10-at-2026-07-12-12-29-b424b36b`，排除六视角均无框的
+`left/20260711_181850_552955/less/group027`，并输出到 `dataset/zs32_six_view_yolo`。同一物理工件的
+六视角以及真实/镜像正常对保持在同一 split；有框视角使用 Label Studio 标签，无可见缺陷的视角和正常图
+使用空标签。生成的训练入口为 `dataset/zs32_six_view_yolo/data.yaml`。
 
 ## 工业融合检测 MVP-1
 
