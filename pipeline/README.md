@@ -41,6 +41,7 @@ uv sync
 | `23_augment_yolo_dataset.py` | 对 YOLO bbox 数据做离线增强 | 训练集增强，bbox 同步变换 |
 | `25_prepare_yolo_same_dist_dataset.py` | 构建同分布 YOLO 验证集 | 按 `gNNN` 采集组拆分，train 增强、val 不增强 |
 | `26_prepare_yolo_roi_dataset.py` | 构建 ROI-level YOLO 数据集 | GT-centered 诊断 ROI 或 tiled 部署 ROI |
+| `27_prepare_zs32_label_studio.py` | 准备 ZS32 Label Studio 本地文件目录 | 汇总六视图缺陷图并生成 manifest 和标注界面配置 |
 
 最常用流程：
 
@@ -1527,6 +1528,36 @@ ROI 边界截断的错误 bbox，stage 26 只把完整落入 ROI 的框写入 la
 slot_x = roi_x1_in_slot + pred_x_in_roi
 slot_y = roi_y1_in_slot + pred_y_in_roi
 ```
+
+### ZS32 Label Studio Local Files 标注
+
+先在 anomalib 仓库根目录准备 Label Studio staging 目录：
+
+```bash
+uv run python pipeline/27_prepare_zs32_label_studio.py
+```
+
+然后启动独立的 Label Studio 环境，并将生成目录设为 Local Files 文档根目录：
+
+```bash
+conda activate label-studio
+export LABEL_STUDIO_LOCAL_FILES_SERVING_ENABLED=true
+export LABEL_STUDIO_LOCAL_FILES_DOCUMENT_ROOT=/home/yunjing/anomalib/dataset/zs32_yolo_labeling
+label-studio start
+```
+
+在项目的 Source Storage 中新增本地文件存储，使用以下精确配置：
+
+```text
+Storage type: Local Files
+Absolute local path: /home/yunjing/anomalib/dataset/zs32_yolo_labeling/images
+Import method: Files
+File Filter Regex: .*\.png$
+Expected tasks: 660
+```
+
+把 `dataset/zs32_yolo_labeling/label_studio_config.xml` 的完整内容粘贴到 Labeling Interface。
+每个任务对应一个特定视图；如果该视图中看不到缺陷，也要提交空 annotation，不要跳过任务。
 
 ## 工业融合检测 MVP-1
 

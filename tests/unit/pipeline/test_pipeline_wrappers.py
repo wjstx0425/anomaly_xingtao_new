@@ -679,6 +679,25 @@ def test_prepare_yolo_roi_dataset_parser_accepts_c789_options(tmp_path: Path) ->
     assert args.overwrite is True
 
 
+def test_prepare_zs32_label_studio_parser_accepts_paths_and_overwrite(tmp_path: Path) -> None:
+    wrapper = _load_module(
+        "pipeline_prepare_zs32_label_studio",
+        "pipeline/27_prepare_zs32_label_studio.py",
+    )
+    args = wrapper.build_parser().parse_args(
+        [
+            "--dataset-root",
+            str(tmp_path / "dataset"),
+            "--output-root",
+            str(tmp_path / "labeling"),
+            "--overwrite",
+        ],
+    )
+    assert args.dataset_root == tmp_path / "dataset"
+    assert args.output_root == tmp_path / "labeling"
+    assert args.overwrite is True
+
+
 def test_collect_c789_yolo_defects_builds_capture_and_crop_args(tmp_path: Path) -> None:
     """Stage 22 should capture C789 defect trays and crop all six slots as defects."""
     wrapper = _load_module("pipeline_collect_c789_yolo_defects", "pipeline/22_collect_c789_yolo_defects.py")
