@@ -363,3 +363,16 @@
   - Stage 24 (`pipeline/24_visualize_traditional_results.py`) renders contact sheets that display `GT` separately from `Evidence`, avoiding misleading labels such as `geometry less` as a defect class.
   - Stage 24 also writes per-case localization images under `visual_reports*/localization/`: it uses precise stage-20 `evidence_path` overlays when available and falls back to 4x8 `region=rXX_cYY` heat boxes from the geometry reason. Red means `missing_mask`, blue means `extra_mask`.
   - Example semantic smoke output: `results/c789_traditional/top_defect_semantic_v2/`; visual report: `results/c789_traditional/visual_reports_semantic/top_defect_semantic_v2_defect-all_page01.jpg`.
+
+## ZS32 six-view dataset labeling decision (2026-07-12)
+
+- Dataset roots: `dataset/right` and `dataset/left`; all `1,338` files are valid `4024x3036` RGB PNG images, with no YOLO txt, JSON/XML annotation, or masks yet.
+- Treat the data as `223` independent physical sample groups expanded into six views, not as `1,338` independent samples. Every split must keep all six views from one `(hand, session, group_id)` together.
+- Right hand: `113` normal groups and `29` defect groups (`deform=17`, `less=4`, `others=8`). Left hand: no real normal groups and `81` defect groups (`deform=35`, `less=42`, `others=4`). Combined defect diversity is `deform=52`, `less=46`, `others=12` physical groups.
+- First YOLO baseline remains single-class detection: every visible defect bbox uses class `0: defect`; preserve `defect_type=deform|less|others` in the manifest/file metadata for per-type recall reports rather than training a multi-class head now.
+- YOLO annotations are image-local: a defect part view with no visible defect gets an empty label file. Never draw a speculative box merely because another view shows that the physical part is defective.
+- Split YOLO data by physical source group before augmentation. Mirrors, all six views, crops, and other derivatives of one source group must remain in the same split.
+- For anomalib, train only on normal images and use one model per camera view as the baseline. Do not mix the six view distributions into one model.
+- If right normal images are mirrored to synthesize left normal training data, swap view semantics after horizontal flip: `front_left <-> front_right`, `back_left <-> back_right`, while `front` and `back` remain unchanged. Keep each original and all mirrored derivatives in the same split.
+- Synthetic left normal data cannot validate left-hand false-positive rate. Collect real left normal samples for validation/test before claiming left-hand deployment performance.
+- Current six-view capture layout is not directly accepted by the existing stage-3 workflow: its registered view names do not include the new six names, and its defect glob is one directory level shallower than `defect/<defect_type>/<session>/images`.
