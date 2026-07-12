@@ -226,6 +226,55 @@ def test_iter_raw_images_supports_left_bottom_alias(tmp_path: Path) -> None:
     ]
 
 
+def test_right_six_view_layout_supports_deep_defect_dirs(tmp_path: Path) -> None:
+    """Right-side camera views should find defect-type/session nesting."""
+    workflow = load_workflow_module()
+    image_path = (
+        tmp_path
+        / "right"
+        / "front_left"
+        / "defect"
+        / "deform"
+        / "session001"
+        / "images"
+        / "right_front_left_defect_deform_group001_000001_fused.png"
+    )
+    image_path.parent.mkdir(parents=True)
+    image_path.touch()
+
+    images = list(workflow._iter_raw_images(tmp_path, "right_front_left", "defect"))
+
+    assert images == [image_path]
+    assert workflow._raw_sample_id(image_path).endswith("deform_group001")
+    assert workflow._extract_frame_id(image_path) == "000001"
+    assert workflow._defect_type(image_path) == "deform"
+
+
+def test_right_view_can_use_right_directory_as_data_root(tmp_path: Path) -> None:
+    """The data root may point directly at the right directory."""
+    workflow = load_workflow_module()
+    image_path = (
+        tmp_path / "front" / "normal" / "session001" / "images" / "sample_group001_000001_fused.png"
+    )
+    image_path.parent.mkdir(parents=True)
+    image_path.touch()
+
+    assert list(workflow._iter_raw_images(tmp_path, "right_front", "normal")) == [image_path]
+
+
+def test_normal_test_split_is_grouped_and_deterministic() -> None:
+    """Auto split should hold out 23 of 113 groups consistently across views."""
+    workflow = load_workflow_module()
+    front = [Path(f"right_front_normal_group{index:03d}_000001_fused.png") for index in range(1, 114)]
+    back = [Path(f"right_back_normal_group{index:03d}_000001_fused.png") for index in range(1, 114)]
+
+    front_keys = workflow._normal_test_keys(front, ratio=0.2, seed=42)
+    back_keys = workflow._normal_test_keys(back, ratio=0.2, seed=42)
+
+    assert len(front_keys) == 23
+    assert front_keys == back_keys
+
+
 def test_preprocess_dataset_clears_stale_view_output(tmp_path: Path) -> None:
     """Preprocessing should remove stale generated images before writing a new manifest."""
     workflow = load_workflow_module()

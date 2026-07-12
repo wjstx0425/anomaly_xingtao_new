@@ -123,8 +123,8 @@ class ViewSpec:
     """Location of one ZS32 view in the raw dataset."""
 
     name: str
-    raw_parts: tuple[str, str]
-    fallback_raw_parts: tuple[tuple[str, str], ...] = ()
+    raw_parts: tuple[str, ...]
+    fallback_raw_parts: tuple[tuple[str, ...], ...] = ()
 
 
 VIEW_SPECS = {
@@ -142,6 +142,39 @@ VIEW_SPECS = {
     ),
     "no_hand_top": ViewSpec(name="no_hand_top", raw_parts=("no_hand", "top")),
     "no_hand_bottom": ViewSpec(name="no_hand_bottom", raw_parts=("no_hand", "bottom")),
+    # ZS32 right-side six-camera dataset. The one-component fallbacks allow
+    # --data-root to point either at the directory containing ``right`` or at
+    # the ``right`` directory itself.
+    "right_front": ViewSpec(
+        name="right_front",
+        raw_parts=("right", "front"),
+        fallback_raw_parts=(("front",),),
+    ),
+    "right_front_left": ViewSpec(
+        name="right_front_left",
+        raw_parts=("right", "front_left"),
+        fallback_raw_parts=(("front_left",),),
+    ),
+    "right_front_right": ViewSpec(
+        name="right_front_right",
+        raw_parts=("right", "front_right"),
+        fallback_raw_parts=(("front_right",),),
+    ),
+    "right_back": ViewSpec(
+        name="right_back",
+        raw_parts=("right", "back"),
+        fallback_raw_parts=(("back",),),
+    ),
+    "right_back_left": ViewSpec(
+        name="right_back_left",
+        raw_parts=("right", "back_left"),
+        fallback_raw_parts=(("back_left",),),
+    ),
+    "right_back_right": ViewSpec(
+        name="right_back_right",
+        raw_parts=("right", "back_right"),
+        fallback_raw_parts=(("back_right",),),
+    ),
 }
 DEFAULT_VIEW_NAMES = ("left_top", "left_bottom", "right_top", "right_bottom")
 
@@ -236,6 +269,19 @@ def _parse_sampling_ratio(value: str) -> float:
         msg = "Sampling ratio must satisfy 0 < value <= 1."
         raise argparse.ArgumentTypeError(msg)
     return sampling_ratio
+
+
+def _parse_normal_test_ratio(value: str) -> float:
+    """Parse an optional normal holdout ratio in the half-open range [0, 1)."""
+    try:
+        ratio = float(value)
+    except ValueError as error:
+        msg = "Normal-test ratio must be a number between 0 and 1."
+        raise argparse.ArgumentTypeError(msg) from error
+    if ratio < 0 or ratio >= 1:
+        msg = "Normal-test ratio must satisfy 0 <= value < 1."
+        raise argparse.ArgumentTypeError(msg)
+    return ratio
 
 
 def _parse_run_suffix(value: str) -> str:
@@ -371,7 +417,7 @@ def _raise_if_pretrained_resource_error(model_name: str, args: argparse.Namespac
 def _raw_view_dir(data_root: Path, view: str) -> Path:
     """Return the primary raw directory for one view."""
     spec = VIEW_SPECS[view]
-    return data_root / spec.raw_parts[0] / spec.raw_parts[1]
+    return data_root.joinpath(*spec.raw_parts)
 
 
 def _raw_view_dirs(data_root: Path, view: str) -> list[Path]:
@@ -380,8 +426,8 @@ def _raw_view_dirs(data_root: Path, view: str) -> list[Path]:
     raw_parts = (spec.raw_parts, *spec.fallback_raw_parts)
     view_dirs = []
     seen = set()
-    for hand, position in raw_parts:
-        view_dir = data_root / hand / position
+    for path_parts in raw_parts:
+        view_dir = data_root.joinpath(*path_parts)
         if view_dir not in seen:
             view_dirs.append(view_dir)
             seen.add(view_dir)
@@ -427,29 +473,52 @@ def _clear_preprocess_outputs(output_root: Path, views: Sequence[str]) -> None:
 
 def _extract_frame_id(image_path: Path) -> str:
     """Extract the six-digit frame id from a ZS32 image filename."""
-    match = re.search(r"_(\d{6})$", image_path.stem)
+    match = re.search(r"_(\d{6})(?:_fused)?$", image_path.stem)
     return match.group(1) if match else image_path.stem
 
 
 def _iter_raw_images(data_root: Path, view: str, label: str) -> Iterable[Path]:
     """Yield raw images for one view and label."""
     for label_dir in _raw_label_dirs(data_root, view, label):
-        nested_images = sorted(label_dir.glob("*/images/*.png"))
-        if nested_images:
-            yield from nested_images
-            return
-
-        flat_images = sorted(path for path in label_dir.glob("*.png") if path.is_file())
-        if flat_images:
-            yield from flat_images
+        images = sorted(path for path in label_dir.rglob("*.png") if path.is_file())
+        if images:
+            yield from images
             return
 
 
 def _raw_sample_id(image_path: Path) -> str:
     """Return the sample id for nested ZS32 or flat label-directory images."""
+    if re.search(r"_group\d+_", image_path.stem):
+        return re.sub(r"_\d{6}(?:_fused)?$", "", image_path.stem)
     if image_path.parent.name == "images":
         return image_path.parent.parent.name
     return image_path.stem
+
+
+def _normal_split_key(image_path: Path) -> str:
+    """Return a cross-view key used to keep one capture group in one split."""
+    match = re.search(r"_group(\d+)_", image_path.stem)
+    return f"group{match.group(1)}" if match else _raw_sample_id(image_path)
+
+
+def _normal_test_keys(image_paths: Sequence[Path], ratio: float, seed: int) -> set[str]:
+    """Select deterministic normal capture groups for threshold calibration."""
+    keys = sorted({_normal_split_key(path) for path in image_paths})
+    if ratio <= 0 or len(keys) < 2:
+        return set()
+    test_count = min(len(keys) - 1, max(1, round(len(keys) * ratio)))
+    generator = np.random.default_rng(seed)
+    selected_indices = generator.choice(len(keys), size=test_count, replace=False)
+    return {keys[int(index)] for index in selected_indices}
+
+
+def _defect_type(image_path: Path) -> str | None:
+    """Return the optional directory-level defect type for reporting."""
+    for index, part in enumerate(image_path.parts[:-1]):
+        if part == "defect" and index + 1 < len(image_path.parts) - 1:
+            candidate = image_path.parts[index + 1]
+            return None if candidate == "images" else candidate
+    return None
 
 
 def _remove_blue_marks(image: np.ndarray) -> tuple[np.ndarray, int, float]:
@@ -528,9 +597,26 @@ def preprocess_dataset(args: argparse.Namespace) -> Path:
 
     for view in selected_views:
         _log(f"Preparing view: {view}")
+        paths_by_label = {label: list(_iter_raw_images(data_root, view, label)) for label in LABELS}
+        normal_test_keys: set[str] = set()
+        normal_test_ratio = getattr(args, "normal_test_ratio", 0.0)
+        if not paths_by_label["normal_test"]:
+            normal_test_keys = _normal_test_keys(
+                paths_by_label["normal"],
+                normal_test_ratio,
+                getattr(args, "seed", 42),
+            )
+            if normal_test_keys:
+                _log(
+                    f"  auto split normal groups: {len(normal_test_keys)} normal_test / "
+                    f"{len({_normal_split_key(path) for path in paths_by_label['normal']})} total",
+                )
         for label in LABELS:
-            image_paths = list(_iter_raw_images(data_root, view, label))
+            image_paths = paths_by_label[label]
             if not image_paths:
+                if label == "normal_test" and normal_test_keys:
+                    _log(f"  {view}/normal_test: generated from normal capture groups")
+                    continue
                 checked_dirs = ", ".join(_repo_relative(path) for path in _raw_label_dirs(data_root, view, label))
                 _log(f"Warning: no images found for {view}/{label}; checked: {checked_dirs}.")
                 continue
@@ -540,9 +626,14 @@ def preprocess_dataset(args: argparse.Namespace) -> Path:
             for index, source_path in enumerate(image_paths, start=1):
                 sample_id = _raw_sample_id(source_path)
                 frame_id = _extract_frame_id(source_path)
+                output_label = (
+                    "normal_test"
+                    if label == "normal" and _normal_split_key(source_path) in normal_test_keys
+                    else label
+                )
                 output_path = (
                     _processed_view_dir(output_root, view)
-                    / label
+                    / output_label
                     / sample_id
                     / "images"
                     / source_path.name
@@ -553,7 +644,9 @@ def preprocess_dataset(args: argparse.Namespace) -> Path:
                         "source_path": str(source_path.resolve()),
                         "processed_path": str(output_path.resolve()),
                         "view": view,
-                        "label": label,
+                        "label": output_label,
+                        "source_label": label,
+                        "defect_type": _defect_type(source_path) if label == "defect" else None,
                         "sample_id": sample_id,
                         "frame_id": frame_id,
                         "roi": _format_roi(roi),
@@ -1224,6 +1317,12 @@ def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
         type=_parse_sampling_ratio,
         default=1.0,
         help="Fraction of normal training images to use. Validation/test data are unchanged.",
+    )
+    parser.add_argument(
+        "--normal-test-ratio",
+        type=_parse_normal_test_ratio,
+        default=0.2,
+        help="Normal capture-group fraction held out when no normal_test directory exists.",
     )
     parser.add_argument("--patchcore-batch-size", type=int, default=8, help="PatchCore training batch size.")
     parser.add_argument("--patchcore-backbone", default="wide_resnet50_2", help="PatchCore timm backbone name.")
