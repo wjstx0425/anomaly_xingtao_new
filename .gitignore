@@ -1,6 +1,7 @@
 # Project related
 datasets
 dataset/
+.worktrees/
 !src/anomalib/data/datasets
 pre_trained
 results
