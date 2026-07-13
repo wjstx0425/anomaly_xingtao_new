@@ -1,7 +1,7 @@
 # Copyright (C) 2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
-"""Pipeline stage 30: calibrate versioned ZS32 fusion thresholds offline."""
+"""Pipeline stage 31: calibrate versioned ZS32 fusion thresholds offline."""
 
 from __future__ import annotations
 

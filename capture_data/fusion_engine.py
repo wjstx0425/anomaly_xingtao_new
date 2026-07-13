@@ -19,8 +19,17 @@ from typing import Any
 
 PASS_STATUS = "PASS"
 FAIL_STATUS = "FAIL"
-DEFAULT_BRANCH_ORDER = ("geometry", "crack", "anomaly_dino", "efficient_ad", "surface_texture", "yolo")
+DEFAULT_BRANCH_ORDER = (
+    "template_match",
+    "geometry",
+    "crack",
+    "anomaly_dino",
+    "efficient_ad",
+    "surface_texture",
+    "yolo",
+)
 DEFAULT_STATUS_BY_BRANCH = {
+    "template_match": "NG_TEMPLATE",
     "geometry": "NG_GEOMETRY",
     "crack": "NG_CRACK",
     "anomaly_dino": "NG_ANOMALY",
@@ -59,6 +68,7 @@ BRANCH_FIELDNAMES = [
     "roi_version",
     "template_version",
     "source_hash",
+    "evidence_hash",
     "manifest_identity",
     "detections",
 ]
@@ -116,6 +126,7 @@ class BranchPrediction:
     product: str | None = None
     profile: str | None = None
     source_hash: str | None = None
+    evidence_hash: str | None = None
     manifest_identity: str | None = None
     capture_session: str | None = None
     group_id: str | None = None
@@ -1388,6 +1399,7 @@ def _prediction_from_row(row: Mapping[str, Any], branch: str) -> BranchPredictio
         product=_first_value(row, ("product", "product_id", "product_name")),
         profile=_first_value(row, ("profile", "profile_id", "fusion_profile")),
         source_hash=_first_value(row, ("source_hash", "source_sha256", "image_sha256")),
+        evidence_hash=_first_value(row, ("evidence_hash", "evidence_sha256", "template_sha256")),
         manifest_identity=_first_value(row, ("manifest_identity", "manifest_image_id", "capture_id", "image_id")),
         capture_session=_first_value(row, ("capture_session", "session_id")),
         group_id=_first_value(row, ("group_id", "capture_group")),

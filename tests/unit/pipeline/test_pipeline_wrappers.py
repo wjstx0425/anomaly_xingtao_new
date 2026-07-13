@@ -376,6 +376,8 @@ def test_fuse_inspection_results_parser_accepts_optional_branch_csvs(tmp_path: P
 
     args = wrapper.build_parser().parse_args(
         [
+            "--template-match-csv",
+            str(tmp_path / "template_match_predictions.csv"),
             "--geometry-csv",
             str(tmp_path / "geometry_predictions.csv"),
             "--anomaly-csv",
@@ -389,6 +391,7 @@ def test_fuse_inspection_results_parser_accepts_optional_branch_csvs(tmp_path: P
         ],
     )
 
+    assert args.template_match_csv == tmp_path / "template_match_predictions.csv"
     assert args.geometry_csv == tmp_path / "geometry_predictions.csv"
     assert args.anomaly_csv == tmp_path / "predictions.csv"
     assert args.branch_csv == [f"traditional={tmp_path / 'traditional_predictions.csv'}"]
@@ -420,8 +423,8 @@ def test_fuse_inspection_results_parser_accepts_zs32_audit_options(tmp_path: Pat
 
 
 def test_calibrate_zs32_fusion_parser_accepts_grouped_calibration_options(tmp_path: Path) -> None:
-    """Stage 30 should expose bounded calibration controls and repeatable required views."""
-    wrapper = _load_module("pipeline_calibrate_zs32_fusion", "pipeline/30_calibrate_zs32_fusion.py")
+    """Stage 31 should expose bounded calibration controls and repeatable required views."""
+    wrapper = _load_module("pipeline_calibrate_zs32_fusion", "pipeline/31_calibrate_zs32_fusion.py")
 
     args = wrapper.build_parser().parse_args(
         [
@@ -457,8 +460,8 @@ def test_calibrate_zs32_fusion_parser_accepts_grouped_calibration_options(tmp_pa
 
 
 def test_calibrate_zs32_fusion_loads_stage18_profile_contract() -> None:
-    """Stage 30 must publish the exact profile identity and four-version gate consumed by stage 18."""
-    wrapper = _load_module("pipeline_calibrate_zs32_contract", "pipeline/30_calibrate_zs32_fusion.py")
+    """Stage 31 must publish the exact profile identity and four-version gate consumed by stage 18."""
+    wrapper = _load_module("pipeline_calibrate_zs32_contract", "pipeline/31_calibrate_zs32_fusion.py")
 
     contract = wrapper.load_deployment_contract(wrapper.ZS32_PROFILE_PATH)
 
@@ -467,12 +470,12 @@ def test_calibrate_zs32_fusion_loads_stage18_profile_contract() -> None:
     assert contract["allowed_hands"] == ["left", "right"]
     assert contract["required_side"] == "zs32"
     assert len(contract["config_sha256"]) == 64
-    assert len(contract["expected_versions"]) == 60
+    assert len(contract["expected_versions"]) == 72
     assert {record["threshold_version"] for record in contract["expected_versions"]} == {
         "zs32-thresholds-2026.07.13",
     }
     required_groups = wrapper.required_groups_from_contract(contract)
-    assert len(required_groups) == 60
+    assert len(required_groups) == 72
     assert (
         "left",
         "front",
@@ -480,12 +483,19 @@ def test_calibrate_zs32_fusion_loads_stage18_profile_contract() -> None:
         "zs32-models-2026.07.13",
         "zs32-roi-2026.07.12",
     ) in required_groups
+    assert (
+        "left",
+        "front",
+        "template_match",
+        "zs32-models-2026.07.13",
+        "zs32-roi-2026.07.12",
+    ) in required_groups
 
 
 @pytest.mark.parametrize(("option", "value"), [("--target-recall", "0"), ("--normal-quantile", "1.1")])
 def test_calibrate_zs32_fusion_parser_rejects_out_of_range_rates(option: str, value: str, tmp_path: Path) -> None:
-    """Stage 30 rate arguments must stay in the open-zero, closed-one interval."""
-    wrapper = _load_module(f"pipeline_calibrate_zs32_fusion_{option}", "pipeline/30_calibrate_zs32_fusion.py")
+    """Stage 31 rate arguments must stay in the open-zero, closed-one interval."""
+    wrapper = _load_module(f"pipeline_calibrate_zs32_fusion_{option}", "pipeline/31_calibrate_zs32_fusion.py")
 
     with pytest.raises(SystemExit):
         wrapper.build_parser().parse_args(

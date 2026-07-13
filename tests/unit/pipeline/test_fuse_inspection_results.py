@@ -118,7 +118,7 @@ def _write_complete_predictions(  # noqa: C901
     omit_view: str | None = None,
     fault: str | None = None,
 ) -> Path:
-    """Write all five required rows for every ZS32 view."""
+    """Write all six required rows for every ZS32 view."""
     csv_path = tmp_path / "zs32_predictions.csv"
     fieldnames = [
         "part_id",
@@ -131,6 +131,7 @@ def _write_complete_predictions(  # noqa: C901
         "timestamp",
         "manifest_identity",
         "source_hash",
+        "evidence_hash",
         "side",
         "view",
         "branch",
@@ -157,12 +158,22 @@ def _write_complete_predictions(  # noqa: C901
                 continue
             source_path = tmp_path / f"{view}_source.png"
             source_path.write_bytes(view.encode())
-            for branch in ("quality_gate", "registration", f"anomaly_{view}", "yolo", "geometry"):
+            for branch in (
+                "template_match",
+                "quality_gate",
+                "registration",
+                f"anomaly_{view}",
+                "yolo",
+                "geometry",
+            ):
                 if fault == "missing_branch" and view == "back_right" and branch == "geometry":
+                    continue
+                if fault == "missing_template" and view == "front" and branch == "template_match":
                     continue
                 evidence_path = tmp_path / f"{view}_{branch}_evidence.png"
                 evidence_path.write_bytes(branch.encode())
                 target_row = view == "front" and branch == "anomaly_front"
+                target_template = view == "front" and branch == "template_match"
                 is_gray = gray_evidence and target_row
                 is_strong = strong_evidence and target_row
                 row = {
@@ -176,13 +187,20 @@ def _write_complete_predictions(  # noqa: C901
                     "timestamp": "2026-07-13T12:34:56+08:00",
                     "manifest_identity": f"{part_id}:left:{view}",
                     "source_hash": hashlib.sha256(source_path.read_bytes()).hexdigest(),
+                    "evidence_hash": (
+                        "0" * 64
+                        if fault == "evidence_hash_mismatch" and target_template
+                        else hashlib.sha256(evidence_path.read_bytes()).hexdigest()
+                    ),
                     "side": "zs32",
                     "view": view,
                     "branch": branch,
-                    "pred_label": 0,
+                    "pred_label": 1 if fault == "template_strong" and target_template else 0,
                     "raw_score": (
                         "nan"
                         if fault == "nonfinite_score" and target_row
+                        else 0.6
+                        if fault == "template_strong" and target_template
                         else 0.6
                         if is_strong
                         else 0.4
@@ -202,7 +220,15 @@ def _write_complete_predictions(  # noqa: C901
                         if branch in {"quality_gate", "registration"}
                         else ""
                     ),
-                    "reason": "strong anomaly" if is_strong else "gray anomaly" if is_gray else "clear",
+                    "reason": (
+                        "strong template mismatch"
+                        if fault == "template_strong" and target_template
+                        else "strong anomaly"
+                        if is_strong
+                        else "gray anomaly"
+                        if is_gray
+                        else "clear"
+                    ),
                     "source_path": "" if missing_artifact == "source" and target_row else source_path,
                     "evidence_path": "" if missing_artifact == "evidence" and target_row else evidence_path,
                     "model_version": (
@@ -216,7 +242,11 @@ def _write_complete_predictions(  # noqa: C901
                         if fault == "roi_version_mismatch" and view == "back_right" and branch == "yolo"
                         else "zs32-roi-2026.07.12"
                     ),
-                    "template_version": "zs32-templates-2026.07.13",
+                    "template_version": (
+                        "wrong-template"
+                        if fault == "template_version_mismatch" and target_template
+                        else "zs32-templates-2026.07.13"
+                    ),
                     "evidence_level": ("BROKEN" if fault == "malformed_evidence_level" and target_row else ""),
                     "detections": "[]" if branch == "yolo" else "",
                 }
@@ -277,6 +307,8 @@ def _write_complete_predictions(  # noqa: C901
                     row["group_id"] = "group-other"
                 writer.writerow(row)
                 if fault == "duplicate_view_identity" and view == "front" and branch == "anomaly_front":
+                    writer.writerow(row)
+                if fault == "duplicate_template" and target_template:
                     writer.writerow(row)
     return csv_path
 
@@ -384,7 +416,7 @@ def test_threshold_artifact_fault_publishes_diagnostic_then_fails(
 
 
 def test_missing_threshold_artifact_argument_publishes_diagnostic_then_fails(tmp_path: Path) -> None:
-    """Strict ZS32 cannot omit the stage-30 bundle even when CSV rows contain thresholds."""
+    """Strict ZS32 cannot omit the stage-31 bundle even when CSV rows contain thresholds."""
     stage18 = _load_stage18("pipeline_fuse_threshold_artifact_missing_argument")
     predictions_csv = _write_complete_predictions(tmp_path, gray_evidence=False)
     output_dir = tmp_path / "out"
@@ -484,6 +516,31 @@ def test_require_complete_evidence_forces_review_even_with_strong_trigger(tmp_pa
     assert decisions[0].final_status == "NG_ANOMALY"
     assert decisions[0].final_label == 1
     assert any(trigger.evidence_id == "system:incomplete_evidence" for trigger in decisions[0].triggered_evidence)
+
+
+def test_template_match_strong_emits_ng_template_through_stage18(tmp_path: Path) -> None:
+    """The strict CSV path preserves template priority and its dedicated machine status."""
+    stage18 = _load_stage18("pipeline_fuse_inspection_template_strong")
+    predictions_csv = _write_complete_predictions(
+        tmp_path,
+        gray_evidence=False,
+        fault="template_strong",
+    )
+    output_dir = tmp_path / "out"
+    args = stage18.build_parser().parse_args(
+        _strict_args(
+            tmp_path,
+            ["--profile", "zs32", "--branch-csv", f"normalized={predictions_csv}", "--output-dir", str(output_dir)],
+        ),
+    )
+
+    decisions = stage18.run_fusion(args)
+
+    assert decisions[0].final_status == "NG_TEMPLATE"
+    assert decisions[0].final_label == 1
+    assert decisions[0].triggered_branch == "template_match"
+    audit = json.loads((output_dir / "audit/part001.json").read_text(encoding="utf-8"))
+    assert audit["triggers"][0]["evidence_id"] == "front:template_match"
 
 
 def test_capture_fault_blocks_release_without_downgrading_strong_ng(tmp_path: Path) -> None:
@@ -833,6 +890,9 @@ def test_zs32_audit_rejects_part_id_path_escape(tmp_path: Path) -> None:
         pytest.param("nonfinite_score", None, None, id="nonfinite_score"),
         pytest.param("model_version_mismatch", None, None, id="model_version_mismatch"),
         pytest.param("roi_version_mismatch", None, None, id="roi_version_mismatch"),
+        pytest.param("template_version_mismatch", None, None, id="template_version_mismatch"),
+        pytest.param("missing_template", None, None, id="missing_template"),
+        pytest.param("duplicate_template", None, None, id="duplicate_template"),
         pytest.param(None, "source", None, id="missing_source_image"),
         pytest.param(None, "evidence", None, id="missing_evidence_artifact"),
         pytest.param("yolo_empty_gray_anomaly", None, None, id="yolo_empty_with_gray_anomaly"),
@@ -840,6 +900,7 @@ def test_zs32_audit_rejects_part_id_path_escape(tmp_path: Path) -> None:
         pytest.param("roi_failure", None, None, id="roi_failure"),
         pytest.param("drift", None, None, id="camera_drift"),
         pytest.param("duplicate_source_hash", None, None, id="duplicate_source_hash"),
+        pytest.param("evidence_hash_mismatch", None, None, id="evidence_hash_mismatch"),
         pytest.param("quality_blur", None, None, id="quality_blur"),
         pytest.param("quality_overexposure", None, None, id="quality_overexposure"),
         pytest.param("missing_capture_session", None, None, id="missing_capture_session"),
@@ -877,7 +938,11 @@ def test_fault_injection_never_releases_ok(
         ),
     )
 
-    if fault in {"nonfinite_score", "model_version_mismatch", "roi_version_mismatch"}:
+    if fault in {
+        "nonfinite_score",
+        "model_version_mismatch",
+        "roi_version_mismatch",
+    }:
         with pytest.raises(RuntimeError, match="diagnostic generation"):
             stage18.run_fusion(args)
         fused_rows = list(csv.DictReader((output_dir / "fused_predictions.csv").open(encoding="utf-8")))
@@ -900,6 +965,7 @@ def test_fault_injection_never_releases_ok(
             "INVALID_CAPTURE",
             "NG_ANOMALY",
             "NG_GEOMETRY",
+            "NG_TEMPLATE",
             "NG_YOLO",
         }
 

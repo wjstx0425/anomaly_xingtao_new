@@ -259,7 +259,7 @@ def test_run_calibration_atomically_writes_all_reports(tmp_path: Path) -> None:
 
 
 def test_threshold_report_binds_exact_stage18_deployment_contract(tmp_path: Path) -> None:
-    """Stage 30 artifacts must identify the strict profile and immutable threshold records."""
+    """Stage 31 artifacts must identify the strict profile and immutable threshold records."""
     input_csv = tmp_path / "calibration.csv"
     fieldnames = list(_row("part", raw_score=0.1, gt_label=0))
     with input_csv.open("w", encoding="utf-8", newline="") as file:

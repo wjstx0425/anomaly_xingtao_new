@@ -44,6 +44,9 @@ uv sync
 | `27_prepare_zs32_label_studio.py` | 准备 ZS32 Label Studio 本地文件目录 | 汇总六视图缺陷图并生成 manifest 和标注界面配置 |
 | `28_prepare_zs32_yolo_dataset.py` | 构建 ZS32 六视角 YOLO 数据集 | 合并 Label Studio 框、空视角、真实/镜像正常负样本并按工件拆分 |
 | `29_zs32_fixed_roi.py` | 选择六视角固定 ROI 并裁剪 YOLO 数据集 | OpenCV 可视化框选，保持原 split 并转换 bbox |
+| `31_calibrate_zs32_fusion.py` | 离线锁定 ZS32 72 组双阈值 | 输出不可原地覆盖的阈值 bundle 和校准报告 |
+| `train_zs32_template_gate.py` | 训练左右手六视角整图模板门禁 | 输出带双阈值、版本和模板哈希的 12 组模型 |
+| `predict_zs32_template_gate.py` | 执行第一个模板检测项目 | 非 PASS 返回非零退出码并阻止后续检测 |
 
 最常用流程：
 
@@ -1639,12 +1642,54 @@ train/val/test、`sample_id` 和空标签；跨越 ROI 边界的框会裁到边�
 
 ### ZS32 六视角严格融合
 
-ZS32 上线配置固定为 `config/fusion/zs32_six_view.json`。先用按物理 `part_id` 划分的
-calibration/test 分数离线拟合各 `hand/view/branch/model_version/roi_version` 组的双阈值；stage 30
-默认读取这一份 strict profile，自动要求其中 60 个精确的左/右手分支组，但不会原地修改上线配置：
+ZS32 上线配置固定为 `config/fusion/zs32_six_view.json`。传统整视角模板匹配是第一个产品检测项目：
+质量、身份和 ROI 可用性预检通过后，按 `front/front_left/front_right/back/back_left/back_right` 顺序执行
+`template_match`。只有六个视角都明确 `PASS` 才调用 PatchCore、YOLO 和 geometry；任一 `REVIEW`、
+`NG_TEMPLATE` 或模板资产异常都会立即停止并把未运行分支记录为 `SKIPPED`。模板 PASS 只允许继续，不能
+单独形成最终 OK。
+
+模板训练直接读取 stage 30 裁剪生成的 `crop_manifest.csv`。当代码运行在 fusion worktree、数据仍位于主目录时：
 
 ```bash
-uv run python pipeline/30_calibrate_zs32_fusion.py \
+MAIN_ROOT=/home/yunjing/anomalib
+
+uv run python pipeline/train_zs32_template_gate.py \
+  --manifest "$MAIN_ROOT/dataset/zs32_patchcore_roi/crop_manifest.csv" \
+  --path-root "$MAIN_ROOT" \
+  --output-dir "$MAIN_ROOT/results/zs32_template_gate/v1" \
+  --model-version zs32-models-2026.07.13 \
+  --threshold-version zs32-thresholds-2026.07.13 \
+  --roi-version zs32-roi-2026.07.12 \
+  --template-version zs32-templates-2026.07.13
+```
+
+训练以 `(hand, view)` 建立 12 个组，正常模板图、阈值正常图和 test 按物理 `part_id` 隔离；不会使用默认
+`0.8` 阈值，也不会覆盖已存在的输出目录。风险分数统一为 `risk=1-similarity`：`risk<T_low` 为 PASS，
+`T_low<=risk<T_high` 为 REVIEW，`risk>=T_high` 为 NG_TEMPLATE。模型 JSON 和单图预测会保留连续分数、
+双阈值、最佳模板、位移、模板 SHA-256 和四类版本。`model.sha256` 锁定包含在线阈值和模板索引的
+`model.json`，模板相对路径也不得逃出模型目录。训练目录还会输出 `calibration_rows.csv`，其模板分数与
+模型阈值同源，供 Stage 31 合并到其它五类分支的总校准 CSV。单图门禁可独立检查：
+
+```bash
+uv run python pipeline/predict_zs32_template_gate.py \
+  --model-dir "$MAIN_ROOT/results/zs32_template_gate/v1" \
+  --image /absolute/path/to/front_roi.png \
+  --hand right \
+  --view front \
+  --output-json /tmp/front_template_gate.json
+```
+
+退出码 `0/10/20/2` 分别表示 PASS/REVIEW/NG_TEMPLATE/模板资产或输入无效。在线 Python 编排接口位于
+`capture_data/zs32_inspection_orchestrator.py`；下游 runner 同时接收 `InspectionRequest` 和六条模板结果，
+可用 `template_results_to_branch_rows()`/`write_template_match_csv()` 生成 Stage 18 输入。短路时不会伪造
+后续分支 CLEAR，也不会调用 Stage 18。
+
+完成模板门禁后，再用按物理 `part_id` 划分的
+calibration/test 分数离线拟合各 `hand/view/branch/model_version/roi_version` 组的双阈值；Stage 31
+默认读取这一份 strict profile，自动要求其中 72 个精确的左/右手分支组，但不会原地修改上线配置：
+
+```bash
+uv run python pipeline/31_calibrate_zs32_fusion.py \
   --input-csv results/zs32_fusion/calibration_rows.csv \
   --output-dir results/zs32_fusion/calibration_v1 \
   --target-recall 1.0 \
@@ -1661,7 +1706,7 @@ normal reject rate 和 review rate 等安全率全部为 `null`；未经合同�
 `diagnostic_observed_*`，不可当作上线指标。
 
 `thresholds.json` 是不可绕过的上线 bundle：包含 `artifact_schema/version`、`calibration_valid`、
-profile/config SHA-256、60 个 exact group、canonical `threshold_records_sha256` 以及排除自身哈希字段后重算的
+profile/config SHA-256、72 个 exact group、canonical `threshold_records_sha256` 以及排除自身哈希字段后重算的
 `artifact_sha256`。不要手工修改该文件，也不要从 branch CSV 反向生成阈值 bundle。
 
 生产融合命令为：
@@ -1672,6 +1717,7 @@ uv run python pipeline/18_fuse_inspection_results.py \
   --manifest results/zs32_fusion/inspection_manifest.csv \
   --quality-csv results/zs32_fusion/quality_gate.csv \
   --registration-csv results/zs32_fusion/registration.csv \
+  --template-match-csv results/zs32_fusion/template_match.csv \
   --branch-csv anomaly_front=results/zs32_fusion/anomaly_front.csv \
   --branch-csv anomaly_front_left=results/zs32_fusion/anomaly_front_left.csv \
   --branch-csv anomaly_front_right=results/zs32_fusion/anomaly_front_right.csv \
@@ -1686,7 +1732,7 @@ uv run python pipeline/18_fuse_inspection_results.py \
 
 严格 profile 不需要额外开关就会强制源图和证据文件完整；`--require-complete-evidence` 仅保留给兼容流程。
 各 branch CSV 会标准化为 `branch_predictions.csv`，字段含 `part_id`、`product`、`profile`、`hand`、
-`capture_session`、`group_id`、`side`、`view`、`slot_id`、`source_hash`、`manifest_identity`、
+`capture_session`、`group_id`、`side`、`view`、`slot_id`、`source_hash`、`evidence_hash`、`manifest_identity`、
 `branch`、`pred_label`、连续 `score`、旧单阈值 `threshold`、`low_threshold`、`high_threshold`、
 `evidence_level`、`defect_type`、`evidence_type`、`gt_defect_type`、`reason`、`source_path`、
 `evidence_path`、`status` 以及 `model_version`、`threshold_version`、`roi_version`、
@@ -1698,7 +1744,7 @@ uv run python pipeline/18_fuse_inspection_results.py \
 `suspect` 及完整/不完整检查数。
 
 最终状态只有五类语义：`OK`、`REVIEW`、`RETAKE`、`INVALID_CAPTURE` 和具体的 `NG_*`
-（`NG_ANOMALY`/`NG_GEOMETRY`/`NG_YOLO`）。只有六视角、每视角全部必需 branch、质量与配准 PASS、
+（`NG_TEMPLATE`/`NG_ANOMALY`/`NG_GEOMETRY`/`NG_YOLO`）。只有六视角、每视角全部必需 branch、质量与配准 PASS、
 版本一致、证据文件完整且全部为 CLEAR 才能自动 `OK`；任一 STRONG 直接进入对应 `NG_*`，任一 GRAY、
 缺 branch 或版本不一致进入 `REVIEW`，采集身份/完整性错误进入 `INVALID_CAPTURE`，质量或配准失败进入
 `RETAKE`。YOLO 无框只是该 YOLO 行的 CLEAR 证据，不能抵消其它视角或分支的 GRAY/STRONG。
@@ -1726,7 +1772,7 @@ YOLO 每个视角只提交一条 summary branch identity，`detections` 是 JSON
 `released_status=null`。人工复检必须查看原图、热图/检测框/几何 overlay 和所有触发原因，再由独立发布
 流程填写复检与放行状态。
 
-stage 18 会先核对 locked bundle 的 schema、有效标定状态、profile hash、60 组完整性、两层哈希，
+stage 18 会先核对 locked bundle 的 schema、有效标定状态、profile hash、72 组完整性、两层哈希，
 再逐行要求 CSV `low/high` 与 bundle 的权威数值完全一致。缺失、篡改、不完整、标定无效或数值不符都会
 先发布不可放行的诊断代际，再非零退出。然后 stage 18 把 `branch_predictions.csv`、`fused_predictions.csv`、
 `summary.md`、`threshold_artifact.json` 和所有 audit JSON 先写入唯一

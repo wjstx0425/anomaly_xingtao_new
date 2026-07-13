@@ -40,6 +40,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--manifest", type=Path, help="Optional multiview manifest CSV with part_id/side/view rows.")
     parser.add_argument("--quality-csv", type=Path, help="Optional quality_gate.csv report.")
     parser.add_argument("--registration-csv", type=Path, help="Optional registration_results.csv report.")
+    parser.add_argument(
+        "--template-match-csv",
+        type=Path,
+        help="Optional per-view template-match summary CSV (one row per view).",
+    )
     parser.add_argument("--geometry-csv", type=Path, help="Optional geometry_predictions.csv report.")
     parser.add_argument("--anomaly-csv", type=Path, help="Optional AnomalyDINO predictions.csv report.")
     parser.add_argument("--efficientad-csv", type=Path, help="Optional EfficientAD predictions.csv report.")
@@ -55,7 +60,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--threshold-artifact",
         type=Path,
-        help="Locked stage-30 thresholds.json; mandatory for the strict ZS32 profile.",
+        help="Locked stage-31 thresholds.json; mandatory for the strict ZS32 profile.",
     )
     parser.add_argument("--audit-dir", type=Path, help="ZS32 per-part audit JSON directory.")
     parser.add_argument(
@@ -93,7 +98,7 @@ def _canonical_sha256(payload: object) -> str:
 
 
 def _profile_threshold_contract(profile_path: Path) -> tuple[str, set[tuple[str, str, str, str, str]]]:
-    """Return the current profile digest and exact 60-group deployment contract."""
+    """Return the current profile digest and its exact deployment groups."""
     raw = profile_path.read_bytes()
     payload = json.loads(raw)
     records = payload.get("expected_versions")
@@ -110,8 +115,11 @@ def _profile_threshold_contract(profile_path: Path) -> tuple[str, set[tuple[str,
         )
         for record in records
     }
-    if len(groups) != 60:
-        msg = f"strict profile must define exactly 60 threshold groups, got {len(groups)}"
+    if not groups:
+        msg = "strict profile must define at least one threshold group"
+        raise ValueError(msg)
+    if len(groups) != len(records):
+        msg = f"strict profile contains duplicate threshold groups: {len(records)} records, {len(groups)} unique"
         raise ValueError(msg)
     return hashlib.sha256(raw).hexdigest(), groups
 
@@ -119,7 +127,7 @@ def _profile_threshold_contract(profile_path: Path) -> tuple[str, set[tuple[str,
 def _load_threshold_artifact(  # noqa: C901
     path: Path | None,
 ) -> tuple[dict[tuple[str, str, str, str, str], dict[str, Any]], dict[str, Any]]:
-    """Validate and load a locked stage-30 threshold deployment artifact."""
+    """Validate and load a locked stage-31 threshold deployment artifact."""
     if path is None:
         msg = "--threshold-artifact is required for --profile zs32"
         raise ValueError(msg)
@@ -158,7 +166,7 @@ def _load_threshold_artifact(  # noqa: C901
         msg = "threshold artifact required_groups are malformed"
         raise ValueError(msg) from exc
     if artifact_groups != expected_groups or len(declared_groups) != len(expected_groups):
-        msg = "threshold artifact does not contain the complete exact 60-group set"
+        msg = f"threshold artifact does not contain the complete exact {len(expected_groups)}-group set"
         raise ValueError(msg)
     thresholds = payload.get("thresholds")
     if not isinstance(thresholds, list):
@@ -193,7 +201,7 @@ def _load_threshold_artifact(  # noqa: C901
             raise ValueError(msg)
         threshold_by_group[key] = {**record, "low_threshold": low, "high_threshold": high}
     if set(threshold_by_group) != expected_groups:
-        msg = "threshold artifact thresholds do not contain the complete exact 60-group set"
+        msg = f"threshold artifact thresholds do not contain the complete exact {len(expected_groups)}-group set"
         raise ValueError(msg)
     metadata = {
         "path": str(path.resolve()),
@@ -346,6 +354,11 @@ def _strict_stage_faults(predictions: list[fusion.BranchPrediction]) -> tuple[li
             declared_hash = getattr(prediction, "source_hash", None)
             if declared_hash and declared_hash.lower() != digest:
                 invalid.append(f"source hash mismatch: {prediction.view or 'unknown'}:{prediction.branch}")
+        evidence_path = Path(prediction.evidence_path) if prediction.evidence_path else None
+        if evidence_path is not None and evidence_path.is_file() and prediction.evidence_hash:
+            digest = sha256_file(evidence_path)
+            if prediction.evidence_hash.lower() != digest:
+                invalid.append(f"evidence hash mismatch: {prediction.view or 'unknown'}:{prediction.branch}")
         status = (prediction.status or "").strip().upper()
         if prediction.branch not in fusion.GATE_BRANCHES and status in {
             "DRIFT",
@@ -614,6 +627,7 @@ def run_fusion(args: argparse.Namespace) -> list[fusion.FusedDecision]:
     predictions = [
         *_load_optional_predictions(args.quality_csv, branch="quality", warnings=warnings),
         *_load_optional_predictions(args.registration_csv, branch="registration", warnings=warnings),
+        *_load_optional_predictions(args.template_match_csv, branch="template_match", warnings=warnings),
         *_load_optional_predictions(args.geometry_csv, branch="geometry", warnings=warnings),
         *_load_optional_predictions(args.anomaly_csv, branch="anomaly_dino", warnings=warnings),
         *_load_optional_predictions(args.efficientad_csv, branch="efficient_ad", warnings=warnings),

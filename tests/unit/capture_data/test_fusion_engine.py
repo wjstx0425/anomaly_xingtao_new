@@ -51,10 +51,12 @@ def _zs32_config() -> dict[str, object]:
     return {
         "ok_requires": {"required_view_keys": [f"zs32:{view}" for view in ZS32_VIEWS]},
         "required_branches_by_view": {
-            view: ["quality_gate", "registration", f"anomaly_{view}", "yolo", "geometry"] for view in ZS32_VIEWS
+            view: ["template_match", "quality_gate", "registration", f"anomaly_{view}", "yolo", "geometry"]
+            for view in ZS32_VIEWS
         },
-        "branch_order": ["geometry", "yolo", *(f"anomaly_{view}" for view in ZS32_VIEWS)],
+        "branch_order": ["template_match", "geometry", "yolo", *(f"anomaly_{view}" for view in ZS32_VIEWS)],
         "rules": {
+            "template_match": {"status_on_positive": "NG_TEMPLATE"},
             "geometry": {"status_on_positive": "NG_GEOMETRY"},
             "yolo": {"status_on_positive": "NG_YOLO"},
             **{f"anomaly_{view}": {"status_on_positive": "NG_ANOMALY"} for view in ZS32_VIEWS},
@@ -99,6 +101,15 @@ def _clear_zs32_rows(fusion: ModuleType, part_id: str) -> list[object]:
     for view in ZS32_VIEWS:
         rows.extend(
             [
+                _zs32_prediction(
+                    fusion,
+                    part_id=part_id,
+                    view=view,
+                    branch="template_match",
+                    score=0.2,
+                    low_threshold=0.3,
+                    high_threshold=0.5,
+                ),
                 _zs32_prediction(fusion, part_id=part_id, view=view, branch="quality_gate", status="PASS"),
                 _zs32_prediction(fusion, part_id=part_id, view=view, branch="registration", status="PASS"),
                 _zs32_prediction(
@@ -147,7 +158,14 @@ def _strict_zs32_config() -> dict[str, object]:
                 }
                 for hand in ("left", "right")
                 for view in ZS32_VIEWS
-                for branch in ("quality_gate", "registration", f"anomaly_{view}", "yolo", "geometry")
+                for branch in (
+                    "template_match",
+                    "quality_gate",
+                    "registration",
+                    f"anomaly_{view}",
+                    "yolo",
+                    "geometry",
+                )
             ],
         },
     )
@@ -192,7 +210,8 @@ def test_front_strong_is_front_ng_but_marks_inspection_incomplete() -> None:
     """Front-side NG remains staged until back-side evidence is captured."""
     fusion = load_fusion_module()
     rows = _face_rows(fusion, "p1", "front")
-    rows[4] = fusion.BranchPrediction(**{**rows[4].__dict__, "pred_label": 1})
+    geometry = next(index for index, row in enumerate(rows) if row.view == "front" and row.branch == "geometry")
+    rows[geometry] = fusion.BranchPrediction(**{**rows[geometry].__dict__, "pred_label": 1})
 
     result = fusion.fuse_face_predictions("p1", rows, face="front", config=_zs32_config())
 
@@ -205,7 +224,10 @@ def test_front_review_and_back_stage_equivalents() -> None:
     """Both faces expose CLEAR, REVIEW, and NG staged states without early release."""
     fusion = load_fusion_module()
     front_rows = _face_rows(fusion, "p1", "front")
-    front_rows[2] = fusion.BranchPrediction(**{**front_rows[2].__dict__, "score": 0.4})
+    front_anomaly = next(
+        index for index, row in enumerate(front_rows) if row.view == "front" and row.branch == "anomaly_front"
+    )
+    front_rows[front_anomaly] = fusion.BranchPrediction(**{**front_rows[front_anomaly].__dict__, "score": 0.4})
     back_clear = fusion.fuse_face_predictions(
         "p1",
         _face_rows(fusion, "p1", "back"),
@@ -213,7 +235,12 @@ def test_front_review_and_back_stage_equivalents() -> None:
         config=_zs32_config(),
     )
     back_ng_rows = _face_rows(fusion, "p1", "back")
-    back_ng_rows[4] = fusion.BranchPrediction(**{**back_ng_rows[4].__dict__, "pred_label": 1})
+    back_geometry = next(
+        index for index, row in enumerate(back_ng_rows) if row.view == "back" and row.branch == "geometry"
+    )
+    back_ng_rows[back_geometry] = fusion.BranchPrediction(
+        **{**back_ng_rows[back_geometry].__dict__, "pred_label": 1},
+    )
 
     front_review = fusion.fuse_face_predictions("p1", front_rows, face="front", config=_zs32_config())
     back_ng = fusion.fuse_face_predictions("p1", back_ng_rows, face="back", config=_zs32_config())
@@ -228,7 +255,8 @@ def test_back_gray_is_back_review_with_primary_evidence() -> None:
     """Back-side gray evidence must retain the branch that caused review."""
     fusion = load_fusion_module()
     rows = _face_rows(fusion, "p1", "back")
-    rows[2] = fusion.BranchPrediction(**{**rows[2].__dict__, "score": 0.4})
+    anomaly = next(index for index, row in enumerate(rows) if row.view == "back" and row.branch == "anomaly_back")
+    rows[anomaly] = fusion.BranchPrediction(**{**rows[anomaly].__dict__, "score": 0.4})
 
     result = fusion.fuse_face_predictions("p1", rows, face="back", config=_zs32_config())
 
@@ -396,7 +424,14 @@ def test_gray_evidence_returns_review_and_strong_wins() -> None:
     config = _zs32_config()
     p1_rows = _clear_zs32_rows(fusion, "p1")
     p2_rows = _clear_zs32_rows(fusion, "p2")
-    p1_rows[2] = _zs32_prediction(
+    p1_anomaly = next(
+        index for index, row in enumerate(p1_rows) if row.view == "front" and row.branch == "anomaly_front"
+    )
+    p2_anomaly = next(
+        index for index, row in enumerate(p2_rows) if row.view == "front" and row.branch == "anomaly_front"
+    )
+    p2_geometry = next(index for index, row in enumerate(p2_rows) if row.view == "front" and row.branch == "geometry")
+    p1_rows[p1_anomaly] = _zs32_prediction(
         fusion,
         part_id="p1",
         view="front",
@@ -405,7 +440,7 @@ def test_gray_evidence_returns_review_and_strong_wins() -> None:
         low_threshold=0.3,
         high_threshold=0.5,
     )
-    p2_rows[2] = _zs32_prediction(
+    p2_rows[p2_anomaly] = _zs32_prediction(
         fusion,
         part_id="p2",
         view="front",
@@ -414,9 +449,9 @@ def test_gray_evidence_returns_review_and_strong_wins() -> None:
         low_threshold=0.3,
         high_threshold=0.5,
     )
-    p2_rows[4] = fusion.BranchPrediction(
+    p2_rows[p2_geometry] = fusion.BranchPrediction(
         **{
-            **p2_rows[4].__dict__,
+            **p2_rows[p2_geometry].__dict__,
             "pred_label": 1,
             "score": 0.8,
             "low_threshold": 0.3,
@@ -513,6 +548,58 @@ def test_all_six_views_and_required_branches_clear_returns_ok() -> None:
     assert decision.final_status == "OK"
     assert decision.final_label == 0
     assert decision.triggered_evidence == ()
+
+
+def test_template_match_strong_is_first_ng_trigger() -> None:
+    """Template STRONG evidence wins policy order and emits the dedicated NG status."""
+    fusion = load_fusion_module()
+    rows = _strict_zs32_rows(fusion, "p1")
+    template = next(index for index, row in enumerate(rows) if row.view == "front" and row.branch == "template_match")
+    geometry = next(index for index, row in enumerate(rows) if row.view == "front" and row.branch == "geometry")
+    rows[template] = fusion.BranchPrediction(**{**rows[template].__dict__, "score": 0.8, "pred_label": 1})
+    rows[geometry] = fusion.BranchPrediction(**{**rows[geometry].__dict__, "score": 0.8, "pred_label": 1})
+
+    decision = fusion.fuse_part_predictions("p1", rows, config=_strict_zs32_config())
+
+    assert decision.final_status == "NG_TEMPLATE"
+    assert decision.final_label == 1
+    assert decision.triggered_branch == "template_match"
+    assert decision.triggered_evidence[0].evidence_id == "front:template_match"
+
+
+def test_template_match_gray_requires_review() -> None:
+    """Template GRAY evidence blocks OK without converting uncertainty into NG."""
+    fusion = load_fusion_module()
+    rows = _strict_zs32_rows(fusion, "p1")
+    template = next(index for index, row in enumerate(rows) if row.view == "front" and row.branch == "template_match")
+    rows[template] = fusion.BranchPrediction(**{**rows[template].__dict__, "score": 0.4})
+
+    decision = fusion.fuse_part_predictions("p1", rows, config=_strict_zs32_config())
+
+    assert decision.final_status == "REVIEW"
+    assert decision.final_label is None
+    assert decision.triggered_branch == "template_match"
+    assert decision.triggered_evidence[0].level == "GRAY"
+
+
+@pytest.mark.parametrize("fault", ["missing", "duplicate", "version"])
+def test_template_match_contract_faults_fail_closed(fault: str) -> None:
+    """Missing, duplicate, or version-mismatched template summaries cannot release OK."""
+    fusion = load_fusion_module()
+    rows = _strict_zs32_rows(fusion, "p1")
+    target = next(index for index, row in enumerate(rows) if row.view == "front" and row.branch == "template_match")
+    if fault == "missing":
+        rows.pop(target)
+    elif fault == "duplicate":
+        rows.append(rows[target])
+    else:
+        rows[target] = fusion.BranchPrediction(**{**rows[target].__dict__, "template_version": "wrong-template"})
+
+    decision = fusion.fuse_part_predictions("p1", rows, config=_strict_zs32_config())
+
+    assert decision.final_status in {"INVALID_CAPTURE", "REVIEW"}
+    assert decision.final_status != "OK"
+    assert "template_match" in decision.reason
 
 
 def test_normalized_csv_preserves_full_zs32_identity_including_hand(tmp_path: Path) -> None:

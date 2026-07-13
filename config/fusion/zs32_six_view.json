@@ -23,6 +23,7 @@
   },
   "required_branches_by_view": {
     "front": [
+      "template_match",
       "quality_gate",
       "registration",
       "anomaly_front",
@@ -30,6 +31,7 @@
       "geometry"
     ],
     "front_left": [
+      "template_match",
       "quality_gate",
       "registration",
       "anomaly_front_left",
@@ -37,6 +39,7 @@
       "geometry"
     ],
     "front_right": [
+      "template_match",
       "quality_gate",
       "registration",
       "anomaly_front_right",
@@ -44,6 +47,7 @@
       "geometry"
     ],
     "back": [
+      "template_match",
       "quality_gate",
       "registration",
       "anomaly_back",
@@ -51,6 +55,7 @@
       "geometry"
     ],
     "back_left": [
+      "template_match",
       "quality_gate",
       "registration",
       "anomaly_back_left",
@@ -58,6 +63,7 @@
       "geometry"
     ],
     "back_right": [
+      "template_match",
       "quality_gate",
       "registration",
       "anomaly_back_right",
@@ -66,6 +72,16 @@
     ]
   },
   "expected_versions": [
+    {
+      "hand": "left",
+      "side": "zs32",
+      "view": "front",
+      "branch": "template_match",
+      "model_version": "zs32-models-2026.07.13",
+      "threshold_version": "zs32-thresholds-2026.07.13",
+      "roi_version": "zs32-roi-2026.07.12",
+      "template_version": "zs32-templates-2026.07.13"
+    },
     {
       "hand": "left",
       "side": "zs32",
@@ -111,6 +127,16 @@
       "side": "zs32",
       "view": "front",
       "branch": "geometry",
+      "model_version": "zs32-models-2026.07.13",
+      "threshold_version": "zs32-thresholds-2026.07.13",
+      "roi_version": "zs32-roi-2026.07.12",
+      "template_version": "zs32-templates-2026.07.13"
+    },
+    {
+      "hand": "left",
+      "side": "zs32",
+      "view": "front_left",
+      "branch": "template_match",
       "model_version": "zs32-models-2026.07.13",
       "threshold_version": "zs32-thresholds-2026.07.13",
       "roi_version": "zs32-roi-2026.07.12",
@@ -170,6 +196,16 @@
       "hand": "left",
       "side": "zs32",
       "view": "front_right",
+      "branch": "template_match",
+      "model_version": "zs32-models-2026.07.13",
+      "threshold_version": "zs32-thresholds-2026.07.13",
+      "roi_version": "zs32-roi-2026.07.12",
+      "template_version": "zs32-templates-2026.07.13"
+    },
+    {
+      "hand": "left",
+      "side": "zs32",
+      "view": "front_right",
       "branch": "quality_gate",
       "model_version": "zs32-models-2026.07.13",
       "threshold_version": "zs32-thresholds-2026.07.13",
@@ -211,6 +247,16 @@
       "side": "zs32",
       "view": "front_right",
       "branch": "geometry",
+      "model_version": "zs32-models-2026.07.13",
+      "threshold_version": "zs32-thresholds-2026.07.13",
+      "roi_version": "zs32-roi-2026.07.12",
+      "template_version": "zs32-templates-2026.07.13"
+    },
+    {
+      "hand": "left",
+      "side": "zs32",
+      "view": "back",
+      "branch": "template_match",
       "model_version": "zs32-models-2026.07.13",
       "threshold_version": "zs32-thresholds-2026.07.13",
       "roi_version": "zs32-roi-2026.07.12",
@@ -270,6 +316,16 @@
       "hand": "left",
       "side": "zs32",
       "view": "back_left",
+      "branch": "template_match",
+      "model_version": "zs32-models-2026.07.13",
+      "threshold_version": "zs32-thresholds-2026.07.13",
+      "roi_version": "zs32-roi-2026.07.12",
+      "template_version": "zs32-templates-2026.07.13"
+    },
+    {
+      "hand": "left",
+      "side": "zs32",
+      "view": "back_left",
       "branch": "quality_gate",
       "model_version": "zs32-models-2026.07.13",
       "threshold_version": "zs32-thresholds-2026.07.13",
@@ -311,6 +367,16 @@
       "side": "zs32",
       "view": "back_left",
       "branch": "geometry",
+      "model_version": "zs32-models-2026.07.13",
+      "threshold_version": "zs32-thresholds-2026.07.13",
+      "roi_version": "zs32-roi-2026.07.12",
+      "template_version": "zs32-templates-2026.07.13"
+    },
+    {
+      "hand": "left",
+      "side": "zs32",
+      "view": "back_right",
+      "branch": "template_match",
       "model_version": "zs32-models-2026.07.13",
       "threshold_version": "zs32-thresholds-2026.07.13",
       "roi_version": "zs32-roi-2026.07.12",
@@ -370,6 +436,16 @@
       "hand": "right",
       "side": "zs32",
       "view": "front",
+      "branch": "template_match",
+      "model_version": "zs32-models-2026.07.13",
+      "threshold_version": "zs32-thresholds-2026.07.13",
+      "roi_version": "zs32-roi-2026.07.12",
+      "template_version": "zs32-templates-2026.07.13"
+    },
+    {
+      "hand": "right",
+      "side": "zs32",
+      "view": "front",
       "branch": "quality_gate",
       "model_version": "zs32-models-2026.07.13",
       "threshold_version": "zs32-thresholds-2026.07.13",
@@ -411,6 +487,16 @@
       "side": "zs32",
       "view": "front",
       "branch": "geometry",
+      "model_version": "zs32-models-2026.07.13",
+      "threshold_version": "zs32-thresholds-2026.07.13",
+      "roi_version": "zs32-roi-2026.07.12",
+      "template_version": "zs32-templates-2026.07.13"
+    },
+    {
+      "hand": "right",
+      "side": "zs32",
+      "view": "front_left",
+      "branch": "template_match",
       "model_version": "zs32-models-2026.07.13",
       "threshold_version": "zs32-thresholds-2026.07.13",
       "roi_version": "zs32-roi-2026.07.12",
@@ -470,6 +556,16 @@
       "hand": "right",
       "side": "zs32",
       "view": "front_right",
+      "branch": "template_match",
+      "model_version": "zs32-models-2026.07.13",
+      "threshold_version": "zs32-thresholds-2026.07.13",
+      "roi_version": "zs32-roi-2026.07.12",
+      "template_version": "zs32-templates-2026.07.13"
+    },
+    {
+      "hand": "right",
+      "side": "zs32",
+      "view": "front_right",
       "branch": "quality_gate",
       "model_version": "zs32-models-2026.07.13",
       "threshold_version": "zs32-thresholds-2026.07.13",
@@ -511,6 +607,16 @@
       "side": "zs32",
       "view": "front_right",
       "branch": "geometry",
+      "model_version": "zs32-models-2026.07.13",
+      "threshold_version": "zs32-thresholds-2026.07.13",
+      "roi_version": "zs32-roi-2026.07.12",
+      "template_version": "zs32-templates-2026.07.13"
+    },
+    {
+      "hand": "right",
+      "side": "zs32",
+      "view": "back",
+      "branch": "template_match",
       "model_version": "zs32-models-2026.07.13",
       "threshold_version": "zs32-thresholds-2026.07.13",
       "roi_version": "zs32-roi-2026.07.12",
@@ -570,6 +676,16 @@
       "hand": "right",
       "side": "zs32",
       "view": "back_left",
+      "branch": "template_match",
+      "model_version": "zs32-models-2026.07.13",
+      "threshold_version": "zs32-thresholds-2026.07.13",
+      "roi_version": "zs32-roi-2026.07.12",
+      "template_version": "zs32-templates-2026.07.13"
+    },
+    {
+      "hand": "right",
+      "side": "zs32",
+      "view": "back_left",
       "branch": "quality_gate",
       "model_version": "zs32-models-2026.07.13",
       "threshold_version": "zs32-thresholds-2026.07.13",
@@ -611,6 +727,16 @@
       "side": "zs32",
       "view": "back_left",
       "branch": "geometry",
+      "model_version": "zs32-models-2026.07.13",
+      "threshold_version": "zs32-thresholds-2026.07.13",
+      "roi_version": "zs32-roi-2026.07.12",
+      "template_version": "zs32-templates-2026.07.13"
+    },
+    {
+      "hand": "right",
+      "side": "zs32",
+      "view": "back_right",
+      "branch": "template_match",
       "model_version": "zs32-models-2026.07.13",
       "threshold_version": "zs32-thresholds-2026.07.13",
       "roi_version": "zs32-roi-2026.07.12",
@@ -668,6 +794,7 @@
     }
   ],
   "branch_order": [
+    "template_match",
     "geometry",
     "yolo",
     "anomaly_front",
@@ -701,6 +828,9 @@
     },
     "anomaly_back_right": {
       "status_on_positive": "NG_ANOMALY"
+    },
+    "template_match": {
+      "status_on_positive": "NG_TEMPLATE"
     }
   }
 }
