@@ -10,7 +10,7 @@
 
 1. `_preflight()` 遍历 manifest 时显示 `Preflight` 进度条，总数为 manifest 行数。
 2. `crop_zs32_yolo_dataset()` 写图片和标签时显示 `Cropping` 进度条，总数同样为 manifest 行数。
-3. 进度条显示完成数量、百分比、速度和预计剩余时间；完成后保留最终状态。
+3. 进度条使用 Rich 标准展示，显示进度条、百分比和预计剩余时间；完成后保留最终状态。
 4. 原命令不增加参数：
 
    ```bash

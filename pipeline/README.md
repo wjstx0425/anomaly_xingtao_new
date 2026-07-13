@@ -43,6 +43,7 @@ uv sync
 | `26_prepare_yolo_roi_dataset.py` | 构建 ROI-level YOLO 数据集 | GT-centered 诊断 ROI 或 tiled 部署 ROI |
 | `27_prepare_zs32_label_studio.py` | 准备 ZS32 Label Studio 本地文件目录 | 汇总六视图缺陷图并生成 manifest 和标注界面配置 |
 | `28_prepare_zs32_yolo_dataset.py` | 构建 ZS32 六视角 YOLO 数据集 | 合并 Label Studio 框、空视角、真实/镜像正常负样本并按工件拆分 |
+| `29_zs32_fixed_roi.py` | 选择六视角固定 ROI 并裁剪 YOLO 数据集 | OpenCV 可视化框选，保持原 split 并转换 bbox |
 
 最常用流程：
 
@@ -1570,6 +1571,25 @@ Expected tasks: 660
 `left/20260711_181850_552955/less/group027`，并输出到 `dataset/zs32_six_view_yolo`。同一物理工件的
 六视角以及真实/镜像正常对保持在同一 split；有框视角使用 Label Studio 标签，无可见缺陷的视角和正常图
 使用空标签。生成的训练入口为 `dataset/zs32_six_view_yolo/data.yaml`。
+
+完整图中缺陷框较小时，先用 stage 29 为六个视角各选择一个固定 ROI。程序依次为每个视角只显示一张
+干净的右手正常参考图，对应视角的左右手件共用这个 ROI。鼠标拖框后按 Enter/Space 接受当前视角，
+随后自动显示下一视角；六个视角全部完成后才写配置：
+
+```bash
+uv run --no-sync python pipeline/29_zs32_fixed_roi.py select
+```
+
+配置和检查图分别写到 `dataset/zs32_six_view_roi_config.json` 与
+`dataset/zs32_six_view_roi_previews/`。然后转换全部 2010 张图及其标签：
+
+```bash
+uv run --no-sync python pipeline/29_zs32_fixed_roi.py convert
+```
+
+默认输出为 `dataset/zs32_six_view_roi_yolo`，训练入口是其中的 `data.yaml`。转换会保留原来的
+train/val/test、`sample_id` 和空标签；跨越 ROI 边界的框会裁到边缘，完全位于 ROI 外的框会丢弃，
+命令行与 manifest 分别报告裁框和丢框数量。重新生成已有输出时显式添加 `--overwrite`。
 
 ## 工业融合检测 MVP-1
 
