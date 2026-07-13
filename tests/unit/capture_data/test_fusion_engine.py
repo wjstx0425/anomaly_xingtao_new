@@ -10,6 +10,8 @@ import sys
 from pathlib import Path
 from types import ModuleType
 
+import pytest
+
 
 def load_fusion_module() -> ModuleType:
     """Load the fusion helper from its file path."""
@@ -22,6 +24,75 @@ def load_fusion_module() -> ModuleType:
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def test_dual_thresholds_classify_clear_gray_and_strong(tmp_path: Path) -> None:
+    """Raw scores should map to the three dual-threshold evidence bands."""
+    fusion = load_fusion_module()
+    csv_path = tmp_path / "predictions.csv"
+    csv_path.write_text(
+        "part_id,side,view,raw_score,low_threshold,high_threshold,model_version,threshold_version\n"
+        "p1,zs32,front,0.20,0.30,0.50,m1,t1\n"
+        "p2,zs32,front,0.40,0.30,0.50,m1,t1\n"
+        "p3,zs32,front,0.60,0.30,0.50,m1,t1\n",
+        encoding="utf-8",
+    )
+
+    rows = fusion.load_branch_predictions_csv(csv_path, branch="anomaly_front")
+
+    assert [fusion.classify_evidence(row).value for row in rows] == ["CLEAR", "GRAY", "STRONG"]
+    assert rows[0].model_version == "m1"
+    assert rows[0].threshold_version == "t1"
+
+
+@pytest.mark.parametrize(("pred_label", "expected"), [(0, "CLEAR"), (1, "STRONG")])
+def test_legacy_evidence_uses_pred_label_without_dual_thresholds(pred_label: int, expected: str) -> None:
+    """Legacy predictions should retain their binary evidence semantics."""
+    fusion = load_fusion_module()
+    prediction = fusion.BranchPrediction(
+        part_id="legacy-part",
+        side="zs32",
+        view="front",
+        slot_id=None,
+        branch="anomaly_front",
+        pred_label=pred_label,
+        score=0.4,
+        threshold=0.5,
+        defect_type=None,
+        reason=None,
+        source_path=None,
+    )
+
+    assert fusion.classify_evidence(prediction).value == expected
+
+
+@pytest.mark.parametrize(
+    ("raw_score", "low_threshold", "high_threshold", "error_text"),
+    [
+        ("0.4", "0.6", "0.5", "invalid dual thresholds"),
+        ("nan", "0.3", "0.5", "invalid dual thresholds"),
+        ("0.4", "0.3", "", "incomplete dual thresholds"),
+    ],
+)
+def test_invalid_dual_thresholds_include_prediction_identity(
+    tmp_path: Path,
+    raw_score: str,
+    low_threshold: str,
+    high_threshold: str,
+    error_text: str,
+) -> None:
+    """Malformed dual-threshold rows should identify the part and branch."""
+    fusion = load_fusion_module()
+    csv_path = tmp_path / "predictions.csv"
+    csv_path.write_text(
+        "part_id,side,view,raw_score,low_threshold,high_threshold\n"
+        f"bad-part,zs32,front,{raw_score},{low_threshold},{high_threshold}\n",
+        encoding="utf-8",
+    )
+    prediction = fusion.load_branch_predictions_csv(csv_path, branch="anomaly_front")[0]
+
+    with pytest.raises(ValueError, match=rf"{error_text}.*bad-part:anomaly_front"):
+        fusion.classify_evidence(prediction)
 
 
 def test_missing_required_view_returns_invalid_capture() -> None:

@@ -11,9 +11,10 @@ import re
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass
+from enum import Enum
+from math import isfinite
 from pathlib import Path
 from typing import Any
-
 
 PASS_STATUS = "PASS"
 FAIL_STATUS = "FAIL"
@@ -44,6 +45,13 @@ BRANCH_FIELDNAMES = [
     "source_path",
     "evidence_path",
     "status",
+    "low_threshold",
+    "high_threshold",
+    "evidence_level",
+    "model_version",
+    "threshold_version",
+    "roi_version",
+    "template_version",
 ]
 KNOWN_DEFECT_TYPES = {"corner", "crack", "deform", "less", "more", "surface"}
 FUSED_FIELDNAMES = [
@@ -57,6 +65,14 @@ FUSED_FIELDNAMES = [
     "triggered_branch",
     "reason",
 ]
+
+
+class EvidenceLevel(str, Enum):
+    """Strength of evidence emitted by a prediction branch."""
+
+    CLEAR = "CLEAR"
+    GRAY = "GRAY"
+    STRONG = "STRONG"
 
 
 @dataclass(frozen=True)
@@ -80,6 +96,33 @@ class BranchPrediction:
     evidence_path: str | None = None
     evidence_type: str | None = None
     gt_defect_type: str | None = None
+    low_threshold: float | None = None
+    high_threshold: float | None = None
+    evidence_level: str | None = None
+    model_version: str | None = None
+    threshold_version: str | None = None
+    roi_version: str | None = None
+    template_version: str | None = None
+
+
+def classify_evidence(prediction: BranchPrediction) -> EvidenceLevel:
+    """Classify a branch prediction using explicit, dual, or legacy evidence semantics."""
+    if prediction.evidence_level is not None:
+        return EvidenceLevel(prediction.evidence_level.upper())
+    low, high, score = prediction.low_threshold, prediction.high_threshold, prediction.score
+    if low is None and high is None:
+        return EvidenceLevel.STRONG if prediction.pred_label == 1 else EvidenceLevel.CLEAR
+    if score is None or low is None or high is None:
+        msg = f"incomplete dual thresholds for {prediction.part_id}:{prediction.branch}"
+        raise ValueError(msg)
+    if not all(isfinite(value) for value in (score, low, high)) or low > high:
+        msg = f"invalid dual thresholds for {prediction.part_id}:{prediction.branch}"
+        raise ValueError(msg)
+    if score >= high:
+        return EvidenceLevel.STRONG
+    if score >= low:
+        return EvidenceLevel.GRAY
+    return EvidenceLevel.CLEAR
 
 
 @dataclass(frozen=True)
@@ -597,21 +640,21 @@ def _prediction_from_row(row: Mapping[str, Any], branch: str) -> BranchPredictio
 
     if normalized_branch == "geometry":
         label = _int_label(_first_value(row, ("geometry_pred_label", "pred_label", "final_pred_label")))
-        score = _float_value(_first_value(row, ("geometry_score", "score", "final_score")))
+        score = _float_value(_first_value(row, ("raw_score", "geometry_score", "score", "final_score")))
         threshold = _float_value(_first_value(row, ("geometry_threshold", "threshold")))
         defect_type = _first_value(row, ("geometry_type", "defect_type"))
     elif normalized_branch in {"quality", "quality_gate", "registration"}:
         label = _int_label(_first_value(row, ("pred_label", "fail_label", "label", "status")), default=0)
         if status is not None and status.lower() == FAIL_STATUS.lower():
             label = 1
-        score = _float_value(_first_value(row, ("score", "quality_score", "registration_score")))
+        score = _float_value(_first_value(row, ("raw_score", "score", "quality_score", "registration_score")))
         threshold = _float_value(_first_value(row, ("threshold",)))
         defect_type = _first_value(row, ("defect_type",))
     else:
         label = _int_label(
             _first_value(row, ("deploy_pred_label", "pred_label", "review_pred_label", "anomalib_pred_label")),
         )
-        score = _float_value(_first_value(row, ("pred_score", "score", "anomaly_score", "deploy_score")))
+        score = _float_value(_first_value(row, ("raw_score", "pred_score", "score", "anomaly_score", "deploy_score")))
         threshold = _float_value(_first_value(row, ("deploy_threshold", "threshold", "anomaly_threshold")))
         defect_type = _first_value(row, ("defect_type",))
 
@@ -636,6 +679,13 @@ def _prediction_from_row(row: Mapping[str, Any], branch: str) -> BranchPredictio
             _first_value(row, ("gt_defect_type", "ground_truth_defect_type", "label_defect_type"))
             or _gt_defect_type_from_path(source_path)
         ),
+        low_threshold=_float_value(row.get("low_threshold")),
+        high_threshold=_float_value(row.get("high_threshold")),
+        evidence_level=_clean_text(row.get("evidence_level")),
+        model_version=_clean_text(row.get("model_version")),
+        threshold_version=_clean_text(row.get("threshold_version")),
+        roi_version=_clean_text(row.get("roi_version")),
+        template_version=_clean_text(row.get("template_version")),
     )
 
 
