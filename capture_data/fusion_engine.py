@@ -281,9 +281,9 @@ def _yolo_detection_faults(prediction: BranchPrediction) -> list[str]:
         if not isinstance(detection, Mapping):
             faults.append(f"{prefix}: box must be an object")
             continue
-        for field in ("class", "confidence", "xyxy", "area"):
-            if field not in detection:
-                faults.append(f"{prefix}: missing {field}")
+        faults.extend(
+            f"{prefix}: missing {field}" for field in ("class", "confidence", "xyxy", "area") if field not in detection
+        )
 
         class_value = detection.get("class")
         valid_class = (
@@ -316,9 +316,11 @@ def _yolo_detection_faults(prediction: BranchPrediction) -> list[str]:
         if "area" in detection and (not _finite_real(area) or area <= 0):
             faults.append(f"{prefix}: area must be finite and positive")
 
-        for flag in ("in_roi", "border", "touches_border"):
-            if flag in detection and not isinstance(detection[flag], bool):
-                faults.append(f"{prefix}: {flag} must be boolean")
+        faults.extend(
+            f"{prefix}: {flag} must be boolean"
+            for flag in ("in_roi", "border", "touches_border")
+            if flag in detection and not isinstance(detection[flag], bool)
+        )
     return faults
 
 

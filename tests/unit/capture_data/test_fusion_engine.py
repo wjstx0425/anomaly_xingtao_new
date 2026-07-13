@@ -843,7 +843,7 @@ def test_strict_yolo_requires_explicit_detection_summary() -> None:
 
 
 @pytest.mark.parametrize(
-    "detection, expected_fault",
+    ("detection", "expected_fault"),
     [
         ({"confidence": 0.9, "xyxy": [1, 2, 11, 22], "area": 200}, "missing class"),
         (
