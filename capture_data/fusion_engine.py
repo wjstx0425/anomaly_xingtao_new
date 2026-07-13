@@ -1028,7 +1028,7 @@ def fuse_part_predictions(
         return _decision_from_prediction(
             part_id,
             status,
-            1,
+            None if status == "SUSPECT" else 1,
             prediction,
             _branch_reason(prediction),
             triggers,
@@ -1042,9 +1042,12 @@ def fuse_part_predictions(
         review_reasons.extend(trigger.reason for trigger in triggers)
     if review_reasons:
         prediction = classified_triggers[0][1] if classified_triggers else None
+        legacy_near_threshold = not strict_zs32 and any(
+            "near threshold" in trigger.reason for trigger, _ in classified_triggers
+        )
         return FusedDecision(
             part_id=part_id,
-            final_status="REVIEW",
+            final_status="SUSPECT" if legacy_near_threshold else "REVIEW",
             final_label=None,
             defect_side=None if prediction is None else prediction.side,
             defect_view=None if prediction is None else prediction.view,

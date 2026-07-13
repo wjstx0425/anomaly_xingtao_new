@@ -1280,8 +1280,8 @@ def test_no_positive_predictions_return_ok() -> None:
     assert decision.triggered_branch is None
 
 
-def test_near_threshold_prediction_returns_review_when_enabled() -> None:
-    """Legacy near-threshold negatives should map to the unified REVIEW status."""
+def test_legacy_near_threshold_prediction_preserves_suspect_status() -> None:
+    """Legacy near-threshold negatives retain SUSPECT with no binary label."""
     fusion = load_fusion_module()
     predictions = [
         fusion.BranchPrediction(
@@ -1305,7 +1305,7 @@ def test_near_threshold_prediction_returns_review_when_enabled() -> None:
         config={"suspect_policy": {"enable": True, "near_threshold_ratio": 0.9}},
     )
 
-    assert decision.final_status == "REVIEW"
+    assert decision.final_status == "SUSPECT"
     assert decision.final_label is None
     assert decision.triggered_branch == "geometry"
     assert "near threshold" in decision.reason
@@ -1334,7 +1334,7 @@ def test_legacy_surface_texture_suspect_preserves_suspect_status() -> None:
     decision = fusion.fuse_part_predictions("part001", predictions)
 
     assert decision.final_status == "SUSPECT"
-    assert decision.final_label == 1
+    assert decision.final_label is None
     assert decision.triggered_branch == "surface_texture"
     assert [item.level for item in decision.triggered_evidence] == ["STRONG"]
 

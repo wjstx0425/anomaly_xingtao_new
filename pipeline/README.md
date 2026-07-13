@@ -1704,10 +1704,14 @@ uv run python pipeline/18_fuse_inspection_results.py \
 `RETAKE`。YOLO 无框只是该 YOLO 行的 CLEAR 证据，不能抵消其它视角或分支的 GRAY/STRONG。
 一旦已有合法 STRONG，缺证据、版本/运行故障或采集错误只会追加 system trigger、使
 `inspection_complete=false` 并阻止发布，不会把不可变的机器 `NG_*` 降为 REVIEW/INVALID_CAPTURE。
-质量与配准的每个 non-PASS 行都会作为独立 trigger 保留，不会被第一个 gate 或 STRONG 证据覆盖。
+严格 ZS32 的质量与配准行必须在 `status` 中显式写 `PASS`；字段缺失、空白或任意其它值都属于 gate
+fault，不能发布 OK。每个 non-PASS 行都会作为独立 trigger 保留，不会被第一个 gate 或 STRONG 证据覆盖；
+已有 STRONG 时机器 NG 保持不变，但检查仍为不完整且不可放行。非严格兼容流程仍可沿用 `pred_label=0`。
 
-YOLO 每个视角只提交一条 summary branch identity，`detections` 是 JSON list。每个 box 保留 class、
-confidence、`xyxy`、area 与 ROI/border flags；多框不会被当成重复 required branch，无框必须显式写 `[]`。
+YOLO 每个视角只提交一条 summary branch identity，`detections` 是 JSON list。缺字段或空白表示 evidence
+缺失，与显式无框 `[]` 不同；严格 ZS32 只接受后者作为 CLEAR。每个 box 必须包含合法的 class、有限且位于
+`[0,1]` 的 confidence、四个递增有限坐标 `xyxy`、正有限 area，所带 ROI/border flags 必须为 boolean；
+多框不会被当成重复 required branch。缺失或畸形 summary 会进入不可放行诊断代际并非零退出。
 
 正面三个视角只能产生 `FRONT_CLEAR`、`FRONT_REVIEW` 或 `FRONT_NG`，此时 `final_status` 仍为空；
 翻面后，同一 `part_id` 的背面三个视角产生对应 `BACK_*`，仅 `FRONT_CLEAR + BACK_CLEAR` 能组合为
