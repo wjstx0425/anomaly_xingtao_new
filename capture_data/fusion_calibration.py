@@ -285,8 +285,11 @@ def _metric_block(
     defect_count = len(defect_outcomes)
     normal_count = len(normal_outcomes)
     part_count = len(outcomes)
-    escape_rate = escape_count / defect_count if defect_count else None
-    non_clear_recall = None if escape_rate is None or not calibration_valid else 1 - escape_rate
+    observed_escape_rate = escape_count / defect_count if defect_count else None
+    observed_normal_reject_rate = reject_count / normal_count if normal_count else None
+    observed_review_rate = review_count / part_count if part_count else None
+    escape_rate = observed_escape_rate if calibration_valid else None
+    non_clear_recall = None if escape_rate is None else 1 - escape_rate
     return {
         "calibration_valid": calibration_valid,
         "part_count": part_count,
@@ -297,9 +300,12 @@ def _metric_block(
         "non_clear_recall": non_clear_recall,
         "recall": non_clear_recall,
         "normal_reject_count": reject_count,
-        "normal_reject_rate": reject_count / normal_count if normal_count else None,
+        "normal_reject_rate": observed_normal_reject_rate if calibration_valid else None,
         "review_count": review_count,
-        "review_rate": review_count / part_count if part_count else None,
+        "review_rate": observed_review_rate if calibration_valid else None,
+        "diagnostic_observed_escape_rate": observed_escape_rate,
+        "diagnostic_observed_normal_reject_rate": observed_normal_reject_rate,
+        "diagnostic_observed_review_rate": observed_review_rate,
         "escape_rate_95_upper": (
             1 - 0.05 ** (1 / defect_count) if calibration_valid and defect_count and escape_count == 0 else None
         ),

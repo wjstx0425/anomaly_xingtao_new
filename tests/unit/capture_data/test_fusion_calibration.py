@@ -361,9 +361,15 @@ def test_missing_required_eval_group_forces_review_and_invalidates_safety_metric
 
     assert overall["calibration_valid"] is False
     assert overall["review_count"] == 1
+    assert overall["escape_rate"] is None
     assert overall["non_clear_recall"] is None
     assert overall["recall"] is None
+    assert overall["normal_reject_rate"] is None
+    assert overall["review_rate"] is None
     assert overall["escape_rate_95_upper"] is None
+    assert overall["diagnostic_observed_escape_rate"] == pytest.approx(0.0)
+    assert overall["diagnostic_observed_normal_reject_rate"] is None
+    assert overall["diagnostic_observed_review_rate"] == pytest.approx(1.0)
 
 
 def test_required_group_for_absent_evaluation_hand_invalidates_contract() -> None:
