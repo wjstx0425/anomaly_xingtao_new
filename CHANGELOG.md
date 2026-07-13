@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- 🚀 **pipeline**: Add strict ZS32 six-view dual-threshold fusion with staged front/back decisions, per-part audit JSON, fail-closed fault coverage, and an offline calibration CLI.
 - 🚀 **pipeline**: Add and document the custom C789/FX11 inspection workflow, including model comparison, custom training, hardened stress-normal validation, live demo archive/OCR output, and manual geometry templates.
 - 🚀 **pipeline**: Add CSV-based fail-closed inspection fusion and robustness benchmark summaries for the custom industrial workflow.
 - 🚀 **pipeline**: Add geometry threshold fallback diagnostics for slot/type/region, slot, defect-type, and global lookup levels.

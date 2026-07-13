@@ -1637,6 +1637,70 @@ train/val/test、`sample_id` 和空标签；跨越 ROI 边界的框会裁到边�
 
 ## 工业融合检测 MVP-1
 
+### ZS32 六视角严格融合
+
+ZS32 上线配置固定为 `config/fusion/zs32_six_view.json`。先用按物理 `part_id` 划分的
+calibration/test 分数离线拟合各 `hand/view/branch/model_version/roi_version` 组的双阈值；stage 30
+只写报告，不会原地修改上线配置：
+
+```bash
+uv run python pipeline/30_calibrate_zs32_fusion.py \
+  --input-csv results/zs32_fusion/calibration_rows.csv \
+  --output-dir results/zs32_fusion/calibration_v1 \
+  --target-recall 1.0 \
+  --normal-quantile 0.995
+```
+
+校准输入字段为 `part_id,hand,view,branch,raw_score,gt_label,split,model_version,roi_version`。
+输出目录包含 `thresholds.json`、`thresholds.csv`、`calibration_metrics.json` 和
+`calibration_summary.md`；阈值记录同时给出 `low_threshold`、`high_threshold`、normal/defect 样本数和
+`status`，指标按物理工件报告 escape、recall、review、normal reject 及零逃逸的单侧 95% 上界。
+
+生产融合命令为：
+
+```bash
+uv run python pipeline/18_fuse_inspection_results.py \
+  --profile zs32 \
+  --manifest results/zs32_fusion/inspection_manifest.csv \
+  --quality-csv results/zs32_fusion/quality_gate.csv \
+  --registration-csv results/zs32_fusion/registration.csv \
+  --branch-csv anomaly_front=results/zs32_fusion/anomaly_front.csv \
+  --branch-csv anomaly_front_left=results/zs32_fusion/anomaly_front_left.csv \
+  --branch-csv anomaly_front_right=results/zs32_fusion/anomaly_front_right.csv \
+  --branch-csv anomaly_back=results/zs32_fusion/anomaly_back.csv \
+  --branch-csv anomaly_back_left=results/zs32_fusion/anomaly_back_left.csv \
+  --branch-csv anomaly_back_right=results/zs32_fusion/anomaly_back_right.csv \
+  --branch-csv yolo=results/zs32_fusion/yolo.csv \
+  --branch-csv geometry=results/zs32_fusion/geometry.csv \
+  --require-complete-evidence \
+  --output-dir results/zs32_fusion/fused_v1
+```
+
+各 branch CSV 会标准化为 `branch_predictions.csv`，字段含 `part_id`、`side`、`view`、`slot_id`、
+`branch`、`pred_label`、连续 `score`、旧单阈值 `threshold`、`low_threshold`、`high_threshold`、
+`evidence_level`、`defect_type`、`evidence_type`、`gt_defect_type`、`reason`、`source_path`、
+`evidence_path`、`status` 以及 `model_version`、`threshold_version`、`roi_version`、
+`template_version`。`fused_predictions.csv` 的字段为 `part_id`、`final_status`、`final_label`、
+`defect_side`、`defect_view`、`defect_slot`、`defect_type`、`triggered_branch` 和 `reason`；
+`summary.md` 汇总 parts/branches、OK、NG、REVIEW、RETAKE、INVALID_CAPTURE 及完整/不完整检查数。
+
+最终状态只有五类语义：`OK`、`REVIEW`、`RETAKE`、`INVALID_CAPTURE` 和具体的 `NG_*`
+（`NG_ANOMALY`/`NG_GEOMETRY`/`NG_YOLO`）。只有六视角、每视角全部必需 branch、质量与配准 PASS、
+版本一致、证据文件完整且全部为 CLEAR 才能自动 `OK`；任一 STRONG 直接进入对应 `NG_*`，任一 GRAY、
+缺 branch 或版本不一致进入 `REVIEW`，采集身份/完整性错误进入 `INVALID_CAPTURE`，质量或配准失败进入
+`RETAKE`。YOLO 无框只是该 YOLO 行的 CLEAR 证据，不能抵消其它视角或分支的 GRAY/STRONG。
+
+正面三个视角只能产生 `FRONT_CLEAR`、`FRONT_REVIEW` 或 `FRONT_NG`，此时 `final_status` 仍为空；
+翻面后，同一 `part_id` 的背面三个视角产生对应 `BACK_*`，仅 `FRONT_CLEAR + BACK_CLEAR` 能组合为
+最终 `OK`。其它组合保持 REVIEW 或 NG，不能以多数投票覆盖强阳性。
+
+严格 profile 默认把逐工件审计写入 `results/zs32_fusion/fused_v1/audit/<part_id>.json`。JSON 保存
+`schema_version`、六视角的每一行原始分数/双阈值/阈值 margin、路径与 SHA-256、模型/阈值/ROI/模板版本、
+全部触发证据，以及彼此独立的 `machine_status`、`review.status`、`review_status`、`released_status`。
+机器结果不会被人工结论覆盖；初始 `review.status=PENDING`，`review_status=null` 且
+`released_status=null`。人工复检必须查看原图、热图/检测框/几何 overlay 和所有触发原因，再由独立发布
+流程填写复检与放行状态。
+
 `pipeline/18_fuse_inspection_results.py` 是新的 fail-closed 融合入口。它不会覆盖
 `pipeline/12_geometry_eval.py` 生成的旧版 `fused_predictions.csv`，而是把现有
 `geometry_predictions.csv`、AnomalyDINO `predictions.csv`、可选 `quality_gate.csv` 和

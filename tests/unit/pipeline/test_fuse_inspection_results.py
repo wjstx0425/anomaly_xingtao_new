@@ -41,12 +41,9 @@ def _write_complete_predictions(
     strong_evidence: bool = False,
     part_id: str = "part001",
     omit_view: str | None = None,
+    fault: str | None = None,
 ) -> Path:
     """Write all five required rows for every ZS32 view."""
-    source_path = tmp_path / "source.png"
-    evidence_path = tmp_path / "evidence.png"
-    source_path.write_bytes(b"source")
-    evidence_path.write_bytes(b"evidence")
     csv_path = tmp_path / "zs32_predictions.csv"
     fieldnames = [
         "part_id",
@@ -61,6 +58,8 @@ def _write_complete_predictions(
         "reason",
         "source_path",
         "evidence_path",
+        "model_version",
+        "roi_version",
     ]
     with csv_path.open("w", newline="", encoding="utf-8") as file:
         writer = csv.DictWriter(file, fieldnames=fieldnames)
@@ -68,26 +67,63 @@ def _write_complete_predictions(
         for view in VIEWS:
             if view == omit_view:
                 continue
+            source_path = tmp_path / f"{view}_source.png"
+            source_path.write_bytes(view.encode())
             for branch in ("quality_gate", "registration", f"anomaly_{view}", "yolo", "geometry"):
+                if fault == "missing_branch" and view == "back_right" and branch == "geometry":
+                    continue
+                evidence_path = tmp_path / f"{view}_{branch}_evidence.png"
+                evidence_path.write_bytes(branch.encode())
                 target_row = view == "front" and branch == "anomaly_front"
                 is_gray = gray_evidence and target_row
                 is_strong = strong_evidence and target_row
-                writer.writerow(
-                    {
-                        "part_id": part_id,
-                        "side": "zs32",
-                        "view": view,
-                        "branch": branch,
-                        "pred_label": 0,
-                        "raw_score": 0.6 if is_strong else 0.4 if is_gray else 0.2,
-                        "low_threshold": 0.3,
-                        "high_threshold": 0.5,
-                        "status": "PASS" if branch in {"quality_gate", "registration"} else "",
-                        "reason": "strong anomaly" if is_strong else "gray anomaly" if is_gray else "clear",
-                        "source_path": "" if missing_artifact == "source" and target_row else source_path,
-                        "evidence_path": "" if missing_artifact == "evidence" and target_row else evidence_path,
-                    },
-                )
+                row = {
+                    "part_id": "wrong-part" if fault == "mismatched_part_id" and view == "back_right" else part_id,
+                    "side": "zs32",
+                    "view": view,
+                    "branch": branch,
+                    "pred_label": 0,
+                    "raw_score": (
+                        "nan"
+                        if fault == "nonfinite_score" and target_row
+                        else 0.6
+                        if is_strong
+                        else 0.4
+                        if is_gray
+                        else 0.2
+                    ),
+                    "low_threshold": 0.3,
+                    "high_threshold": 0.5,
+                    "status": (
+                        "FAIL"
+                        if fault == "quality_fail" and view == "front" and branch == "quality_gate"
+                        else "WARN"
+                        if fault == "registration_warn" and view == "front" and branch == "registration"
+                        else "EMPTY"
+                        if fault == "yolo_empty_gray_anomaly" and branch == "yolo"
+                        else "PASS"
+                        if branch in {"quality_gate", "registration"}
+                        else ""
+                    ),
+                    "reason": "strong anomaly" if is_strong else "gray anomaly" if is_gray else "clear",
+                    "source_path": "" if missing_artifact == "source" and target_row else source_path,
+                    "evidence_path": "" if missing_artifact == "evidence" and target_row else evidence_path,
+                    "model_version": (
+                        "m2"
+                        if fault == "model_version_mismatch" and view == "back_right" and branch == "yolo"
+                        else "m1"
+                    ),
+                    "roi_version": (
+                        "roi2"
+                        if fault == "roi_version_mismatch" and view == "back_right" and branch == "yolo"
+                        else "roi1"
+                    ),
+                }
+                if fault == "yolo_empty_gray_anomaly" and branch == "yolo":
+                    row.update(raw_score=0.0, pred_label=0, reason="no detections")
+                writer.writerow(row)
+                if fault == "duplicate_view_identity" and view == "front" and branch == "anomaly_front":
+                    writer.writerow(row)
     return csv_path
 
 
@@ -242,3 +278,65 @@ def test_zs32_audit_rejects_part_id_path_escape(tmp_path: Path) -> None:
         stage18.run_fusion(args)
 
     assert not (tmp_path / "escaped.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("fault", "missing_artifact", "omit_view"),
+    [
+        pytest.param(None, None, "back_right", id="missing_view"),
+        pytest.param("missing_branch", None, None, id="missing_branch"),
+        pytest.param("duplicate_view_identity", None, None, id="duplicate_view_identity"),
+        pytest.param("mismatched_part_id", None, None, id="mismatched_part_id"),
+        pytest.param("quality_fail", None, None, id="quality_fail"),
+        pytest.param("registration_warn", None, None, id="registration_warn"),
+        pytest.param("nonfinite_score", None, None, id="nonfinite_score"),
+        pytest.param("model_version_mismatch", None, None, id="model_version_mismatch"),
+        pytest.param("roi_version_mismatch", None, None, id="roi_version_mismatch"),
+        pytest.param(None, "source", None, id="missing_source_image"),
+        pytest.param(None, "evidence", None, id="missing_evidence_artifact"),
+        pytest.param("yolo_empty_gray_anomaly", None, None, id="yolo_empty_with_gray_anomaly"),
+    ],
+)
+def test_fault_injection_never_releases_ok(
+    tmp_path: Path,
+    fault: str | None,
+    missing_artifact: str | None,
+    omit_view: str | None,
+) -> None:
+    """Every required-input, gate, version, and evidence fault must fail closed."""
+    stage18 = _load_stage18(f"pipeline_fuse_inspection_fault_{fault or missing_artifact or omit_view}")
+    predictions_csv = _write_complete_predictions(
+        tmp_path,
+        fault=fault,
+        missing_artifact=missing_artifact,
+        omit_view=omit_view,
+        gray_evidence=fault == "yolo_empty_gray_anomaly",
+    )
+    output_dir = tmp_path / "out"
+    args = stage18.build_parser().parse_args(
+        [
+            "--profile",
+            "zs32",
+            "--branch-csv",
+            f"normalized={predictions_csv}",
+            "--require-complete-evidence",
+            "--output-dir",
+            str(output_dir),
+        ],
+    )
+
+    decisions = stage18.run_fusion(args)
+
+    assert decisions
+    for decision in decisions:
+        assert decision.final_status != "OK"
+        audit = json.loads((output_dir / f"audit/{decision.part_id}.json").read_text(encoding="utf-8"))
+        assert audit["released_status"] is None
+        assert audit["machine_status"] in {
+            "REVIEW",
+            "RETAKE",
+            "INVALID_CAPTURE",
+            "NG_ANOMALY",
+            "NG_GEOMETRY",
+            "NG_YOLO",
+        }

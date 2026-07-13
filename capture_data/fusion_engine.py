@@ -577,6 +577,77 @@ def _classified_triggers(
     return tuple(classified)
 
 
+def _nonfinite_prediction_faults(predictions: Sequence[BranchPrediction]) -> list[str]:
+    """Return non-finite numeric fields that make strict fusion input invalid."""
+    faults: list[str] = []
+    for prediction in predictions:
+        evidence_id = f"{prediction.view or 'unknown'}:{prediction.branch}"
+        for field, value in (
+            ("score", prediction.score),
+            ("threshold", prediction.threshold),
+            ("low_threshold", prediction.low_threshold),
+            ("high_threshold", prediction.high_threshold),
+        ):
+            if value is not None and not isfinite(value):
+                faults.append(f"non-finite {field}: {evidence_id}")
+    return faults
+
+
+def _strict_contract_faults(predictions: Sequence[BranchPrediction]) -> tuple[list[str], list[str]]:
+    """Return duplicate-identity and version-consistency faults for strict ZS32 input."""
+    identity_counts: dict[tuple[str, str | None, str, str | None], int] = defaultdict(int)
+    for prediction in predictions:
+        identity_counts[prediction.side, prediction.view, prediction.branch, prediction.slot_id] += 1
+    invalid = [
+        f"duplicate view/branch identity: {side}:{view or 'unknown'}:{branch}"
+        for (side, view, branch, _slot_id), count in identity_counts.items()
+        if count > 1
+    ]
+
+    review: list[str] = []
+    for branch in sorted({prediction.branch for prediction in predictions}):
+        branch_rows = [prediction for prediction in predictions if prediction.branch == branch]
+        for field in ("model_version", "roi_version"):
+            versions = sorted(
+                {
+                    str(value)
+                    for prediction in branch_rows
+                    if (value := getattr(prediction, field)) is not None
+                },
+            )
+            if len(versions) > 1:
+                review.append(f"{field} mismatch for {branch}: {', '.join(versions)}")
+    return sorted(invalid), review
+
+
+def _system_fault_decision(part_id: str, status: str, reasons: Sequence[str]) -> FusedDecision:
+    """Create a fail-closed decision retaining strict input-validation reasons."""
+    reason = "; ".join(reasons)
+    trigger = TriggerEvidence(
+        evidence_id="system:input_contract",
+        branch="system",
+        side="zs32",
+        view=None,
+        level=EvidenceLevel.GRAY.value,
+        score=None,
+        low_threshold=None,
+        high_threshold=None,
+        reason=reason,
+    )
+    return FusedDecision(
+        part_id=part_id,
+        final_status=status,
+        final_label=None,
+        defect_side=None,
+        defect_view=None,
+        defect_slot=None,
+        defect_type=None,
+        triggered_branch="system",
+        reason=reason,
+        triggered_evidence=(trigger,),
+    )
+
+
 def fuse_part_predictions(
     part_id: str,
     predictions: Sequence[BranchPrediction],
@@ -586,6 +657,9 @@ def fuse_part_predictions(
 ) -> FusedDecision:
     """Fuse branch predictions into a fail-closed decision while retaining every trigger."""
     fusion_config = config or {}
+    strict_zs32 = _clean_text(fusion_config.get("profile")) == "zs32_six_view_v1"
+    if strict_zs32 and (nonfinite_faults := _nonfinite_prediction_faults(predictions)):
+        return _system_fault_decision(part_id, "INVALID_CAPTURE", nonfinite_faults)
     classified_triggers = _classified_triggers(predictions, fusion_config)
     triggers = tuple(item[0] for item in classified_triggers)
     missing = [item for item in missing_required if item]
@@ -653,6 +727,13 @@ def fuse_part_predictions(
             _branch_reason(prediction),
             triggers,
         )
+
+    if strict_zs32:
+        invalid_faults, review_faults = _strict_contract_faults(predictions)
+        if invalid_faults:
+            return _system_fault_decision(part_id, "INVALID_CAPTURE", invalid_faults)
+        if review_faults:
+            return _system_fault_decision(part_id, "REVIEW", review_faults)
 
     configured_missing_views = missing_required_views(predictions, fusion_config)
     missing_branches = missing_required_branch_keys(predictions, fusion_config)

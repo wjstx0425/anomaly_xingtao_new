@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import asdict
+from math import isfinite
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -48,14 +49,19 @@ def _serialize_prediction(prediction: BranchPrediction) -> dict[str, Any]:
     """Serialize one normalized prediction without discarding absent artifacts."""
     source_exists, source_sha256 = _artifact(prediction.source_path, hash_source=True)
     evidence_exists, _ = _artifact(prediction.evidence_path)
-    score = prediction.score
-    low = prediction.low_threshold
-    high = prediction.high_threshold
+    serialized = asdict(prediction)
+    invalid_numeric: dict[str, str] = {}
+    for field in ("score", "threshold", "low_threshold", "high_threshold"):
+        value = serialized[field]
+        if value is not None and not isfinite(value):
+            invalid_numeric[field] = str(value)
+            serialized[field] = None
+    score = serialized["score"]
+    low = serialized["low_threshold"]
+    high = serialized["high_threshold"]
     return {
-        **asdict(prediction),
-        "score": score,
-        "low_threshold": low,
-        "high_threshold": high,
+        **serialized,
+        "invalid_numeric": invalid_numeric,
         "low_margin": None if score is None or low is None else score - low,
         "high_margin": None if score is None or high is None else score - high,
         "source_exists": source_exists,
@@ -118,6 +124,6 @@ def write_part_audit(audit: Mapping[str, Any], output_path: Path) -> Path:
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
     temporary = output_path.with_suffix(output_path.suffix + ".tmp")
-    temporary.write_text(json.dumps(audit, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temporary.write_text(json.dumps(audit, indent=2, sort_keys=True, allow_nan=False) + "\n", encoding="utf-8")
     temporary.replace(output_path)
     return output_path
