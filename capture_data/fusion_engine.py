@@ -13,6 +13,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from enum import Enum
 from math import isfinite
+from numbers import Real
 from pathlib import Path
 from typing import Any
 
@@ -118,7 +119,7 @@ class BranchPrediction:
     manifest_identity: str | None = None
     capture_session: str | None = None
     group_id: str | None = None
-    detections: tuple[dict[str, Any], ...] = ()
+    detections: tuple[dict[str, Any], ...] | None = None
 
 
 def classify_evidence(prediction: BranchPrediction) -> EvidenceLevel:
@@ -241,11 +242,11 @@ def _int_label(value: Any, *, default: int = 0) -> int:
     return int(float(text))
 
 
-def _structured_detections(value: object) -> tuple[dict[str, Any], ...]:
+def _structured_detections(value: object) -> tuple[dict[str, Any], ...] | None:
     """Parse one JSON-list detection summary while preserving every box field."""
     text = _clean_text(value)
     if text is None:
-        return ()
+        return None
     parsed = json.loads(text)
     if not isinstance(parsed, list):
         msg = "detections must be a JSON list"
@@ -257,6 +258,68 @@ def _structured_detections(value: object) -> tuple[dict[str, Any], ...]:
             raise TypeError(msg)
         detections.append(dict(detection))
     return tuple(detections)
+
+
+def _finite_real(value: object) -> bool:
+    """Return whether a value is a finite real number but not a boolean."""
+    return isinstance(value, Real) and not isinstance(value, bool) and isfinite(value)
+
+
+def _yolo_detection_faults(prediction: BranchPrediction) -> list[str]:
+    """Validate the strict per-box YOLO evidence contract."""
+    identity = ":".join(
+        (prediction.hand or "", prediction.side, prediction.view or "", prediction.branch),
+    )
+    if prediction.detections is None:
+        return [f"missing detections for strict YOLO summary: {identity}"]
+    if not isinstance(prediction.detections, Sequence) or isinstance(prediction.detections, (str, bytes)):
+        return [f"detections must be a sequence for strict YOLO summary: {identity}"]
+
+    faults: list[str] = []
+    for index, detection in enumerate(prediction.detections):
+        prefix = f"invalid YOLO detection {identity}:{index}"
+        if not isinstance(detection, Mapping):
+            faults.append(f"{prefix}: box must be an object")
+            continue
+        for field in ("class", "confidence", "xyxy", "area"):
+            if field not in detection:
+                faults.append(f"{prefix}: missing {field}")
+
+        class_value = detection.get("class")
+        valid_class = (
+            isinstance(class_value, str)
+            and bool(class_value.strip())
+            or isinstance(class_value, int)
+            and not isinstance(class_value, bool)
+            and class_value >= 0
+        )
+        if "class" in detection and not valid_class:
+            faults.append(f"{prefix}: class must be a nonempty name or nonnegative integer")
+
+        confidence = detection.get("confidence")
+        if "confidence" in detection and (not _finite_real(confidence) or not 0 <= confidence <= 1):
+            faults.append(f"{prefix}: confidence must be finite and within [0, 1]")
+
+        xyxy = detection.get("xyxy")
+        valid_xyxy = (
+            isinstance(xyxy, Sequence)
+            and not isinstance(xyxy, (str, bytes))
+            and len(xyxy) == 4
+            and all(_finite_real(coordinate) and coordinate >= 0 for coordinate in xyxy)
+        )
+        if "xyxy" in detection and not valid_xyxy:
+            faults.append(f"{prefix}: xyxy must contain four finite nonnegative coordinates")
+        elif valid_xyxy and (xyxy[2] <= xyxy[0] or xyxy[3] <= xyxy[1]):
+            faults.append(f"{prefix}: xyxy must have increasing coordinates")
+
+        area = detection.get("area")
+        if "area" in detection and (not _finite_real(area) or area <= 0):
+            faults.append(f"{prefix}: area must be finite and positive")
+
+        for flag in ("in_roi", "border", "touches_border"):
+            if flag in detection and not isinstance(detection[flag], bool):
+                faults.append(f"{prefix}: {flag} must be boolean")
+    return faults
 
 
 def _source_path(row: Mapping[str, Any]) -> str | None:
@@ -733,6 +796,8 @@ def _strict_contract_faults(
             invalid.append(f"product/profile mismatch for {':'.join(identity)}")
         if hand != part_hand or hand not in allowed_hands or side != (required_side or ""):
             invalid.append(f"unexpected strict identity: {':'.join(identity)}")
+        if branch == "yolo":
+            invalid.extend(_yolo_detection_faults(prediction))
         observed[identity].append(prediction)
 
     for identity, expectation in expected.items():
@@ -1359,7 +1424,10 @@ def write_branch_predictions_csv(predictions: Sequence[BranchPrediction], output
         writer.writeheader()
         for prediction in predictions:
             row = asdict(prediction)
-            row["detections"] = json.dumps(row["detections"], separators=(",", ":"), sort_keys=True)
+            detections = row["detections"]
+            row["detections"] = (
+                "" if detections is None else json.dumps(detections, separators=(",", ":"), sort_keys=True)
+            )
             writer.writerow({field: row.get(field) for field in BRANCH_FIELDNAMES})
 
 

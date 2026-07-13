@@ -89,6 +89,7 @@ def _zs32_prediction(
         status=status,
         low_threshold=low_threshold,
         high_threshold=high_threshold,
+        detections=() if branch == "yolo" else None,
     )
 
 
@@ -808,6 +809,88 @@ def test_yolo_empty_detection_list_is_clear_summary(tmp_path: Path) -> None:
     assert prediction.pred_label == 0
     assert prediction.detections == ()
     assert fusion.classify_evidence(prediction) is fusion.EvidenceLevel.CLEAR
+
+
+@pytest.mark.parametrize("detections_cell", [None, ""])
+def test_yolo_missing_or_blank_detection_cell_remains_absent(tmp_path: Path, detections_cell: str | None) -> None:
+    """A missing summary is distinct from an explicit no-box list."""
+    fusion = load_fusion_module()
+    columns = "part_id,side,view,branch,pred_label"
+    values = "p1,zs32,front,yolo,0"
+    if detections_cell is not None:
+        columns += ",detections"
+        values += f",{detections_cell}"
+    csv_path = tmp_path / "yolo-missing.csv"
+    csv_path.write_text(f"{columns}\n{values}\n", encoding="utf-8")
+
+    prediction = fusion.load_branch_predictions_csv(csv_path, branch="yolo")[0]
+
+    assert prediction.detections is None
+
+
+def test_strict_yolo_requires_explicit_detection_summary() -> None:
+    """Strict fusion fails closed when a required YOLO summary is absent."""
+    fusion = load_fusion_module()
+    rows = _strict_zs32_rows(fusion, "p1")
+    target = next(index for index, row in enumerate(rows) if row.view == "front" and row.branch == "yolo")
+    rows[target] = fusion.BranchPrediction(**{**rows[target].__dict__, "detections": None})
+
+    decision = fusion.fuse_part_predictions("p1", rows, config=_strict_zs32_config())
+
+    assert decision.final_status == "INVALID_CAPTURE"
+    assert "missing detections for strict YOLO summary: left:zs32:front:yolo" in decision.reason
+    assert any(trigger.branch == "system" for trigger in decision.triggered_evidence)
+
+
+@pytest.mark.parametrize(
+    "detection, expected_fault",
+    [
+        ({"confidence": 0.9, "xyxy": [1, 2, 11, 22], "area": 200}, "missing class"),
+        (
+            {"class": "crack", "confidence": 1.1, "xyxy": [1, 2, 11, 22], "area": 200},
+            "confidence must be finite and within [0, 1]",
+        ),
+        (
+            {"class": "crack", "confidence": 0.9, "xyxy": [11, 2, 1, 22], "area": 200},
+            "xyxy must have increasing coordinates",
+        ),
+        (
+            {"class": "crack", "confidence": 0.9, "xyxy": [1, 2, 11, 22], "area": 0},
+            "area must be finite and positive",
+        ),
+        (
+            {"class": "crack", "confidence": 0.9, "xyxy": [1, 2, 11, 22], "area": 200, "in_roi": 1},
+            "in_roi must be boolean",
+        ),
+        (
+            {
+                "class": "crack",
+                "confidence": 0.9,
+                "xyxy": [1, 2, 11, 22],
+                "area": 200,
+                "touches_border": "false",
+            },
+            "touches_border must be boolean",
+        ),
+    ],
+)
+def test_strict_yolo_rejects_malformed_detection_boxes(
+    detection: dict[str, object],
+    expected_fault: str,
+) -> None:
+    """Malformed per-box evidence is retained as a fail-closed system diagnostic."""
+    fusion = load_fusion_module()
+    rows = _strict_zs32_rows(fusion, "p1")
+    target = next(index for index, row in enumerate(rows) if row.view == "front" and row.branch == "yolo")
+    rows[target] = fusion.BranchPrediction(**{**rows[target].__dict__, "detections": (detection,)})
+
+    decision = fusion.fuse_part_predictions("p1", rows, config=_strict_zs32_config())
+
+    assert decision.final_status == "INVALID_CAPTURE"
+    assert expected_fault in decision.reason
+    assert any(
+        trigger.branch == "system" and expected_fault in trigger.reason for trigger in decision.triggered_evidence
+    )
 
 
 def test_dual_thresholds_classify_clear_gray_and_strong(tmp_path: Path) -> None:

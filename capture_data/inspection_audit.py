@@ -86,7 +86,8 @@ def _serialize_prediction(prediction: BranchPrediction) -> dict[str, Any]:
     source_exists, source_sha256 = _artifact(prediction.source_path)
     evidence_exists, evidence_sha256 = _artifact(prediction.evidence_path)
     serialized = asdict(prediction)
-    serialized["detections"] = list(serialized.get("detections", ()))
+    detections = serialized.get("detections")
+    serialized["detections"] = None if detections is None else list(detections)
     invalid_numeric: dict[str, str] = {}
     for field in ("score", "threshold", "low_threshold", "high_threshold"):
         value = serialized[field]
