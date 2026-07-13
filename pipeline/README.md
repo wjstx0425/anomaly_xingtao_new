@@ -1660,6 +1660,10 @@ uv run python pipeline/30_calibrate_zs32_fusion.py \
 normal reject rate 和 review rate 等安全率全部为 `null`；未经合同验证的原始观测率只保留为
 `diagnostic_observed_*`，不可当作上线指标。
 
+`thresholds.json` 是不可绕过的上线 bundle：包含 `artifact_schema/version`、`calibration_valid`、
+profile/config SHA-256、60 个 exact group、canonical `threshold_records_sha256` 以及排除自身哈希字段后重算的
+`artifact_sha256`。不要手工修改该文件，也不要从 branch CSV 反向生成阈值 bundle。
+
 生产融合命令为：
 
 ```bash
@@ -1676,16 +1680,19 @@ uv run python pipeline/18_fuse_inspection_results.py \
   --branch-csv anomaly_back_right=results/zs32_fusion/anomaly_back_right.csv \
   --branch-csv yolo=results/zs32_fusion/yolo.csv \
   --branch-csv geometry=results/zs32_fusion/geometry.csv \
+  --threshold-artifact results/zs32_fusion/calibration_v1/thresholds.json \
   --output-dir results/zs32_fusion/fused_v1
 ```
 
 严格 profile 不需要额外开关就会强制源图和证据文件完整；`--require-complete-evidence` 仅保留给兼容流程。
 各 branch CSV 会标准化为 `branch_predictions.csv`，字段含 `part_id`、`product`、`profile`、`hand`、
-`side`、`view`、`slot_id`、`source_hash`、`manifest_identity`、
+`capture_session`、`group_id`、`side`、`view`、`slot_id`、`source_hash`、`manifest_identity`、
 `branch`、`pred_label`、连续 `score`、旧单阈值 `threshold`、`low_threshold`、`high_threshold`、
 `evidence_level`、`defect_type`、`evidence_type`、`gt_defect_type`、`reason`、`source_path`、
 `evidence_path`、`status` 以及 `model_version`、`threshold_version`、`roi_version`、
-`template_version`。`fused_predictions.csv` 的字段为 `part_id`、`final_status`、`final_label`、
+`template_version`、`detections`。严格 ZS32 的每一行必须携带非空且工件内完全一致的
+`capture_session/group_id`；缺失或混用会进入 `INVALID_CAPTURE`。`fused_predictions.csv` 的字段为
+`part_id`、`final_status`、`final_label`、
 `defect_side`、`defect_view`、`defect_slot`、`defect_type`、`triggered_branch` 和 `reason`；
 `summary.md` 汇总 parts/branches、OK、NG、REVIEW、RETAKE、INVALID_CAPTURE、兼容模式的
 `suspect` 及完整/不完整检查数。
@@ -1697,19 +1704,28 @@ uv run python pipeline/18_fuse_inspection_results.py \
 `RETAKE`。YOLO 无框只是该 YOLO 行的 CLEAR 证据，不能抵消其它视角或分支的 GRAY/STRONG。
 一旦已有合法 STRONG，缺证据、版本/运行故障或采集错误只会追加 system trigger、使
 `inspection_complete=false` 并阻止发布，不会把不可变的机器 `NG_*` 降为 REVIEW/INVALID_CAPTURE。
+质量与配准的每个 non-PASS 行都会作为独立 trigger 保留，不会被第一个 gate 或 STRONG 证据覆盖。
+
+YOLO 每个视角只提交一条 summary branch identity，`detections` 是 JSON list。每个 box 保留 class、
+confidence、`xyxy`、area 与 ROI/border flags；多框不会被当成重复 required branch，无框必须显式写 `[]`。
 
 正面三个视角只能产生 `FRONT_CLEAR`、`FRONT_REVIEW` 或 `FRONT_NG`，此时 `final_status` 仍为空；
 翻面后，同一 `part_id` 的背面三个视角产生对应 `BACK_*`，仅 `FRONT_CLEAR + BACK_CLEAR` 能组合为
 最终 `OK`。其它组合保持 REVIEW 或 NG，不能以多数投票覆盖强阳性。
 
 严格 profile 默认把逐工件审计写入 `results/zs32_fusion/fused_v1/audit/<part_id>.json`。JSON 保存
-`schema_version`、六视角的每一行原始分数/双阈值/阈值 margin、路径与 SHA-256、模型/阈值/ROI/模板版本、
+`schema_version`、`capture_session/group_id`、六视角的每一行原始分数/双阈值/阈值 margin、路径与 SHA-256、
+模型/阈值/ROI/模板版本、structured YOLO boxes、locked threshold artifact path/file/artifact/record hashes、
 全部触发证据，以及彼此独立的 `machine_status`、`review.status`、`review_status`、`released_status`。
+输入没有真实采集 timestamp 时审计字段保持 `null`，不会把当前时间冒充为采集证据。
 机器结果不会被人工结论覆盖；初始 `review.status=PENDING`，`review_status=null` 且
 `released_status=null`。人工复检必须查看原图、热图/检测框/几何 overlay 和所有触发原因，再由独立发布
 流程填写复检与放行状态。
 
-stage 18 把 `branch_predictions.csv`、`fused_predictions.csv`、`summary.md` 和所有 audit JSON 先写入唯一
+stage 18 会先核对 locked bundle 的 schema、有效标定状态、profile hash、60 组完整性、两层哈希，
+再逐行要求 CSV `low/high` 与 bundle 的权威数值完全一致。缺失、篡改、不完整、标定无效或数值不符都会
+先发布不可放行的诊断代际，再非零退出。然后 stage 18 把 `branch_predictions.csv`、`fused_predictions.csv`、
+`summary.md`、`threshold_artifact.json` 和所有 audit JSON 先写入唯一
 sibling staging 目录，只在哈希、序列化和所有写入完成后执行一次目录 rename。已存在的
 `--output-dir` 会直接拒绝；任一发布失败都不会留下可消费的 OK 代际。严格输入的双阈值或
 `evidence_level` 畸形时，CLI 会先发布不可放行的诊断代际，然后以非零状态退出。

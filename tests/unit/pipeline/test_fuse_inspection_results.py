@@ -108,7 +108,7 @@ def _load_stage18(name: str) -> ModuleType:
     return module
 
 
-def _write_complete_predictions(
+def _write_complete_predictions(  # noqa: C901
     tmp_path: Path,
     *,
     missing_artifact: str | None = None,
@@ -147,6 +147,7 @@ def _write_complete_predictions(
         "roi_version",
         "template_version",
         "evidence_level",
+        "detections",
     ]
     with csv_path.open("w", newline="", encoding="utf-8") as file:
         writer = csv.DictWriter(file, fieldnames=fieldnames)
@@ -217,6 +218,7 @@ def _write_complete_predictions(
                     ),
                     "template_version": "zs32-templates-2026.07.13",
                     "evidence_level": ("BROKEN" if fault == "malformed_evidence_level" and target_row else ""),
+                    "detections": "[]" if branch == "yolo" else "",
                 }
                 if fault == "malformed_thresholds" and target_row:
                     row["low_threshold"] = 0.7
@@ -231,6 +233,10 @@ def _write_complete_predictions(
                     row.update(status="FAIL", pred_label=1, reason="blur_laplacian_var below minimum")
                 if fault == "quality_overexposure" and view == "front" and branch == "quality_gate":
                     row.update(status="FAIL", pred_label=1, reason="highlight_ratio above maximum")
+                if fault == "strong_gate_faults" and view == "front" and branch == "quality_gate":
+                    row.update(status="FAIL", pred_label=1, reason="blur gate failed")
+                if fault == "strong_gate_faults" and view == "front" and branch == "registration":
+                    row.update(status="WARN", pred_label=0, reason="registration unstable")
                 if fault == "drift" and target_row:
                     row.update(status="DRIFT", raw_score=0.2, reason="camera score drift")
                 if fault == "duplicate_source_hash" and view == "back_right":
@@ -238,6 +244,37 @@ def _write_complete_predictions(
                     row["source_path"] = duplicate
                 if fault == "yolo_empty_gray_anomaly" and branch == "yolo":
                     row.update(raw_score=0.0, pred_label=0, reason="no detections")
+                if fault == "yolo_multi_box" and view == "front" and branch == "yolo":
+                    row.update(
+                        raw_score=0.91,
+                        pred_label=1,
+                        reason="two deployable detections",
+                        detections=json.dumps(
+                            [
+                                {
+                                    "class": "scratch",
+                                    "confidence": 0.91,
+                                    "xyxy": [10, 20, 30, 40],
+                                    "area": 400,
+                                    "inside_roi": True,
+                                    "border": False,
+                                },
+                                {
+                                    "class": "dent",
+                                    "confidence": 0.84,
+                                    "xyxy": [50, 60, 90, 100],
+                                    "area": 1600,
+                                    "inside_roi": True,
+                                    "border": True,
+                                },
+                            ],
+                        ),
+                    )
+                if fault == "missing_capture_session" and view == "front" and branch == "geometry":
+                    row["capture_session"] = ""
+                    row["session_id"] = ""
+                if fault == "mixed_group_id" and view == "back_right" and branch == "geometry":
+                    row["group_id"] = "group-other"
                 writer.writerow(row)
                 if fault == "duplicate_view_identity" and view == "front" and branch == "anomaly_front":
                     writer.writerow(row)
@@ -476,6 +513,68 @@ def test_capture_fault_blocks_release_without_downgrading_strong_ng(tmp_path: Pa
     assert audit["inspection_complete"] is False
     assert any(trigger["evidence_id"] == "system:identity_fault" for trigger in audit["triggers"])
     assert audit["released_status"] is None
+
+
+def test_strong_with_quality_and_registration_faults_retains_all_audit_triggers(tmp_path: Path) -> None:
+    """Stage 18 keeps machine NG while gate faults make the published inspection incomplete."""
+    stage18 = _load_stage18("pipeline_fuse_strong_gate_faults")
+    predictions_csv = _write_complete_predictions(
+        tmp_path,
+        gray_evidence=False,
+        strong_evidence=True,
+        fault="strong_gate_faults",
+    )
+    output_dir = tmp_path / "out"
+    args = stage18.build_parser().parse_args(
+        _strict_args(
+            tmp_path,
+            ["--profile", "zs32", "--branch-csv", f"normalized={predictions_csv}", "--output-dir", str(output_dir)],
+        ),
+    )
+
+    decisions = stage18.run_fusion(args)
+
+    assert decisions[0].final_status == "NG_ANOMALY"
+    audit = json.loads((output_dir / "audit/part001.json").read_text(encoding="utf-8"))
+    assert audit["inspection_complete"] is False
+    assert {trigger["evidence_id"] for trigger in audit["triggers"]} >= {
+        "front:anomaly_front",
+        "front:quality_gate",
+        "front:registration",
+    }
+    assert audit["released_status"] is None
+
+
+@pytest.mark.parametrize("fault", ["yolo_multi_box", "yolo_empty_gray_anomaly"])
+def test_yolo_structured_detections_round_trip_through_stage18_audit(tmp_path: Path, fault: str) -> None:
+    """One YOLO summary identity audits every box, including an explicit no-box list."""
+    stage18 = _load_stage18(f"pipeline_fuse_yolo_structured_{fault}")
+    predictions_csv = _write_complete_predictions(
+        tmp_path,
+        gray_evidence=fault == "yolo_empty_gray_anomaly",
+        fault=fault,
+    )
+    output_dir = tmp_path / "out"
+    args = stage18.build_parser().parse_args(
+        _strict_args(
+            tmp_path,
+            ["--profile", "zs32", "--branch-csv", f"normalized={predictions_csv}", "--output-dir", str(output_dir)],
+        ),
+    )
+
+    decisions = stage18.run_fusion(args)
+
+    audit = json.loads((output_dir / "audit/part001.json").read_text(encoding="utf-8"))
+    front_yolo = [row for row in audit["views"]["front"] if row["branch"] == "yolo"]
+    assert len(front_yolo) == 1
+    if fault == "yolo_multi_box":
+        assert decisions[0].final_status == "NG_YOLO"
+        assert [box["class"] for box in front_yolo[0]["detections"]] == ["scratch", "dent"]
+        assert front_yolo[0]["detections"][1]["border"] is True
+    else:
+        assert decisions[0].final_status == "REVIEW"
+        assert front_yolo[0]["detections"] == []
+    assert "duplicate required identity" not in decisions[0].reason
 
 
 def test_zs32_always_requires_evidence_without_optional_flag(tmp_path: Path) -> None:
@@ -743,6 +842,8 @@ def test_zs32_audit_rejects_part_id_path_escape(tmp_path: Path) -> None:
         pytest.param("duplicate_source_hash", None, None, id="duplicate_source_hash"),
         pytest.param("quality_blur", None, None, id="quality_blur"),
         pytest.param("quality_overexposure", None, None, id="quality_overexposure"),
+        pytest.param("missing_capture_session", None, None, id="missing_capture_session"),
+        pytest.param("mixed_group_id", None, None, id="mixed_group_id"),
     ],
 )
 def test_fault_injection_never_releases_ok(
