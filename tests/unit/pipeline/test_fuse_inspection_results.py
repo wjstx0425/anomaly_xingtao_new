@@ -188,7 +188,9 @@ def _write_complete_predictions(  # noqa: C901
                     "manifest_identity": f"{part_id}:left:{view}",
                     "source_hash": hashlib.sha256(source_path.read_bytes()).hexdigest(),
                     "evidence_hash": (
-                        "0" * 64
+                        ""
+                        if fault == "missing_evidence_hash" and target_template
+                        else "0" * 64
                         if fault == "evidence_hash_mismatch" and target_template
                         else hashlib.sha256(evidence_path.read_bytes()).hexdigest()
                     ),
@@ -901,6 +903,7 @@ def test_zs32_audit_rejects_part_id_path_escape(tmp_path: Path) -> None:
         pytest.param("drift", None, None, id="camera_drift"),
         pytest.param("duplicate_source_hash", None, None, id="duplicate_source_hash"),
         pytest.param("evidence_hash_mismatch", None, None, id="evidence_hash_mismatch"),
+        pytest.param("missing_evidence_hash", None, None, id="missing_evidence_hash"),
         pytest.param("quality_blur", None, None, id="quality_blur"),
         pytest.param("quality_overexposure", None, None, id="quality_overexposure"),
         pytest.param("missing_capture_session", None, None, id="missing_capture_session"),

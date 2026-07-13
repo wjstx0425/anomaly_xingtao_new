@@ -308,6 +308,9 @@ def _base_audit(request: InspectionRequest) -> dict[str, Any]:
         "skipped_branches": list(DOWNSTREAM_BRANCHES),
         "template_results": [],
         "inspection_complete": False,
+        "review": {"status": "PENDING"},
+        "review_status": None,
+        "released_status": None,
         "downstream": {"called": False, "status": "SKIPPED", "inspection_complete": False},
     }
 

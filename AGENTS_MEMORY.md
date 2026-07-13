@@ -466,5 +466,7 @@
 - Template evidence retains the raw similarity/risk, both thresholds, best template path/hash, offset, image hash, and model/threshold/ROI/template versions. Template files are hash-verified at inference.
 - Template training locks `model.json` with `model.sha256`, rejects template paths outside the model directory, and exports same-source `calibration_rows.csv` using Stage 31's nearest-rank policy. Stage 18 retains and verifies `evidence_hash` for the selected template.
 - A template result cannot PASS without all four versions, an existing best-template path, and a matching template SHA-256. Downstream `OK` is accepted only with `inspection_complete=true`; missing/unknown downstream state becomes REVIEW.
+- Strict Stage 18 requires valid 64-hex declared source and evidence hashes for every required branch row and verifies both against the files; an omitted hash cannot bypass the orchestrator's template evidence contract.
+- Template short-circuit audits initialize `review.status=PENDING`, keep `review_status=null`, and keep `released_status=null`, matching the full Stage 18 audit lifecycle even when Stage 18 is intentionally skipped.
 - Strict profile required branches increased from five to six per view and the exact versioned calibration contract increased from 60 to 72 groups. Stage 18 derives the expected count from the profile instead of hard-coding it.
 - `ZS32InspectionOrchestrator` passes all six normalized template results to its downstream runner. It records early-stop/skipped state without inventing missing branch CLEAR evidence.

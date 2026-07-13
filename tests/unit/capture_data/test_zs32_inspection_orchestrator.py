@@ -94,6 +94,9 @@ def test_all_template_views_pass_before_downstream_runs_once(tmp_path: Path) -> 
     assert audit["inspection_complete"] is True
     assert audit["short_circuited"] is False
     assert audit["downstream"] == {"called": True, "status": "OK", "inspection_complete": True}
+    assert audit["review"] == {"status": "PENDING"}
+    assert audit["review_status"] is None
+    assert audit["released_status"] is None
     assert audit["template_results"][0]["branch"] == "template_match"
     assert audit["template_results"][0]["raw_score"] == pytest.approx(0.02)
     assert audit["template_results"][0]["similarity"] == pytest.approx(0.98)
@@ -133,6 +136,9 @@ def test_non_pass_template_stops_all_downstream_work(
     assert audit["inspection_complete"] is False
     assert audit["short_circuited"] is True
     assert audit["downstream"] == {"called": False, "status": "SKIPPED", "inspection_complete": False}
+    assert audit["review"] == {"status": "PENDING"}
+    assert audit["review_status"] is None
+    assert audit["released_status"] is None
     assert all(result["status"] != "CLEAR" for result in audit["template_results"])
 
 

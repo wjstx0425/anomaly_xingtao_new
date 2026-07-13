@@ -9,6 +9,7 @@ import argparse
 import hashlib
 import json
 import math
+import re
 import shutil
 import sys
 import tempfile
@@ -348,16 +349,21 @@ def _strict_stage_faults(predictions: list[fusion.BranchPrediction]) -> tuple[li
     review: list[str] = []
     for prediction in predictions:
         source_path = Path(prediction.source_path) if prediction.source_path else None
+        declared_source_hash = (prediction.source_hash or "").lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", declared_source_hash):
+            invalid.append(f"missing or invalid source hash: {prediction.view or 'unknown'}:{prediction.branch}")
         if source_path is not None and source_path.is_file():
             digest = sha256_file(source_path)
             hashes_by_digest.setdefault(digest, set()).add(prediction.view or "unknown")
-            declared_hash = getattr(prediction, "source_hash", None)
-            if declared_hash and declared_hash.lower() != digest:
+            if declared_source_hash != digest:
                 invalid.append(f"source hash mismatch: {prediction.view or 'unknown'}:{prediction.branch}")
         evidence_path = Path(prediction.evidence_path) if prediction.evidence_path else None
-        if evidence_path is not None and evidence_path.is_file() and prediction.evidence_hash:
+        declared_evidence_hash = (prediction.evidence_hash or "").lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", declared_evidence_hash):
+            invalid.append(f"missing or invalid evidence hash: {prediction.view or 'unknown'}:{prediction.branch}")
+        if evidence_path is not None and evidence_path.is_file():
             digest = sha256_file(evidence_path)
-            if prediction.evidence_hash.lower() != digest:
+            if declared_evidence_hash != digest:
                 invalid.append(f"evidence hash mismatch: {prediction.view or 'unknown'}:{prediction.branch}")
         status = (prediction.status or "").strip().upper()
         if prediction.branch not in fusion.GATE_BRANCHES and status in {
