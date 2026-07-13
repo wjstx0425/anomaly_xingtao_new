@@ -20,6 +20,79 @@ if TYPE_CHECKING:
     from types import ModuleType
 
 VIEWS = ("front", "front_left", "front_right", "back", "back_left", "back_right")
+REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+def _canonical_sha256(payload: object) -> str:
+    """Hash deterministic compact JSON exactly as the deployment contract does."""
+    return hashlib.sha256(json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()).hexdigest()
+
+
+def _write_threshold_artifact(tmp_path: Path, *, fault: str | None = None) -> Path:
+    """Write one complete locked threshold artifact for the checked-in strict profile."""
+    profile_path = REPO_ROOT / "config/fusion/zs32_six_view.json"
+    raw = profile_path.read_bytes()
+    profile = json.loads(raw)
+    required_groups = sorted(
+        {
+            (
+                record["hand"],
+                record["view"],
+                record["branch"],
+                record["model_version"],
+                record["roi_version"],
+            )
+            for record in profile["expected_versions"]
+        },
+    )
+    thresholds = [
+        {
+            "hand": hand,
+            "view": view,
+            "branch": branch,
+            "model_version": model_version,
+            "roi_version": roi_version,
+            "low_threshold": 0.3,
+            "high_threshold": 0.5,
+            "normal_count": 20,
+            "defect_count": 20,
+            "status": "ok",
+        }
+        for hand, view, branch, model_version, roi_version in required_groups
+    ]
+    digest = hashlib.sha256(raw).hexdigest()
+    payload = {
+        "artifact_schema": "anomalib.zs32_fusion_thresholds",
+        "artifact_version": "1.0",
+        "calibration_valid": fault != "invalid_calibration",
+        "profile_sha256": digest,
+        "config_sha256": digest,
+        "target_recall": 1.0,
+        "normal_quantile": 0.995,
+        "fit_split": "calibration",
+        "evaluation_split": "test",
+        "required_views": list(VIEWS),
+        "required_groups": [list(group) for group in required_groups],
+        "thresholds": thresholds,
+        "threshold_records_sha256": _canonical_sha256(thresholds),
+        "threshold_versions": ["zs32-thresholds-2026.07.13"],
+        "deployment_contract": {},
+    }
+    if fault == "incomplete":
+        payload["thresholds"].pop()
+        payload["threshold_records_sha256"] = _canonical_sha256(payload["thresholds"])
+    payload["artifact_sha256"] = _canonical_sha256(payload)
+    if fault == "tampered":
+        payload["thresholds"][0]["high_threshold"] = 0.9
+    path = tmp_path / "thresholds.json"
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return path
+
+
+def _strict_args(tmp_path: Path, values: list[str], *, artifact_fault: str | None = None) -> list[str]:
+    """Add the mandatory locked threshold artifact to strict CLI arguments."""
+    artifact = _write_threshold_artifact(tmp_path, fault=artifact_fault)
+    return [*values, "--threshold-artifact", str(artifact)]
 
 
 def _load_stage18(name: str) -> ModuleType:
@@ -53,6 +126,8 @@ def _write_complete_predictions(
         "profile",
         "hand",
         "session_id",
+        "capture_session",
+        "group_id",
         "timestamp",
         "manifest_identity",
         "source_hash",
@@ -95,6 +170,8 @@ def _write_complete_predictions(
                     "profile": "zs32_six_view_v1",
                     "hand": "left",
                     "session_id": "session-7",
+                    "capture_session": "session-7",
+                    "group_id": "group-7",
                     "timestamp": "2026-07-13T12:34:56+08:00",
                     "manifest_identity": f"{part_id}:left:{view}",
                     "source_hash": hashlib.sha256(source_path.read_bytes()).hexdigest(),
@@ -144,6 +221,8 @@ def _write_complete_predictions(
                 if fault == "malformed_thresholds" and target_row:
                     row["low_threshold"] = 0.7
                     row["high_threshold"] = 0.5
+                if fault == "threshold_numeric_mismatch" and target_row:
+                    row["low_threshold"] = 0.31
                 if fault == "model_timeout" and target_row:
                     row.update(status="TIMEOUT", raw_score=0.2, reason="model inference timeout")
                 if fault == "roi_failure" and view == "front" and branch == "registration":
@@ -171,14 +250,17 @@ def test_zs32_profile_writes_atomic_audit_and_summary(tmp_path: Path) -> None:
     predictions_csv = _write_complete_predictions(tmp_path)
     output_dir = tmp_path / "out"
     args = stage18.build_parser().parse_args(
-        [
-            "--profile",
-            "zs32",
-            "--branch-csv",
-            f"normalized={predictions_csv}",
-            "--output-dir",
-            str(output_dir),
-        ],
+        _strict_args(
+            tmp_path,
+            [
+                "--profile",
+                "zs32",
+                "--branch-csv",
+                f"normalized={predictions_csv}",
+                "--output-dir",
+                str(output_dir),
+            ],
+        ),
     )
 
     decisions = stage18.run_fusion(args)
@@ -215,6 +297,90 @@ def test_zs32_profile_writes_atomic_audit_and_summary(tmp_path: Path) -> None:
     assert "| review | 1 |" in summary
     assert "| complete_inspections | 1 |" in summary
     assert "| incomplete_inspections | 0 |" in summary
+    generation = json.loads((output_dir / "threshold_artifact.json").read_text(encoding="utf-8"))
+    assert generation["path"] == str((tmp_path / "thresholds.json").resolve())
+    assert generation["artifact_sha256"]
+    assert generation["threshold_records_sha256"]
+    assert audit["threshold_artifact"]["path"] == generation["path"]
+    assert audit["threshold_artifact"]["artifact_sha256"] == generation["artifact_sha256"]
+    assert audit["threshold_artifact"]["threshold_records_sha256"] == generation["threshold_records_sha256"]
+
+
+@pytest.mark.parametrize("artifact_fault", ["missing", "tampered", "incomplete", "invalid_calibration"])
+def test_threshold_artifact_fault_publishes_diagnostic_then_fails(
+    tmp_path: Path,
+    artifact_fault: str,
+) -> None:
+    """A missing, modified, incomplete, or invalid bundle must fail after atomic diagnostics."""
+    stage18 = _load_stage18(f"pipeline_fuse_threshold_artifact_{artifact_fault}")
+    predictions_csv = _write_complete_predictions(tmp_path, gray_evidence=False)
+    artifact = (
+        tmp_path / "missing.json"
+        if artifact_fault == "missing"
+        else _write_threshold_artifact(
+            tmp_path,
+            fault=artifact_fault,
+        )
+    )
+    output_dir = tmp_path / "out"
+    args = stage18.build_parser().parse_args(
+        [
+            "--profile",
+            "zs32",
+            "--branch-csv",
+            f"normalized={predictions_csv}",
+            "--threshold-artifact",
+            str(artifact),
+            "--output-dir",
+            str(output_dir),
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="threshold artifact"):
+        stage18.run_fusion(args)
+
+    fused = list(csv.DictReader((output_dir / "fused_predictions.csv").open(encoding="utf-8")))
+    assert fused[0]["final_status"] == "INVALID_CAPTURE"
+    audit = json.loads((output_dir / "audit/part001.json").read_text(encoding="utf-8"))
+    assert audit["inspection_complete"] is False
+    assert audit["released_status"] is None
+
+
+def test_missing_threshold_artifact_argument_publishes_diagnostic_then_fails(tmp_path: Path) -> None:
+    """Strict ZS32 cannot omit the stage-30 bundle even when CSV rows contain thresholds."""
+    stage18 = _load_stage18("pipeline_fuse_threshold_artifact_missing_argument")
+    predictions_csv = _write_complete_predictions(tmp_path, gray_evidence=False)
+    output_dir = tmp_path / "out"
+    args = stage18.build_parser().parse_args(
+        ["--profile", "zs32", "--branch-csv", f"normalized={predictions_csv}", "--output-dir", str(output_dir)],
+    )
+
+    with pytest.raises(RuntimeError, match="--threshold-artifact is required"):
+        stage18.run_fusion(args)
+
+    assert (output_dir / "fused_predictions.csv").is_file()
+    assert json.loads((output_dir / "audit/part001.json").read_text(encoding="utf-8"))["released_status"] is None
+
+
+def test_csv_numeric_threshold_mismatch_publishes_diagnostic_then_fails(tmp_path: Path) -> None:
+    """A valid bundle remains authoritative over different numeric thresholds in branch CSV."""
+    stage18 = _load_stage18("pipeline_fuse_threshold_numeric_mismatch")
+    predictions_csv = _write_complete_predictions(tmp_path, gray_evidence=False, fault="threshold_numeric_mismatch")
+    output_dir = tmp_path / "out"
+    args = stage18.build_parser().parse_args(
+        _strict_args(
+            tmp_path,
+            ["--profile", "zs32", "--branch-csv", f"normalized={predictions_csv}", "--output-dir", str(output_dir)],
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="do not exactly match"):
+        stage18.run_fusion(args)
+
+    audit = json.loads((output_dir / "audit/part001.json").read_text(encoding="utf-8"))
+    assert audit["machine_status"] == "INVALID_CAPTURE"
+    assert audit["inspection_complete"] is False
+    assert audit["released_status"] is None
 
 
 @pytest.mark.parametrize("missing_artifact", ["source", "evidence"])
@@ -227,15 +393,18 @@ def test_require_complete_evidence_forces_review_for_missing_artifact(
     predictions_csv = _write_complete_predictions(tmp_path, missing_artifact=missing_artifact, gray_evidence=False)
     output_dir = tmp_path / "out"
     args = stage18.build_parser().parse_args(
-        [
-            "--profile",
-            "zs32",
-            "--branch-csv",
-            f"normalized={predictions_csv}",
-            "--require-complete-evidence",
-            "--output-dir",
-            str(output_dir),
-        ],
+        _strict_args(
+            tmp_path,
+            [
+                "--profile",
+                "zs32",
+                "--branch-csv",
+                f"normalized={predictions_csv}",
+                "--require-complete-evidence",
+                "--output-dir",
+                str(output_dir),
+            ],
+        ),
     )
 
     decisions = stage18.run_fusion(args)
@@ -259,15 +428,18 @@ def test_require_complete_evidence_forces_review_even_with_strong_trigger(tmp_pa
     )
     output_dir = tmp_path / "out"
     args = stage18.build_parser().parse_args(
-        [
-            "--profile",
-            "zs32",
-            "--branch-csv",
-            f"normalized={predictions_csv}",
-            "--require-complete-evidence",
-            "--output-dir",
-            str(output_dir),
-        ],
+        _strict_args(
+            tmp_path,
+            [
+                "--profile",
+                "zs32",
+                "--branch-csv",
+                f"normalized={predictions_csv}",
+                "--require-complete-evidence",
+                "--output-dir",
+                str(output_dir),
+            ],
+        ),
     )
 
     decisions = stage18.run_fusion(args)
@@ -288,7 +460,10 @@ def test_capture_fault_blocks_release_without_downgrading_strong_ng(tmp_path: Pa
     )
     output_dir = tmp_path / "out"
     args = stage18.build_parser().parse_args(
-        ["--profile", "zs32", "--branch-csv", f"normalized={predictions_csv}", "--output-dir", str(output_dir)],
+        _strict_args(
+            tmp_path,
+            ["--profile", "zs32", "--branch-csv", f"normalized={predictions_csv}", "--output-dir", str(output_dir)],
+        ),
     )
 
     decisions = stage18.run_fusion(args)
@@ -309,7 +484,10 @@ def test_zs32_always_requires_evidence_without_optional_flag(tmp_path: Path) -> 
     predictions_csv = _write_complete_predictions(tmp_path, missing_artifact="source", gray_evidence=False)
     output_dir = tmp_path / "out"
     args = stage18.build_parser().parse_args(
-        ["--profile", "zs32", "--branch-csv", f"normalized={predictions_csv}", "--output-dir", str(output_dir)],
+        _strict_args(
+            tmp_path,
+            ["--profile", "zs32", "--branch-csv", f"normalized={predictions_csv}", "--output-dir", str(output_dir)],
+        ),
     )
 
     decisions = stage18.run_fusion(args)
@@ -326,7 +504,10 @@ def test_generation_refuses_existing_final_output(tmp_path: Path) -> None:
     output_dir.mkdir()
     (output_dir / "sentinel").write_text("published", encoding="utf-8")
     args = stage18.build_parser().parse_args(
-        ["--profile", "zs32", "--branch-csv", f"normalized={predictions_csv}", "--output-dir", str(output_dir)],
+        _strict_args(
+            tmp_path,
+            ["--profile", "zs32", "--branch-csv", f"normalized={predictions_csv}", "--output-dir", str(output_dir)],
+        ),
     )
 
     with pytest.raises(FileExistsError, match="already exists"):
@@ -349,7 +530,10 @@ def test_publication_failure_leaves_no_consumable_generation(
     predictions_csv = _write_complete_predictions(tmp_path, gray_evidence=False)
     output_dir = tmp_path / "out"
     args = stage18.build_parser().parse_args(
-        ["--profile", "zs32", "--branch-csv", f"normalized={predictions_csv}", "--output-dir", str(output_dir)],
+        _strict_args(
+            tmp_path,
+            ["--profile", "zs32", "--branch-csv", f"normalized={predictions_csv}", "--output-dir", str(output_dir)],
+        ),
     )
 
     if failure == "audit":
@@ -420,7 +604,10 @@ def test_malformed_strict_input_publishes_diagnostic_then_returns_nonzero(tmp_pa
     predictions_csv = _write_complete_predictions(tmp_path, gray_evidence=False, fault=fault)
     output_dir = tmp_path / "out"
     args = stage18.build_parser().parse_args(
-        ["--profile", "zs32", "--branch-csv", f"normalized={predictions_csv}", "--output-dir", str(output_dir)],
+        _strict_args(
+            tmp_path,
+            ["--profile", "zs32", "--branch-csv", f"normalized={predictions_csv}", "--output-dir", str(output_dir)],
+        ),
     )
 
     with pytest.raises(RuntimeError, match="diagnostic generation"):
@@ -448,6 +635,8 @@ def test_malformed_strict_cli_exits_nonzero_after_publishing_diagnostic(tmp_path
             "zs32",
             "--branch-csv",
             f"normalized={predictions_csv}",
+            "--threshold-artifact",
+            str(_write_threshold_artifact(tmp_path)),
             "--output-dir",
             str(output_dir),
         ],
@@ -469,14 +658,17 @@ def test_zs32_profile_rejects_incompatible_explicit_config(tmp_path: Path) -> No
     config_path = tmp_path / "other.json"
     config_path.write_text("{}\n", encoding="utf-8")
     args = stage18.build_parser().parse_args(
-        [
-            "--profile",
-            "zs32",
-            "--fusion-config",
-            str(config_path),
-            "--output-dir",
-            str(tmp_path / "out"),
-        ],
+        _strict_args(
+            tmp_path,
+            [
+                "--profile",
+                "zs32",
+                "--fusion-config",
+                str(config_path),
+                "--output-dir",
+                str(tmp_path / "out"),
+            ],
+        ),
     )
 
     with pytest.raises(ValueError, match=r"incompatible.*--profile.*--fusion-config"):
@@ -489,7 +681,10 @@ def test_summary_marks_missing_required_view_as_incomplete(tmp_path: Path) -> No
     predictions_csv = _write_complete_predictions(tmp_path, gray_evidence=False, omit_view="back_right")
     output_dir = tmp_path / "out"
     args = stage18.build_parser().parse_args(
-        ["--profile", "zs32", "--branch-csv", f"normalized={predictions_csv}", "--output-dir", str(output_dir)],
+        _strict_args(
+            tmp_path,
+            ["--profile", "zs32", "--branch-csv", f"normalized={predictions_csv}", "--output-dir", str(output_dir)],
+        ),
     )
 
     stage18.run_fusion(args)
@@ -506,16 +701,19 @@ def test_zs32_audit_rejects_part_id_path_escape(tmp_path: Path) -> None:
     output_dir = tmp_path / "out"
     audit_dir = output_dir / "audit"
     args = stage18.build_parser().parse_args(
-        [
-            "--profile",
-            "zs32",
-            "--branch-csv",
-            f"normalized={predictions_csv}",
-            "--audit-dir",
-            str(audit_dir),
-            "--output-dir",
-            str(output_dir),
-        ],
+        _strict_args(
+            tmp_path,
+            [
+                "--profile",
+                "zs32",
+                "--branch-csv",
+                f"normalized={predictions_csv}",
+                "--audit-dir",
+                str(audit_dir),
+                "--output-dir",
+                str(output_dir),
+            ],
+        ),
     )
 
     with pytest.raises(ValueError, match="unsafe part_id"):
@@ -564,18 +762,21 @@ def test_fault_injection_never_releases_ok(
     )
     output_dir = tmp_path / "out"
     args = stage18.build_parser().parse_args(
-        [
-            "--profile",
-            "zs32",
-            "--branch-csv",
-            f"normalized={predictions_csv}",
-            "--require-complete-evidence",
-            "--output-dir",
-            str(output_dir),
-        ],
+        _strict_args(
+            tmp_path,
+            [
+                "--profile",
+                "zs32",
+                "--branch-csv",
+                f"normalized={predictions_csv}",
+                "--require-complete-evidence",
+                "--output-dir",
+                str(output_dir),
+            ],
+        ),
     )
 
-    if fault == "nonfinite_score":
+    if fault in {"nonfinite_score", "model_version_mismatch", "roi_version_mismatch"}:
         with pytest.raises(RuntimeError, match="diagnostic generation"):
             stage18.run_fusion(args)
         fused_rows = list(csv.DictReader((output_dir / "fused_predictions.csv").open(encoding="utf-8")))

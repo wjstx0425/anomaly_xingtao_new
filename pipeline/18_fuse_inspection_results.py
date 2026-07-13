@@ -6,17 +6,25 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
+import math
 import shutil
 import sys
 import tempfile
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from capture_data import fusion_engine as fusion  # noqa: E402
+from capture_data.fusion_calibration import (  # noqa: E402
+    THRESHOLD_ARTIFACT_SCHEMA,
+    THRESHOLD_ARTIFACT_VERSION,
+)
 from capture_data.inspection_audit import build_part_audit, sha256_file, write_part_audit  # noqa: E402
 
 ZS32_PROFILE_PATH = REPO_ROOT / "config/fusion/zs32_six_view.json"
@@ -44,6 +52,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--fusion-config", type=Path, help="YAML/JSON fusion config.")
     parser.add_argument("--profile", choices=("zs32",), help="Named strict fusion profile.")
+    parser.add_argument(
+        "--threshold-artifact",
+        type=Path,
+        help="Locked stage-30 thresholds.json; mandatory for the strict ZS32 profile.",
+    )
     parser.add_argument("--audit-dir", type=Path, help="ZS32 per-part audit JSON directory.")
     parser.add_argument(
         "--require-complete-evidence",
@@ -71,6 +84,148 @@ def _fusion_config_path(args: argparse.Namespace) -> Path | None:
         msg = "incompatible --profile and --fusion-config values"
         raise ValueError(msg)
     return profile_path or args.fusion_config
+
+
+def _canonical_sha256(payload: object) -> str:
+    """Hash deterministic compact JSON for threshold bundle verification."""
+    canonical = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _profile_threshold_contract(profile_path: Path) -> tuple[str, set[tuple[str, str, str, str, str]]]:
+    """Return the current profile digest and exact 60-group deployment contract."""
+    raw = profile_path.read_bytes()
+    payload = json.loads(raw)
+    records = payload.get("expected_versions")
+    if not isinstance(records, list):
+        msg = f"strict profile has no expected_versions: {profile_path}"
+        raise TypeError(msg)
+    groups = {
+        (
+            str(record["hand"]),
+            str(record["view"]),
+            str(record["branch"]),
+            str(record["model_version"]),
+            str(record["roi_version"]),
+        )
+        for record in records
+    }
+    if len(groups) != 60:
+        msg = f"strict profile must define exactly 60 threshold groups, got {len(groups)}"
+        raise ValueError(msg)
+    return hashlib.sha256(raw).hexdigest(), groups
+
+
+def _load_threshold_artifact(  # noqa: C901
+    path: Path | None,
+) -> tuple[dict[tuple[str, str, str, str, str], dict[str, Any]], dict[str, Any]]:
+    """Validate and load a locked stage-30 threshold deployment artifact."""
+    if path is None:
+        msg = "--threshold-artifact is required for --profile zs32"
+        raise ValueError(msg)
+    if not path.is_file():
+        msg = f"threshold artifact does not exist: {path}"
+        raise ValueError(msg)
+    raw = path.read_bytes()
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        msg = f"threshold artifact is not valid JSON: {path}"
+        raise ValueError(msg) from exc
+    if not isinstance(payload, dict):
+        msg = "threshold artifact payload must be an object"
+        raise TypeError(msg)
+    if payload.get("artifact_schema") != THRESHOLD_ARTIFACT_SCHEMA:
+        msg = "threshold artifact schema mismatch"
+        raise ValueError(msg)
+    if payload.get("artifact_version") != THRESHOLD_ARTIFACT_VERSION:
+        msg = "threshold artifact version mismatch"
+        raise ValueError(msg)
+    if payload.get("calibration_valid") is not True:
+        msg = "threshold artifact calibration_valid must be true"
+        raise ValueError(msg)
+    profile_sha256, expected_groups = _profile_threshold_contract(ZS32_PROFILE_PATH)
+    if payload.get("profile_sha256") != profile_sha256 or payload.get("config_sha256") != profile_sha256:
+        msg = "threshold artifact profile/config SHA256 does not match the current ZS32 config"
+        raise ValueError(msg)
+    declared_groups = payload.get("required_groups")
+    if not isinstance(declared_groups, list):
+        msg = "threshold artifact required_groups must be a list"
+        raise TypeError(msg)
+    try:
+        artifact_groups = {tuple(str(item) for item in group) for group in declared_groups}
+    except TypeError as exc:
+        msg = "threshold artifact required_groups are malformed"
+        raise ValueError(msg) from exc
+    if artifact_groups != expected_groups or len(declared_groups) != len(expected_groups):
+        msg = "threshold artifact does not contain the complete exact 60-group set"
+        raise ValueError(msg)
+    thresholds = payload.get("thresholds")
+    if not isinstance(thresholds, list):
+        msg = "threshold artifact thresholds must be a list"
+        raise TypeError(msg)
+    if payload.get("threshold_records_sha256") != _canonical_sha256(thresholds):
+        msg = "threshold artifact record canonical SHA256 mismatch"
+        raise ValueError(msg)
+    artifact_sha256 = payload.get("artifact_sha256")
+    unsigned_payload = dict(payload)
+    unsigned_payload.pop("artifact_sha256", None)
+    if artifact_sha256 != _canonical_sha256(unsigned_payload):
+        msg = "threshold artifact immutable SHA256 mismatch"
+        raise ValueError(msg)
+    threshold_by_group: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
+    for record in thresholds:
+        if not isinstance(record, dict):
+            msg = "threshold artifact record must be an object"
+            raise TypeError(msg)
+        try:
+            key = tuple(str(record[field]) for field in ("hand", "view", "branch", "model_version", "roi_version"))
+            low = float(record["low_threshold"])
+            high = float(record["high_threshold"])
+        except (KeyError, TypeError, ValueError) as exc:
+            msg = "threshold artifact record is malformed"
+            raise ValueError(msg) from exc
+        if key in threshold_by_group:
+            msg = f"duplicate threshold artifact identity: {key}"
+            raise ValueError(msg)
+        if record.get("status") != "ok" or not math.isfinite(low) or not math.isfinite(high) or low > high:
+            msg = f"threshold artifact record is not deployable: {key}"
+            raise ValueError(msg)
+        threshold_by_group[key] = {**record, "low_threshold": low, "high_threshold": high}
+    if set(threshold_by_group) != expected_groups:
+        msg = "threshold artifact thresholds do not contain the complete exact 60-group set"
+        raise ValueError(msg)
+    metadata = {
+        "path": str(path.resolve()),
+        "file_sha256": hashlib.sha256(raw).hexdigest(),
+        "artifact_sha256": artifact_sha256,
+        "threshold_records_sha256": payload["threshold_records_sha256"],
+        "artifact_schema": payload["artifact_schema"],
+        "artifact_version": payload["artifact_version"],
+    }
+    return threshold_by_group, metadata
+
+
+def _validate_prediction_thresholds(
+    predictions: list[fusion.BranchPrediction],
+    threshold_by_group: dict[tuple[str, str, str, str, str], dict[str, Any]],
+) -> None:
+    """Require every strict CSV row to exactly match its authoritative artifact thresholds."""
+    for prediction in predictions:
+        key = (
+            prediction.hand or "",
+            prediction.view or "",
+            prediction.branch,
+            prediction.model_version or "",
+            prediction.roi_version or "",
+        )
+        record = threshold_by_group.get(key)
+        if record is None:
+            msg = f"threshold artifact has no unique deployable record for CSV identity: {key}"
+            raise ValueError(msg)
+        if prediction.low_threshold != record["low_threshold"] or prediction.high_threshold != record["high_threshold"]:
+            msg = f"CSV thresholds do not exactly match locked threshold artifact for identity: {key}"
+            raise ValueError(msg)
 
 
 def _missing_artifacts(predictions: list[fusion.BranchPrediction]) -> list[str]:
@@ -397,6 +552,7 @@ def _publish_generation(
     warnings: list[str],
     *,
     strict_zs32: bool,
+    threshold_metadata: dict[str, Any] | None,
 ) -> None:
     """Publish CSV, summary, and every audit through one sibling directory rename."""
     args.output_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -411,6 +567,10 @@ def _publish_generation(
         fusion.write_fused_decisions_csv(decisions, staging / "fused_predictions.csv")
         fusion.write_summary_markdown(staging / "summary.md", "Inspection Fusion Summary", summary, warnings)
         if strict_zs32:
+            (staging / "threshold_artifact.json").write_text(
+                json.dumps(threshold_metadata, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
             decision_by_part = {decision.part_id: decision for decision in decisions}
             for part_id, part_predictions in grouped.items():
                 decision = decision_by_part[part_id]
@@ -421,6 +581,7 @@ def _publish_generation(
                     triggered_evidence=decision.triggered_evidence,
                     inspection_complete=completion.get(part_id, False),
                 )
+                audit["threshold_artifact"] = threshold_metadata
                 write_part_audit(audit, _audit_output_path(staging / "audit", part_id))
         staging.replace(args.output_dir)
     finally:
@@ -434,6 +595,22 @@ def run_fusion(args: argparse.Namespace) -> list[fusion.FusedDecision]:
     strict_zs32 = args.profile == "zs32"
     _validate_generation_target(args, strict_zs32=strict_zs32)
     warnings: list[str] = []
+    threshold_by_group: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
+    threshold_metadata: dict[str, Any] | None = None
+    threshold_faults: list[str] = []
+    if strict_zs32:
+        try:
+            threshold_by_group, threshold_metadata = _load_threshold_artifact(args.threshold_artifact)
+        except (OSError, TypeError, ValueError) as error:
+            reason = f"threshold artifact validation failed: {error}"
+            threshold_faults.append(reason)
+            artifact_path = args.threshold_artifact
+            threshold_metadata = {
+                "path": None if artifact_path is None else str(artifact_path.resolve()),
+                "validation_error": str(error),
+            }
+            if artifact_path is not None and artifact_path.is_file():
+                threshold_metadata["file_sha256"] = sha256_file(artifact_path)
     predictions = [
         *_load_optional_predictions(args.quality_csv, branch="quality", warnings=warnings),
         *_load_optional_predictions(args.registration_csv, branch="registration", warnings=warnings),
@@ -443,6 +620,13 @@ def run_fusion(args: argparse.Namespace) -> list[fusion.FusedDecision]:
         *_load_optional_predictions(args.crack_csv, branch="crack", warnings=warnings),
         *_load_custom_branch_predictions(args.branch_csv, warnings),
     ]
+    if strict_zs32 and not threshold_faults:
+        try:
+            _validate_prediction_thresholds(predictions, threshold_by_group)
+        except ValueError as error:
+            threshold_faults.append(f"threshold artifact/CSV validation failed: {error}")
+            if threshold_metadata is not None:
+                threshold_metadata["validation_error"] = str(error)
 
     missing_required = fusion.load_manifest_missing_required(
         args.manifest,
@@ -462,12 +646,17 @@ def run_fusion(args: argparse.Namespace) -> list[fusion.FusedDecision]:
         msg = "No branch predictions or manifest records were available to fuse."
         raise RuntimeError(msg)
 
-    decisions, malformed = _fuse_predictions(
-        grouped,
-        missing_required,
-        config,
-        strict_zs32=strict_zs32,
-    )
+    if threshold_faults:
+        reason = "; ".join(threshold_faults)
+        decisions = [_diagnostic_decision(part_id, reason) for part_id in sorted(set(grouped) | set(missing_required))]
+        malformed = list(threshold_faults)
+    else:
+        decisions, malformed = _fuse_predictions(
+            grouped,
+            missing_required,
+            config,
+            strict_zs32=strict_zs32,
+        )
     if strict_zs32 or args.require_complete_evidence:
         decisions = _enforce_complete_evidence(decisions, grouped)
     summary, completion = _summary_counts(decisions, grouped, config, args.required_view)
@@ -480,6 +669,7 @@ def run_fusion(args: argparse.Namespace) -> list[fusion.FusedDecision]:
         completion,
         warnings,
         strict_zs32=strict_zs32,
+        threshold_metadata=threshold_metadata,
     )
     if malformed:
         msg = "strict diagnostic generation published: " + "; ".join(malformed)

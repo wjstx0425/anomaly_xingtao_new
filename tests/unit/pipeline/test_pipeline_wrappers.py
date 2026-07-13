@@ -403,6 +403,8 @@ def test_fuse_inspection_results_parser_accepts_zs32_audit_options(tmp_path: Pat
         [
             "--profile",
             "zs32",
+            "--threshold-artifact",
+            str(tmp_path / "thresholds.json"),
             "--audit-dir",
             str(tmp_path / "audit"),
             "--require-complete-evidence",
@@ -412,6 +414,7 @@ def test_fuse_inspection_results_parser_accepts_zs32_audit_options(tmp_path: Pat
     )
 
     assert args.profile == "zs32"
+    assert args.threshold_artifact == tmp_path / "thresholds.json"
     assert args.audit_dir == tmp_path / "audit"
     assert args.require_complete_evidence is True
 

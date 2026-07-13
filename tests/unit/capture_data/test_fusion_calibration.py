@@ -306,6 +306,13 @@ def test_threshold_report_binds_exact_stage18_deployment_contract(tmp_path: Path
     assert payload["threshold_versions"] == ["threshold-v7"]
     canonical = json.dumps(payload["thresholds"], separators=(",", ":"), sort_keys=True).encode()
     assert payload["threshold_records_sha256"] == hashlib.sha256(canonical).hexdigest()
+    assert payload["artifact_schema"] == "anomalib.zs32_fusion_thresholds"
+    assert payload["artifact_version"] == "1.0"
+    assert payload["calibration_valid"] is True
+    assert payload["profile_sha256"] == deployment_contract["config_sha256"]
+    artifact_hash = payload.pop("artifact_sha256")
+    canonical_artifact = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
+    assert artifact_hash == hashlib.sha256(canonical_artifact).hexdigest()
 
 
 def test_fit_uses_only_selected_split_without_test_leakage() -> None:
@@ -647,8 +654,14 @@ def test_run_calibration_defaults_to_all_six_zs32_views(tmp_path: Path) -> None:
     assert metrics["overall"]["calibration_valid"] is False
     assert "back_right" in metrics["missing_fit_views"]
     assert "back_right" in metrics["missing_evaluation_views"]
+    assert metrics["overall"]["escape_rate"] is None
+    assert metrics["overall"]["normal_reject_rate"] is None
+    assert metrics["overall"]["review_rate"] is None
     assert metrics["overall"]["recall"] is None
     assert metrics["overall"]["escape_rate_95_upper"] is None
+    assert metrics["overall"]["diagnostic_observed_escape_rate"] == pytest.approx(0.0)
+    assert metrics["overall"]["diagnostic_observed_normal_reject_rate"] == pytest.approx(0.0)
+    assert metrics["overall"]["diagnostic_observed_review_rate"] == pytest.approx(0.0)
 
 
 @pytest.mark.parametrize("missing_from", ["calibration", "test"])

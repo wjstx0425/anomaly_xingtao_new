@@ -32,6 +32,16 @@ THRESHOLD_FIELDS = (
     "status",
 )
 GroupKey = tuple[str, str, str, str, str]
+THRESHOLD_ARTIFACT_SCHEMA = "anomalib.zs32_fusion_thresholds"
+THRESHOLD_ARTIFACT_VERSION = "1.0"
+SAFETY_RATE_FIELDS = (
+    "escape_rate",
+    "non_clear_recall",
+    "recall",
+    "normal_reject_rate",
+    "review_rate",
+    "escape_rate_95_upper",
+)
 
 
 @dataclass(frozen=True)
@@ -290,28 +300,41 @@ def _metric_block(
     observed_escape_rate = escape_count / defect_count if defect_count else None
     observed_normal_reject_rate = reject_count / normal_count if normal_count else None
     observed_review_rate = review_count / part_count if part_count else None
-    escape_rate = observed_escape_rate if calibration_valid else None
-    non_clear_recall = None if escape_rate is None else 1 - escape_rate
-    return {
+    non_clear_recall = None if observed_escape_rate is None else 1 - observed_escape_rate
+    metrics: dict[str, int | float | bool | None] = {
         "calibration_valid": calibration_valid,
         "part_count": part_count,
         "defect_part_count": defect_count,
         "normal_part_count": normal_count,
         "escape_count": escape_count,
-        "escape_rate": escape_rate,
+        "escape_rate": observed_escape_rate,
         "non_clear_recall": non_clear_recall,
         "recall": non_clear_recall,
         "normal_reject_count": reject_count,
-        "normal_reject_rate": observed_normal_reject_rate if calibration_valid else None,
+        "normal_reject_rate": observed_normal_reject_rate,
         "review_count": review_count,
-        "review_rate": observed_review_rate if calibration_valid else None,
+        "review_rate": observed_review_rate,
         "diagnostic_observed_escape_rate": observed_escape_rate,
         "diagnostic_observed_normal_reject_rate": observed_normal_reject_rate,
         "diagnostic_observed_review_rate": observed_review_rate,
-        "escape_rate_95_upper": (
-            1 - 0.05 ** (1 / defect_count) if calibration_valid and defect_count and escape_count == 0 else None
-        ),
+        "escape_rate_95_upper": (1 - 0.05 ** (1 / defect_count) if defect_count and escape_count == 0 else None),
     }
+    if not calibration_valid:
+        _invalidate_safety_rates(metrics)
+    return metrics
+
+
+def _invalidate_safety_rates(metrics: dict[str, Any]) -> None:
+    """Invalidate every production safety rate while retaining diagnostic observations."""
+    metrics["calibration_valid"] = False
+    for field in SAFETY_RATE_FIELDS:
+        metrics[field] = None
+
+
+def _canonical_sha256(payload: object) -> str:
+    """Return the SHA256 of deterministic compact JSON."""
+    canonical = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
+    return hashlib.sha256(canonical).hexdigest()
 
 
 def _row_level(row: _CalibrationRow, threshold: ThresholdRecord | None) -> tuple[str, bool]:
@@ -560,6 +583,26 @@ def run_calibration(
         raise ValueError(msg)
     rows = load_calibration_rows(input_csv)
     effective_required_views = tuple(required_views) if required_views is not None else ZS32_REQUIRED_VIEWS
+    contract_groups: tuple[GroupKey, ...] = ()
+    if deployment_contract is not None:
+        contract_groups = tuple(
+            sorted(
+                {
+                    _normalize_group_key(
+                        (
+                            str(record["hand"]),
+                            str(record["view"]),
+                            str(record["branch"]),
+                            str(record["model_version"]),
+                            str(record["roi_version"]),
+                        ),
+                    )
+                    for record in deployment_contract.get("expected_versions", [])
+                    if isinstance(record, Mapping)
+                },
+            ),
+        )
+    requested_groups = tuple(sorted(set(required_groups) | set(contract_groups)))
     fit_views = {str(row.get("view", "")).strip() for row in rows if str(row.get("split", "")).strip() == fit_split}
     evaluation_views = {
         str(row.get("view", "")).strip() for row in rows if str(row.get("split", "")).strip() == eval_split
@@ -572,13 +615,13 @@ def run_calibration(
         normal_quantile=normal_quantile,
         fit_split=fit_split,
         required_views=(),
-        required_groups=required_groups,
+        required_groups=requested_groups,
     )
     threshold_groups = tuple(
         (threshold.hand, threshold.view, threshold.branch, threshold.model_version, threshold.roi_version)
         for threshold in thresholds
     )
-    effective_required_groups = tuple(sorted(set(required_groups) | set(threshold_groups)))
+    effective_required_groups = tuple(sorted(set(requested_groups) | set(threshold_groups)))
     threshold_by_key = {
         (threshold.hand, threshold.view, threshold.branch, threshold.model_version, threshold.roi_version): threshold
         for threshold in thresholds
@@ -599,14 +642,7 @@ def run_calibration(
     )
     coverage_valid = not missing_fit_views and not missing_evaluation_views and not invalid_threshold_groups
     if not coverage_valid:
-        metrics["overall"].update(
-            {
-                "calibration_valid": False,
-                "non_clear_recall": None,
-                "recall": None,
-                "escape_rate_95_upper": None,
-            },
-        )
+        _invalidate_safety_rates(metrics["overall"])
     fit_rows = [row for row in rows if str(row.get("split", "")).strip() == fit_split]
     eval_rows = [row for row in rows if str(row.get("split", "")).strip() == eval_split]
     metrics = {
@@ -621,8 +657,17 @@ def run_calibration(
         "invalid_threshold_groups": [list(key) for key in invalid_threshold_groups],
         **metrics,
     }
-    serialized_thresholds = [asdict(threshold) for threshold in thresholds]
-    canonical_thresholds = json.dumps(serialized_thresholds, separators=(",", ":"), sort_keys=True).encode()
+    if contract_groups and set(threshold_groups) != set(contract_groups):
+        _invalidate_safety_rates(metrics["overall"])
+    contract_group_set = set(contract_groups)
+    artifact_thresholds = [
+        threshold
+        for threshold in thresholds
+        if not contract_group_set
+        or (threshold.hand, threshold.view, threshold.branch, threshold.model_version, threshold.roi_version)
+        in contract_group_set
+    ]
+    serialized_thresholds = [asdict(threshold) for threshold in artifact_thresholds]
     expected_versions = [] if deployment_contract is None else deployment_contract.get("expected_versions", [])
     threshold_versions = sorted(
         {
@@ -632,17 +677,25 @@ def run_calibration(
         },
     )
     threshold_payload = {
+        "artifact_schema": THRESHOLD_ARTIFACT_SCHEMA,
+        "artifact_version": THRESHOLD_ARTIFACT_VERSION,
+        "calibration_valid": bool(metrics["overall"]["calibration_valid"]),
+        "profile_sha256": None if deployment_contract is None else deployment_contract.get("config_sha256"),
+        "config_sha256": None if deployment_contract is None else deployment_contract.get("config_sha256"),
         "target_recall": target_recall,
         "normal_quantile": normal_quantile,
         "fit_split": fit_split,
         "evaluation_split": eval_split,
         "required_views": list(effective_required_views),
-        "required_groups": [list(_normalize_group_key(value)) for value in effective_required_groups],
+        "required_groups": [
+            list(_normalize_group_key(value)) for value in (contract_groups or effective_required_groups)
+        ],
         "thresholds": serialized_thresholds,
-        "threshold_records_sha256": hashlib.sha256(canonical_thresholds).hexdigest(),
+        "threshold_records_sha256": _canonical_sha256(serialized_thresholds),
         "threshold_versions": threshold_versions,
         "deployment_contract": None if deployment_contract is None else dict(deployment_contract),
     }
+    threshold_payload["artifact_sha256"] = _canonical_sha256(threshold_payload)
     reports = {
         "thresholds.json": json.dumps(threshold_payload, indent=2, sort_keys=True) + "\n",
         "thresholds.csv": _threshold_csv(thresholds),
