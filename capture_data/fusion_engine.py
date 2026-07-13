@@ -477,11 +477,12 @@ def _trigger_evidence(
     prediction: BranchPrediction,
     level: EvidenceLevel,
     reason: str | None = None,
+    evidence_id: str | None = None,
 ) -> TriggerEvidence:
     """Convert one classified prediction into immutable trigger evidence."""
     view = prediction.view or "unknown"
     return TriggerEvidence(
-        evidence_id=f"{view}:{prediction.branch}",
+        evidence_id=evidence_id or f"{view}:{prediction.branch}",
         branch=prediction.branch,
         side=prediction.side,
         view=prediction.view,
@@ -496,11 +497,11 @@ def _trigger_evidence(
 def _classified_triggers(
     predictions: Sequence[BranchPrediction],
     config: Mapping[str, Any],
-) -> tuple[tuple[TriggerEvidence, ...], dict[str, BranchPrediction]]:
+) -> tuple[tuple[TriggerEvidence, BranchPrediction], ...]:
     """Classify non-gate rows once and retain all GRAY/STRONG evidence in policy order."""
     branch_order = _string_sequence(config.get("branch_order")) or DEFAULT_BRANCH_ORDER
     branch_rank = {branch: index for index, branch in enumerate(branch_order)}
-    classified: list[tuple[TriggerEvidence, BranchPrediction]] = []
+    raw_classified: list[tuple[BranchPrediction, EvidenceLevel, str | None]] = []
     suspect_policy = config.get("suspect_policy", {})
     suspect_enabled = bool(suspect_policy.get("enable", False)) if isinstance(suspect_policy, Mapping) else False
     near_threshold_ratio = (
@@ -525,7 +526,29 @@ def _classified_triggers(
                     f" score={prediction.score:g} threshold={prediction.threshold:g}"
                 )
         if level is not EvidenceLevel.CLEAR:
-            classified.append((_trigger_evidence(prediction, level, reason), prediction))
+            raw_classified.append((prediction, level, reason))
+    base_id_counts: dict[str, int] = defaultdict(int)
+    for prediction, _, _ in raw_classified:
+        view = prediction.view or "unknown"
+        base_id_counts[f"{view}:{prediction.branch}"] += 1
+    used_ids: set[str] = set()
+    base_id_ordinals: dict[str, int] = defaultdict(int)
+    classified: list[tuple[TriggerEvidence, BranchPrediction]] = []
+    for prediction, level, reason in raw_classified:
+        view = prediction.view or "unknown"
+        base_id = f"{view}:{prediction.branch}"
+        base_id_ordinals[base_id] += 1
+        evidence_id = base_id
+        if base_id_counts[base_id] > 1:
+            slot_id = _clean_text(prediction.slot_id)
+            suffix = slot_id or str(base_id_ordinals[base_id])
+            evidence_id = f"{base_id}:{suffix}"
+            collision_index = 2
+            while evidence_id in used_ids:
+                evidence_id = f"{base_id}:{suffix}:{collision_index}"
+                collision_index += 1
+        used_ids.add(evidence_id)
+        classified.append((_trigger_evidence(prediction, level, reason, evidence_id), prediction))
     classified.sort(
         key=lambda item: (
             branch_rank.get(item[0].branch, len(branch_rank)),
@@ -533,9 +556,7 @@ def _classified_triggers(
             item[0].evidence_id,
         ),
     )
-    triggers = tuple(item[0] for item in classified)
-    predictions_by_evidence_id = {item[0].evidence_id: item[1] for item in classified}
-    return triggers, predictions_by_evidence_id
+    return tuple(classified)
 
 
 def fuse_part_predictions(
@@ -547,7 +568,8 @@ def fuse_part_predictions(
 ) -> FusedDecision:
     """Fuse branch predictions into a fail-closed decision while retaining every trigger."""
     fusion_config = config or {}
-    triggers, trigger_predictions = _classified_triggers(predictions, fusion_config)
+    classified_triggers = _classified_triggers(predictions, fusion_config)
+    triggers = tuple(item[0] for item in classified_triggers)
     missing = [item for item in missing_required if item]
     if missing:
         return FusedDecision(
@@ -596,9 +618,12 @@ def fuse_part_predictions(
         if not _gate_has_pass(predictions, {"registration"}):
             return _gate_missing_decision(part_id, "registration", triggers)
 
-    first_strong = next((trigger for trigger in triggers if trigger.level == EvidenceLevel.STRONG.value), None)
+    first_strong = next(
+        (item for item in classified_triggers if item[0].level == EvidenceLevel.STRONG.value),
+        None,
+    )
     if first_strong is not None:
-        prediction = trigger_predictions[first_strong.evidence_id]
+        _, prediction = first_strong
         status = _status_from_branch(fusion_config, prediction.branch)
         if status == "SUSPECT":
             status = "REVIEW"
@@ -618,8 +643,7 @@ def fuse_part_predictions(
     if triggers:
         review_reasons.extend(trigger.reason for trigger in triggers)
     if review_reasons:
-        primary = triggers[0] if triggers else None
-        prediction = trigger_predictions[primary.evidence_id] if primary is not None else None
+        prediction = classified_triggers[0][1] if classified_triggers else None
         return FusedDecision(
             part_id=part_id,
             final_status="REVIEW",

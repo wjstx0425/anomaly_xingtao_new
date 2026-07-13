@@ -152,6 +152,56 @@ def test_gray_evidence_returns_review_and_strong_wins() -> None:
     assert [item.level for item in ng.triggered_evidence] == ["STRONG", "GRAY"]
 
 
+def test_same_view_branch_slots_keep_primary_strong_and_unique_evidence() -> None:
+    """Repeated view/branch triggers should retain slot identity and the actual STRONG primary."""
+    fusion = load_fusion_module()
+    predictions = [
+        fusion.BranchPrediction(
+            part_id="p1",
+            side="zs32",
+            view="front",
+            slot_id="slot01",
+            branch="geometry",
+            pred_label=1,
+            score=0.8,
+            threshold=None,
+            defect_type="less",
+            reason="slot01 strong geometry",
+            source_path="p1_front_slot01.png",
+            low_threshold=0.3,
+            high_threshold=0.5,
+        ),
+        fusion.BranchPrediction(
+            part_id="p1",
+            side="zs32",
+            view="front",
+            slot_id="slot02",
+            branch="geometry",
+            pred_label=0,
+            score=0.4,
+            threshold=None,
+            defect_type="more",
+            reason="slot02 gray geometry",
+            source_path="p1_front_slot02.png",
+            low_threshold=0.3,
+            high_threshold=0.5,
+        ),
+    ]
+
+    decision = fusion.fuse_part_predictions("p1", predictions, config={"branch_order": ["geometry"]})
+
+    assert decision.final_status == "NG_GEOMETRY"
+    assert decision.defect_slot == "slot01"
+    assert decision.defect_type == "less"
+    assert decision.reason == "slot01 strong geometry"
+    assert [item.evidence_id for item in decision.triggered_evidence] == [
+        "front:geometry:slot01",
+        "front:geometry:slot02",
+    ]
+    assert [item.level for item in decision.triggered_evidence] == ["STRONG", "GRAY"]
+    assert len({item.evidence_id for item in decision.triggered_evidence}) == 2
+
+
 def test_ok_requires_every_configured_branch_per_view() -> None:
     """A present view remains incomplete when one of its required branches is absent."""
     fusion = load_fusion_module()
