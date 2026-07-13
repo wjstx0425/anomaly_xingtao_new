@@ -58,14 +58,26 @@ def test_build_part_audit_retains_complete_machine_evidence(tmp_path: Path) -> N
         threshold_version="threshold-v2",
         roi_version="roi-v3",
         template_version="template-v4",
+        hand="left",
+        product="ZS32",
+        profile="zs32_six_view_v1",
+        manifest_identity="manifest-part-1",
     )
     triggers = (
         fusion.TriggerEvidence("front:anomaly_front", "anomaly_front", "zs32", "front", "GRAY", 0.4, 0.3, 0.5, "gray"),
     )
 
-    audit = audit_module.build_part_audit("p1", [prediction], machine_status="REVIEW", triggered_evidence=triggers)
+    audit = audit_module.build_part_audit(
+        "p1",
+        [prediction],
+        machine_status="REVIEW",
+        triggered_evidence=triggers,
+        inspection_complete=False,
+        session_id="session-7",
+        timestamp="2026-07-13T12:34:56+08:00",
+    )
 
-    assert audit["schema_version"] == "1.0"
+    assert audit["schema_version"] == "2.0"
     assert set(audit["views"]) == {"front", "front_left", "front_right", "back", "back_left", "back_right"}
     branch = audit["views"]["front"][0]
     assert branch["score"] == pytest.approx(0.4)
@@ -77,13 +89,61 @@ def test_build_part_audit_retains_complete_machine_evidence(tmp_path: Path) -> N
     assert branch["threshold_version"] == "threshold-v2"
     assert branch["roi_version"] == "roi-v3"
     assert branch["template_version"] == "template-v4"
+    assert branch["computed_evidence_level"] == "GRAY"
+    assert branch["normalized_risk"] == pytest.approx(0.75)
     assert branch["source_sha256"] == hashlib.sha256(b"x").hexdigest()
+    assert branch["evidence_sha256"] == hashlib.sha256(b"y").hexdigest()
     assert branch["evidence_path"] == str(evidence)
     assert audit["triggers"][0]["evidence_id"] == "front:anomaly_front"
     assert audit["machine_status"] == "REVIEW"
+    assert audit["hand"] == "left"
+    assert audit["product"] == "ZS32"
+    assert audit["profile"] == "zs32_six_view_v1"
+    assert audit["session_id"] == "session-7"
+    assert audit["timestamp"] == "2026-07-13T12:34:56+08:00"
+    assert audit["inspection_complete"] is False
     assert audit["review"]["status"] == "PENDING"
     assert audit["review_status"] is None
     assert audit["released_status"] is None
+
+
+def test_malformed_evidence_is_serialized_as_invalid_diagnostic(tmp_path: Path) -> None:
+    """Malformed explicit evidence stays auditable instead of aborting serialization."""
+    fusion = _load_module("audit_invalid_fusion", "fusion_engine.py")
+    audit_module = _load_module("audit_invalid_module", "inspection_audit.py")
+    source = tmp_path / "source.png"
+    evidence = tmp_path / "evidence.png"
+    source.write_bytes(b"source")
+    evidence.write_bytes(b"evidence")
+    prediction = fusion.BranchPrediction(
+        part_id="p1",
+        side="zs32",
+        view="front",
+        slot_id=None,
+        branch="anomaly_front",
+        pred_label=0,
+        score=0.4,
+        threshold=None,
+        defect_type=None,
+        reason="malformed level",
+        source_path=str(source),
+        evidence_path=str(evidence),
+        low_threshold=0.3,
+        high_threshold=0.5,
+        evidence_level="BROKEN",
+    )
+
+    audit = audit_module.build_part_audit(
+        "p1",
+        [prediction],
+        machine_status="INVALID_CAPTURE",
+        triggered_evidence=(),
+        inspection_complete=False,
+    )
+
+    branch = audit["views"]["front"][0]
+    assert branch["computed_evidence_level"] == "INVALID"
+    assert "BROKEN" in branch["evidence_error"]
 
 
 def test_missing_evidence_path_is_retained(tmp_path: Path) -> None:
