@@ -158,6 +158,21 @@ def test_front_review_and_back_stage_equivalents() -> None:
     assert back_clear.final_status is None
 
 
+def test_back_gray_is_back_review_with_primary_evidence() -> None:
+    """Back-side gray evidence must retain the branch that caused review."""
+    fusion = load_fusion_module()
+    rows = _face_rows(fusion, "p1", "back")
+    rows[2] = fusion.BranchPrediction(**{**rows[2].__dict__, "score": 0.4})
+
+    result = fusion.fuse_face_predictions("p1", rows, face="back", config=_zs32_config())
+
+    assert result.stage_status == "BACK_REVIEW"
+    assert result.triggered_branch == "anomaly_back"
+    assert result.defect_side == "zs32"
+    assert result.defect_view == "back"
+    assert result.reason == "anomaly_back gray evidence score=0.4 low_threshold=0.3 high_threshold=0.5"
+
+
 def test_face_prediction_rejects_wrong_face_and_identity() -> None:
     """Face fusion must reject unsupported faces and mixed part identities."""
     fusion = load_fusion_module()
@@ -251,6 +266,62 @@ def test_final_combination_rejects_malformed_stage_status() -> None:
 
     with pytest.raises(ValueError, match="stage_status"):
         fusion.combine_face_decisions(front, back)
+
+
+@pytest.mark.parametrize(
+    ("front_state", "back_state", "expected_status", "expected_primary"),
+    [
+        ("NG", "REVIEW", "NG", "front"),
+        ("REVIEW", "NG", "NG", "back"),
+        ("NG", "NG", "NG", "front"),
+        ("REVIEW", "CLEAR", "REVIEW", "front"),
+        ("CLEAR", "REVIEW", "REVIEW", "back"),
+        ("REVIEW", "REVIEW", "REVIEW", "front"),
+        ("CLEAR", "CLEAR", "OK", None),
+    ],
+)
+def test_final_combination_preserves_decisive_primary_evidence(
+    front_state: str,
+    back_state: str,
+    expected_status: str,
+    expected_primary: str | None,
+) -> None:
+    """Final decisions retain primary evidence using deterministic face priority."""
+    fusion = load_fusion_module()
+
+    def face_decision(face: str, state: str) -> object:
+        return fusion.FaceDecision(
+            part_id="p1",
+            face=face,
+            stage_status=f"{face.upper()}_{state}",
+            final_status=None,
+            inspection_complete=False,
+            triggered_evidence=(),
+            reason=f"{face}_reason",
+            defect_side=f"{face}_side",
+            defect_view=f"{face}_view",
+            defect_slot=f"{face}_slot",
+            defect_type=f"{face}_type",
+            triggered_branch=f"{face}_branch",
+        )
+
+    result = fusion.combine_face_decisions(face_decision("front", front_state), face_decision("back", back_state))
+
+    assert result.final_status == expected_status
+    if expected_primary is None:
+        assert result.triggered_branch is None
+        assert result.defect_side is None
+        assert result.defect_view is None
+        assert result.defect_slot is None
+        assert result.defect_type is None
+        assert result.reason == "FRONT_CLEAR + BACK_CLEAR"
+    else:
+        assert result.triggered_branch == f"{expected_primary}_branch"
+        assert result.defect_side == f"{expected_primary}_side"
+        assert result.defect_view == f"{expected_primary}_view"
+        assert result.defect_slot == f"{expected_primary}_slot"
+        assert result.defect_type == f"{expected_primary}_type"
+        assert result.reason == f"{expected_primary}_reason"
 
 
 def test_gray_evidence_returns_review_and_strong_wins() -> None:

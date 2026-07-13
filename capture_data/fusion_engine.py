@@ -167,6 +167,11 @@ class FaceDecision:
     inspection_complete: bool
     triggered_evidence: tuple[TriggerEvidence, ...]
     reason: str
+    defect_side: str | None = None
+    defect_view: str | None = None
+    defect_slot: str | None = None
+    defect_type: str | None = None
+    triggered_branch: str | None = None
 
 
 def _clean_text(value: Any) -> str | None:
@@ -759,6 +764,11 @@ def fuse_face_predictions(
         inspection_complete=False,
         triggered_evidence=decision.triggered_evidence,
         reason=decision.reason,
+        defect_side=decision.defect_side,
+        defect_view=decision.defect_view,
+        defect_slot=decision.defect_slot,
+        defect_type=decision.defect_type,
+        triggered_branch=decision.triggered_branch,
     )
 
 
@@ -786,24 +796,28 @@ def combine_face_decisions(front: FaceDecision, back: FaceDecision) -> FusedDeci
     if front.stage_status not in valid_front_stages or back.stage_status not in valid_back_stages:
         msg = f"invalid stage_status pair: {front.stage_status}, {back.stage_status}"
         raise ValueError(msg)
-    stages = (front.stage_status, back.stage_status)
-    if any(stage.endswith("_NG") for stage in stages):
-        status, label = "NG", 1
-    elif all(stage.endswith("_CLEAR") for stage in stages):
-        status, label = "OK", 0
+    primary: FaceDecision | None
+    if front.stage_status == "FRONT_NG":
+        status, label, primary = "NG", 1, front
+    elif back.stage_status == "BACK_NG":
+        status, label, primary = "NG", 1, back
+    elif front.stage_status == "FRONT_REVIEW":
+        status, label, primary = "REVIEW", None, front
+    elif back.stage_status == "BACK_REVIEW":
+        status, label, primary = "REVIEW", None, back
     else:
-        status, label = "REVIEW", None
+        status, label, primary = "OK", 0, None
     triggers = (*front.triggered_evidence, *back.triggered_evidence)
     return FusedDecision(
         part_id=front.part_id,
         final_status=status,
         final_label=label,
-        defect_side=None,
-        defect_view=None,
-        defect_slot=None,
-        defect_type=None,
-        triggered_branch=None,
-        reason=f"{front.stage_status} + {back.stage_status}",
+        defect_side=None if primary is None else primary.defect_side,
+        defect_view=None if primary is None else primary.defect_view,
+        defect_slot=None if primary is None else primary.defect_slot,
+        defect_type=None if primary is None else primary.defect_type,
+        triggered_branch=None if primary is None else primary.triggered_branch,
+        reason=f"{front.stage_status} + {back.stage_status}" if primary is None else primary.reason,
         triggered_evidence=triggers,
     )
 
