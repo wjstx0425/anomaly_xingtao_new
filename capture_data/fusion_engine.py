@@ -393,6 +393,8 @@ def _gate_not_pass_decision(
     triggered_evidence: tuple[TriggerEvidence, ...] = (),
 ) -> FusedDecision:
     """Return a retake decision for a gate row that is present but not PASS."""
+    status = _clean_text(prediction.status)
+    observed = status if status is not None else "missing status (explicit PASS required)"
     return FusedDecision(
         part_id=part_id,
         final_status="RETAKE",
@@ -402,7 +404,7 @@ def _gate_not_pass_decision(
         defect_slot=prediction.slot_id,
         defect_type=prediction.defect_type,
         triggered_branch=prediction.branch,
-        reason=f"required {prediction.branch} PASS but got {prediction.status}",
+        reason=f"required {prediction.branch} PASS but got {observed}",
         triggered_evidence=triggered_evidence,
     )
 
@@ -799,9 +801,11 @@ def _nonpass_gate_triggers(
             "quality_gate" if prediction.branch in {"quality", "quality_gate"} else "registration",
         )
         retain_status = strict_zs32 or requires_pass
-        if prediction.pred_label != 1 and (not retain_status or status is None or status.upper() == PASS_STATUS):
+        explicit_nonpass = status is not None and status.upper() != PASS_STATUS
+        missing_strict_status = strict_zs32 and status is None
+        if prediction.pred_label != 1 and not (retain_status and explicit_nonpass or missing_strict_status):
             continue
-        observed = status or "FAIL"
+        observed = status or "missing status (explicit PASS required)"
         reason = prediction.reason or f"required {prediction.branch} PASS but got {observed}"
         triggers.append(_trigger_evidence(prediction, EvidenceLevel.GRAY, reason))
     return tuple(triggers)
@@ -915,8 +919,10 @@ def fuse_part_predictions(
     for branch in ("quality", "quality_gate", "registration"):
         for prediction in predictions:
             status = _clean_text(prediction.status)
-            nonpass_status = strict_zs32 and status is not None and status.upper() != PASS_STATUS
+            nonpass_status = strict_zs32 and (status is None or status.upper() != PASS_STATUS)
             if prediction.branch == branch and (prediction.pred_label == 1 or nonpass_status):
+                if nonpass_status:
+                    return _gate_not_pass_decision(part_id, prediction, triggers)
                 return _decision_from_prediction(
                     part_id,
                     "RETAKE",

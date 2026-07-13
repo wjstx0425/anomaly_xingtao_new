@@ -30,6 +30,19 @@ def load_fusion_module() -> ModuleType:
     return module
 
 
+def _load_capture_data_module(name: str, filename: str) -> ModuleType:
+    """Load another capture-data helper from its file path."""
+    script_path = Path(__file__).resolve().parents[3] / "capture_data" / filename
+    spec = importlib.util.spec_from_file_location(name, script_path)
+    if spec is None or spec.loader is None:
+        msg = f"Could not load capture-data helper from {script_path}"
+        raise RuntimeError(msg)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 ZS32_VIEWS = ("front", "front_left", "front_right", "back", "back_left", "back_right")
 
 
@@ -697,6 +710,56 @@ def test_strong_ng_retains_every_nonpass_gate_trigger() -> None:
         "front_left:quality_gate",
         "back_right:registration",
     }
+
+
+@pytest.mark.parametrize(
+    ("branch", "status"),
+    [("quality_gate", None), ("registration", "   ")],
+)
+def test_strict_gate_requires_explicit_pass_status(branch: str, status: str | None) -> None:
+    """A present strict gate row without an explicit PASS must never release OK."""
+    fusion = load_fusion_module()
+    rows = _strict_zs32_rows(fusion, "p1")
+    target = next(index for index, row in enumerate(rows) if row.view == "front" and row.branch == branch)
+    rows[target] = fusion.BranchPrediction(**{**rows[target].__dict__, "status": status})
+
+    decision = fusion.fuse_part_predictions("p1", rows, config=_strict_zs32_config())
+
+    assert decision.final_status == "RETAKE"
+    assert decision.final_label is None
+    assert decision.triggered_branch == branch
+    assert any(item.evidence_id == f"front:{branch}" for item in decision.triggered_evidence)
+    assert "explicit PASS" in decision.reason
+
+
+def test_strong_ng_retains_missing_gate_status_and_blocks_inspection_completion() -> None:
+    """STRONG remains NG while a blank strict gate status stays auditable and incomplete."""
+    fusion = load_fusion_module()
+    audit_module = _load_capture_data_module("missing_gate_status_audit", "inspection_audit.py")
+    rows = _strict_zs32_rows(fusion, "p1")
+    geometry = next(index for index, row in enumerate(rows) if row.view == "front" and row.branch == "geometry")
+    quality = next(index for index, row in enumerate(rows) if row.view == "front_left" and row.branch == "quality_gate")
+    rows[geometry] = fusion.BranchPrediction(
+        **{**rows[geometry].__dict__, "pred_label": 1, "score": 0.8, "low_threshold": 0.3, "high_threshold": 0.5},
+    )
+    rows[quality] = fusion.BranchPrediction(**{**rows[quality].__dict__, "status": None})
+
+    decision = fusion.fuse_part_predictions("p1", rows, config=_strict_zs32_config())
+    audit = audit_module.build_part_audit(
+        "p1",
+        [],
+        machine_status=decision.final_status,
+        triggered_evidence=decision.triggered_evidence,
+        inspection_complete=True,
+    )
+
+    assert decision.final_status == "NG_GEOMETRY"
+    assert decision.final_label == 1
+    assert {item.evidence_id for item in decision.triggered_evidence} >= {
+        "front:geometry",
+        "front_left:quality_gate",
+    }
+    assert audit["inspection_complete"] is False
 
 
 def test_yolo_structured_multi_box_is_one_required_identity(tmp_path: Path) -> None:
