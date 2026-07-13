@@ -78,7 +78,7 @@ def _write_complete_predictions(
                 is_gray = gray_evidence and target_row
                 is_strong = strong_evidence and target_row
                 row = {
-                    "part_id": "wrong-part" if fault == "mismatched_part_id" and view == "back_right" else part_id,
+                    "part_id": "wrong-part" if fault == "split_part_ids" and view == "back_right" else part_id,
                     "side": "zs32",
                     "view": view,
                     "branch": branch,
@@ -127,7 +127,7 @@ def _write_complete_predictions(
     return csv_path
 
 
-def test_zs32_profile_writes_default_atomic_audit_and_summary(tmp_path: Path) -> None:
+def test_zs32_profile_writes_atomic_audit_and_summary(tmp_path: Path) -> None:
     """A GRAY six-view inspection should emit a REVIEW audit with raw evidence."""
     stage18 = _load_stage18("pipeline_fuse_inspection_zs32_e2e")
     predictions_csv = _write_complete_predictions(tmp_path)
@@ -286,7 +286,7 @@ def test_zs32_audit_rejects_part_id_path_escape(tmp_path: Path) -> None:
         pytest.param(None, None, "back_right", id="missing_view"),
         pytest.param("missing_branch", None, None, id="missing_branch"),
         pytest.param("duplicate_view_identity", None, None, id="duplicate_view_identity"),
-        pytest.param("mismatched_part_id", None, None, id="mismatched_part_id"),
+        pytest.param("split_part_ids", None, None, id="split_part_ids"),
         pytest.param("quality_fail", None, None, id="quality_fail"),
         pytest.param("registration_warn", None, None, id="registration_warn"),
         pytest.param("nonfinite_score", None, None, id="nonfinite_score"),
@@ -340,3 +340,29 @@ def test_fault_injection_never_releases_ok(
             "NG_GEOMETRY",
             "NG_YOLO",
         }
+
+
+def test_fault_mismatched_face_part_ids_are_rejected() -> None:
+    """Front/back stages from different physical parts must not be combined."""
+    stage18 = _load_stage18("pipeline_fuse_inspection_fault_face_identity")
+    front = stage18.fusion.FaceDecision(
+        part_id="part001",
+        face="front",
+        stage_status="FRONT_CLEAR",
+        final_status=None,
+        inspection_complete=False,
+        triggered_evidence=(),
+        reason="clear",
+    )
+    back = stage18.fusion.FaceDecision(
+        part_id="wrong-part",
+        face="back",
+        stage_status="BACK_CLEAR",
+        final_status=None,
+        inspection_complete=False,
+        triggered_evidence=(),
+        reason="clear",
+    )
+
+    with pytest.raises(ValueError, match="part_id mismatch"):
+        stage18.fusion.combine_face_decisions(front, back)

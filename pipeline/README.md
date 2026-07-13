@@ -1682,7 +1682,8 @@ uv run python pipeline/18_fuse_inspection_results.py \
 `evidence_path`、`status` 以及 `model_version`、`threshold_version`、`roi_version`、
 `template_version`。`fused_predictions.csv` 的字段为 `part_id`、`final_status`、`final_label`、
 `defect_side`、`defect_view`、`defect_slot`、`defect_type`、`triggered_branch` 和 `reason`；
-`summary.md` 汇总 parts/branches、OK、NG、REVIEW、RETAKE、INVALID_CAPTURE 及完整/不完整检查数。
+`summary.md` 汇总 parts/branches、OK、NG、REVIEW、RETAKE、INVALID_CAPTURE、兼容模式的
+`suspect` 及完整/不完整检查数。
 
 最终状态只有五类语义：`OK`、`REVIEW`、`RETAKE`、`INVALID_CAPTURE` 和具体的 `NG_*`
 （`NG_ANOMALY`/`NG_GEOMETRY`/`NG_YOLO`）。只有六视角、每视角全部必需 branch、质量与配准 PASS、
