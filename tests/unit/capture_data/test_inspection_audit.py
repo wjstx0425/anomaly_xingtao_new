@@ -146,6 +146,80 @@ def test_malformed_evidence_is_serialized_as_invalid_diagnostic(tmp_path: Path) 
     assert "BROKEN" in branch["evidence_error"]
 
 
+def test_audit_preserves_capture_identity_and_does_not_invent_timestamp() -> None:
+    """Acquisition evidence stays explicit and an absent timestamp remains JSON null."""
+    fusion = _load_module("audit_identity_fusion", "fusion_engine.py")
+    audit_module = _load_module("audit_identity_module", "inspection_audit.py")
+    prediction = fusion.BranchPrediction(
+        "p1",
+        "zs32",
+        "front",
+        None,
+        "geometry",
+        0,
+        0.1,
+        None,
+        None,
+        None,
+        None,
+        capture_session="session-001",
+        group_id="group-001",
+    )
+
+    audit = audit_module.build_part_audit("p1", [prediction], machine_status="OK", triggered_evidence=())
+
+    assert audit["capture_session"] == "session-001"
+    assert audit["group_id"] == "group-001"
+    assert audit["timestamp"] is None
+
+
+def test_audit_retains_each_yolo_box_and_forces_incomplete_for_gate_trigger() -> None:
+    """Structured detections remain per-box while gate evidence blocks inspection completion."""
+    fusion = _load_module("audit_yolo_fusion", "fusion_engine.py")
+    audit_module = _load_module("audit_yolo_module", "inspection_audit.py")
+    detections = (
+        {"class": "crack", "confidence": 0.91, "xyxy": [1, 2, 11, 22], "area": 200, "in_roi": True},
+        {"class": "chip", "confidence": 0.82, "xyxy": [30, 40, 50, 70], "area": 600, "touches_border": True},
+    )
+    prediction = fusion.BranchPrediction(
+        "p1",
+        "zs32",
+        "front",
+        None,
+        "yolo",
+        1,
+        0.91,
+        None,
+        "crack",
+        None,
+        None,
+        detections=detections,
+    )
+    gate = fusion.TriggerEvidence(
+        "front:quality_gate",
+        "quality_gate",
+        "zs32",
+        "front",
+        "GRAY",
+        None,
+        None,
+        None,
+        "WARN",
+    )
+
+    audit = audit_module.build_part_audit(
+        "p1",
+        [prediction],
+        machine_status="NG_YOLO",
+        triggered_evidence=(gate,),
+        inspection_complete=True,
+    )
+
+    assert audit["views"]["front"][0]["detections"] == list(detections)
+    assert audit["inspection_complete"] is False
+    assert audit["machine"]["inspection_complete"] is False
+
+
 def test_missing_evidence_path_is_retained(tmp_path: Path) -> None:
     """Missing evidence artifacts remain explicit instead of disappearing from the audit."""
     fusion = _load_module("audit_missing_fusion", "fusion_engine.py")

@@ -8,7 +8,6 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import asdict
-from datetime import datetime, timezone
 from math import isfinite
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -87,6 +86,7 @@ def _serialize_prediction(prediction: BranchPrediction) -> dict[str, Any]:
     source_exists, source_sha256 = _artifact(prediction.source_path)
     evidence_exists, evidence_sha256 = _artifact(prediction.evidence_path)
     serialized = asdict(prediction)
+    serialized["detections"] = list(serialized.get("detections", ()))
     invalid_numeric: dict[str, str] = {}
     for field in ("score", "threshold", "low_threshold", "high_threshold"):
         value = serialized[field]
@@ -149,21 +149,26 @@ def build_part_audit(
             raise ValueError(msg)
         views[prediction.view].append(_serialize_prediction(prediction))
     audit_timestamp = timestamp or _unique_prediction_value(predictions, "timestamp", "captured_at")
-    if audit_timestamp is None:
-        audit_timestamp = datetime.now(timezone.utc).isoformat()
+    capture_session = session_id or _unique_prediction_value(predictions, "capture_session", "session_id")
+    group_id = _unique_prediction_value(predictions, "group_id")
+    effective_complete = inspection_complete and not any(
+        trigger.branch in {"quality", "quality_gate", "registration", "system"} for trigger in triggered_evidence
+    )
     return {
         "schema_version": "2.0",
         "part_id": part_id,
         "product": _unique_prediction_value(predictions, "product", "product_id"),
         "profile": _unique_prediction_value(predictions, "profile", "profile_id"),
         "hand": _unique_prediction_value(predictions, "hand"),
-        "session_id": session_id or _unique_prediction_value(predictions, "session_id", "capture_session"),
+        "session_id": capture_session,
+        "capture_session": capture_session,
+        "group_id": group_id,
         "timestamp": audit_timestamp,
-        "inspection_complete": inspection_complete,
+        "inspection_complete": effective_complete,
         "machine_status": machine_status,
         "machine": {
             "status": machine_status,
-            "inspection_complete": inspection_complete,
+            "inspection_complete": effective_complete,
             "trigger_ids": [trigger.evidence_id for trigger in triggered_evidence],
         },
         "views": views,

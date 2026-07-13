@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -148,6 +149,8 @@ def _strict_zs32_rows(fusion: ModuleType, part_id: str, *, hand: str = "left") -
                 "product": "ZS32",
                 "profile": "zs32_six_view_v1",
                 "hand": hand,
+                "capture_session": "capture-session-001",
+                "group_id": "group-001",
                 **STRICT_VERSIONS,
             },
         )
@@ -503,8 +506,8 @@ def test_normalized_csv_preserves_full_zs32_identity_including_hand(tmp_path: Pa
     fusion = load_fusion_module()
     csv_path = tmp_path / "identity.csv"
     csv_path.write_text(
-        "part_id,product,profile,hand,side,view,branch,pred_label,source_hash,manifest_identity\n"
-        "p1,ZS32,zs32_six_view_v1,left,zs32,front,geometry,0,abc123,capture-001\n",
+        "part_id,product,profile,hand,capture_session,group_id,side,view,branch,pred_label,source_hash,manifest_identity\n"
+        "p1,ZS32,zs32_six_view_v1,left,session-001,group-001,zs32,front,geometry,0,abc123,capture-001\n",
         encoding="utf-8",
     )
 
@@ -515,11 +518,39 @@ def test_normalized_csv_preserves_full_zs32_identity_including_hand(tmp_path: Pa
     assert prediction.product == "ZS32"
     assert prediction.profile == "zs32_six_view_v1"
     assert prediction.hand == "left"
+    assert prediction.capture_session == "session-001"
+    assert prediction.group_id == "group-001"
     assert prediction.source_hash == "abc123"
     assert prediction.manifest_identity == "capture-001"
     header = output.read_text(encoding="utf-8").splitlines()[0].split(",")
     assert header[:3] == ["part_id", "side", "view"]
-    assert {"product", "profile", "hand"} <= set(header)
+    assert {"product", "profile", "hand", "capture_session", "group_id"} <= set(header)
+
+
+@pytest.mark.parametrize("field", ["capture_session", "group_id"])
+def test_strict_identity_requires_nonempty_capture_identity(field: str) -> None:
+    """Every strict row must carry both acquisition-session and capture-group identity."""
+    fusion = load_fusion_module()
+    rows = _strict_zs32_rows(fusion, "p1")
+    rows[0] = fusion.BranchPrediction(**{**rows[0].__dict__, field: None})
+
+    decision = fusion.fuse_part_predictions("p1", rows, config=_strict_zs32_config())
+
+    assert decision.final_status == "INVALID_CAPTURE"
+    assert f"missing {field}" in decision.reason
+
+
+@pytest.mark.parametrize("field", ["capture_session", "group_id"])
+def test_strict_identity_rejects_mixed_capture_identity(field: str) -> None:
+    """All branches and all six views of one part must share capture identity."""
+    fusion = load_fusion_module()
+    rows = _strict_zs32_rows(fusion, "p1")
+    rows[-1] = fusion.BranchPrediction(**{**rows[-1].__dict__, field: "other"})
+
+    decision = fusion.fuse_part_predictions("p1", rows, config=_strict_zs32_config())
+
+    assert decision.final_status == "INVALID_CAPTURE"
+    assert f"mixed {field}" in decision.reason
 
 
 @pytest.mark.parametrize(("field", "wrong_value"), [("hand", "right"), ("side", "back")])
@@ -640,6 +671,80 @@ def test_strong_ng_is_not_downgraded_by_incomplete_or_version_faults() -> None:
     assert decision.triggered_branch == "geometry"
     assert decision.triggered_evidence[0].evidence_id == "front:geometry"
     assert any(item.evidence_id == "system:input_contract" for item in decision.triggered_evidence)
+
+
+def test_strong_ng_retains_every_nonpass_gate_trigger() -> None:
+    """Strong evidence stays NG while every quality/registration failure remains auditable."""
+    fusion = load_fusion_module()
+    rows = _strict_zs32_rows(fusion, "p1")
+    geometry = next(index for index, row in enumerate(rows) if row.view == "front" and row.branch == "geometry")
+    quality = next(index for index, row in enumerate(rows) if row.view == "front_left" and row.branch == "quality_gate")
+    registration = next(
+        index for index, row in enumerate(rows) if row.view == "back_right" and row.branch == "registration"
+    )
+    rows[geometry] = fusion.BranchPrediction(
+        **{**rows[geometry].__dict__, "pred_label": 1, "score": 0.8, "low_threshold": 0.3, "high_threshold": 0.5},
+    )
+    rows[quality] = fusion.BranchPrediction(**{**rows[quality].__dict__, "status": "WARN"})
+    rows[registration] = fusion.BranchPrediction(**{**rows[registration].__dict__, "status": "FAIL", "pred_label": 1})
+
+    decision = fusion.fuse_part_predictions("p1", rows, config=_strict_zs32_config())
+
+    assert decision.final_status == "NG_GEOMETRY"
+    assert decision.final_label == 1
+    assert {item.evidence_id for item in decision.triggered_evidence} >= {
+        "front:geometry",
+        "front_left:quality_gate",
+        "back_right:registration",
+    }
+
+
+def test_yolo_structured_multi_box_is_one_required_identity(tmp_path: Path) -> None:
+    """One YOLO summary may contain multiple boxes without duplicating its required branch identity."""
+    fusion = load_fusion_module()
+    detections = [
+        {"class": "crack", "confidence": 0.91, "xyxy": [1, 2, 11, 22], "area": 200, "in_roi": True},
+        {"class": "chip", "confidence": 0.82, "xyxy": [30, 40, 50, 70], "area": 600, "touches_border": True},
+    ]
+    csv_path = tmp_path / "yolo.csv"
+    csv_path.write_text(
+        "part_id,side,view,branch,pred_label,detections\n"
+        f'p1,zs32,front,yolo,1,"{json.dumps(detections).replace(chr(34), chr(34) * 2)}"\n',
+        encoding="utf-8",
+    )
+
+    prediction = fusion.load_branch_predictions_csv(csv_path, branch="yolo")[0]
+    rows = _strict_zs32_rows(fusion, "p1")
+    target = next(index for index, row in enumerate(rows) if row.view == "front" and row.branch == "yolo")
+    rows[target] = fusion.BranchPrediction(**{
+        **rows[target].__dict__,
+        "pred_label": 1,
+        "detections": prediction.detections,
+    })
+    decision = fusion.fuse_part_predictions("p1", rows, config=_strict_zs32_config())
+    output = tmp_path / "normalized.csv"
+    fusion.write_branch_predictions_csv([rows[target]], output)
+    reloaded = fusion.load_branch_predictions_csv(output, branch="yolo")[0]
+
+    assert decision.final_status == "NG_YOLO"
+    assert "duplicate required identity" not in decision.reason
+    assert list(reloaded.detections) == detections
+
+
+def test_yolo_empty_detection_list_is_clear_summary(tmp_path: Path) -> None:
+    """An explicit no-box YOLO summary is a valid CLEAR required identity."""
+    fusion = load_fusion_module()
+    csv_path = tmp_path / "yolo-clear.csv"
+    csv_path.write_text(
+        'part_id,side,view,branch,pred_label,detections\np1,zs32,front,yolo,0,"[]"\n',
+        encoding="utf-8",
+    )
+
+    prediction = fusion.load_branch_predictions_csv(csv_path, branch="yolo")[0]
+
+    assert prediction.pred_label == 0
+    assert prediction.detections == ()
+    assert fusion.classify_evidence(prediction) is fusion.EvidenceLevel.CLEAR
 
 
 def test_dual_thresholds_classify_clear_gray_and_strong(tmp_path: Path) -> None:
@@ -906,6 +1011,30 @@ def test_ok_requires_rejects_warn_quality_status() -> None:
     assert decision.final_status == "RETAKE"
     assert decision.triggered_branch == "quality_gate"
     assert "required quality_gate PASS" in decision.reason
+
+
+def test_legacy_warn_gate_without_pass_contract_remains_ok() -> None:
+    """Legacy C789-style fusion must not promote an advisory WARN into REVIEW."""
+    fusion = load_fusion_module()
+    prediction = fusion.BranchPrediction(
+        part_id="legacy-part",
+        side="top",
+        view="uniform",
+        slot_id=None,
+        branch="quality_gate",
+        pred_label=0,
+        score=None,
+        threshold=None,
+        defect_type=None,
+        reason="advisory brightness warning",
+        source_path="legacy.png",
+        status="WARN",
+    )
+
+    decision = fusion.fuse_part_predictions("legacy-part", [prediction])
+
+    assert decision.final_status == "OK"
+    assert decision.triggered_evidence == ()
 
 
 def test_required_view_config_is_checked_without_manifest() -> None:

@@ -36,6 +36,8 @@ BRANCH_FIELDNAMES = [
     "hand",
     "product",
     "profile",
+    "capture_session",
+    "group_id",
     "slot_id",
     "branch",
     "pred_label",
@@ -57,6 +59,7 @@ BRANCH_FIELDNAMES = [
     "template_version",
     "source_hash",
     "manifest_identity",
+    "detections",
 ]
 KNOWN_DEFECT_TYPES = {"corner", "crack", "deform", "less", "more", "surface"}
 FUSED_FIELDNAMES = [
@@ -113,6 +116,9 @@ class BranchPrediction:
     profile: str | None = None
     source_hash: str | None = None
     manifest_identity: str | None = None
+    capture_session: str | None = None
+    group_id: str | None = None
+    detections: tuple[dict[str, Any], ...] = ()
 
 
 def classify_evidence(prediction: BranchPrediction) -> EvidenceLevel:
@@ -233,6 +239,24 @@ def _int_label(value: Any, *, default: int = 0) -> int:
     if lowered in {"0", "false", "no", "n", "ok", "normal", PASS_STATUS.lower(), "warn"}:
         return 0
     return int(float(text))
+
+
+def _structured_detections(value: object) -> tuple[dict[str, Any], ...]:
+    """Parse one JSON-list detection summary while preserving every box field."""
+    text = _clean_text(value)
+    if text is None:
+        return ()
+    parsed = json.loads(text)
+    if not isinstance(parsed, list):
+        msg = "detections must be a JSON list"
+        raise TypeError(msg)
+    detections: list[dict[str, Any]] = []
+    for index, detection in enumerate(parsed):
+        if not isinstance(detection, Mapping):
+            msg = f"detection {index} must be a JSON object"
+            raise TypeError(msg)
+        detections.append(dict(detection))
+    return tuple(detections)
 
 
 def _source_path(row: Mapping[str, Any]) -> str | None:
@@ -682,6 +706,16 @@ def _strict_contract_faults(
     part_hand = part_hands[0] if len(part_hands) == 1 else ""
     if part_hand not in allowed_hands:
         invalid.append(f"unexpected hand for part: {part_hand or 'missing'}")
+    part_ids = sorted({prediction.part_id for prediction in predictions})
+    if len(part_ids) > 1:
+        invalid.append(f"mixed part_id for part: {', '.join(part_ids)}")
+    for field in ("capture_session", "group_id"):
+        values = [_clean_text(getattr(prediction, field)) for prediction in predictions]
+        if any(value is None for value in values):
+            invalid.append(f"missing {field} for strict identity")
+        distinct = sorted({value for value in values if value is not None})
+        if len(distinct) > 1:
+            invalid.append(f"mixed {field} for part: {', '.join(distinct)}")
     expected = {identity: value for identity, value in expected_all.items() if identity[0] == part_hand}
     review.extend(
         f"missing expected_versions hand contract: {hand}"
@@ -748,6 +782,31 @@ def _classification_faults(predictions: Sequence[BranchPrediction]) -> list[str]
     return faults
 
 
+def _nonpass_gate_triggers(
+    predictions: Sequence[BranchPrediction],
+    config: Mapping[str, Any],
+    *,
+    strict_zs32: bool,
+) -> tuple[TriggerEvidence, ...]:
+    """Retain every present quality or registration row that is not an explicit PASS."""
+    triggers: list[TriggerEvidence] = []
+    for prediction in predictions:
+        if prediction.branch not in GATE_BRANCHES:
+            continue
+        status = _clean_text(prediction.status)
+        requires_pass = _requires_pass(
+            config,
+            "quality_gate" if prediction.branch in {"quality", "quality_gate"} else "registration",
+        )
+        retain_status = strict_zs32 or requires_pass
+        if prediction.pred_label != 1 and (not retain_status or status is None or status.upper() == PASS_STATUS):
+            continue
+        observed = status or "FAIL"
+        reason = prediction.reason or f"required {prediction.branch} PASS but got {observed}"
+        triggers.append(_trigger_evidence(prediction, EvidenceLevel.GRAY, reason))
+    return tuple(triggers)
+
+
 def _system_trigger(reasons: Sequence[str]) -> TriggerEvidence:
     """Build one retained fail-closed trigger for incomplete strict inspection evidence."""
     reason = "; ".join(reasons)
@@ -794,7 +853,8 @@ def fuse_part_predictions(
     strict_zs32 = _clean_text(fusion_config.get("profile")) == "zs32_six_view_v1"
     missing = [item for item in missing_required if item]
     classified_triggers = _classified_triggers(predictions, fusion_config, strict_zs32=strict_zs32)
-    triggers = tuple(item[0] for item in classified_triggers)
+    gate_triggers = _nonpass_gate_triggers(predictions, fusion_config, strict_zs32=strict_zs32)
+    triggers = (*tuple(item[0] for item in classified_triggers), *gate_triggers)
     invalid_faults: list[str] = []
     review_faults: list[str] = []
     if strict_zs32:
@@ -854,7 +914,9 @@ def fuse_part_predictions(
 
     for branch in ("quality", "quality_gate", "registration"):
         for prediction in predictions:
-            if prediction.branch == branch and prediction.pred_label == 1:
+            status = _clean_text(prediction.status)
+            nonpass_status = strict_zs32 and status is not None and status.upper() != PASS_STATUS
+            if prediction.branch == branch and (prediction.pred_label == 1 or nonpass_status):
                 return _decision_from_prediction(
                     part_id,
                     "RETAKE",
@@ -1251,6 +1313,9 @@ def _prediction_from_row(row: Mapping[str, Any], branch: str) -> BranchPredictio
         profile=_first_value(row, ("profile", "profile_id", "fusion_profile")),
         source_hash=_first_value(row, ("source_hash", "source_sha256", "image_sha256")),
         manifest_identity=_first_value(row, ("manifest_identity", "manifest_image_id", "capture_id", "image_id")),
+        capture_session=_first_value(row, ("capture_session", "session_id")),
+        group_id=_first_value(row, ("group_id", "capture_group")),
+        detections=_structured_detections(_first_value(row, ("detections", "yolo_detections"))),
     )
 
 
@@ -1288,6 +1353,7 @@ def write_branch_predictions_csv(predictions: Sequence[BranchPrediction], output
         writer.writeheader()
         for prediction in predictions:
             row = asdict(prediction)
+            row["detections"] = json.dumps(row["detections"], separators=(",", ":"), sort_keys=True)
             writer.writerow({field: row.get(field) for field in BRANCH_FIELDNAMES})
 
 
