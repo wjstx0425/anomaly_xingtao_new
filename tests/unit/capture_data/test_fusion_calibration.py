@@ -366,6 +366,45 @@ def test_missing_required_eval_group_forces_review_and_invalidates_safety_metric
     assert overall["escape_rate_95_upper"] is None
 
 
+def test_required_group_for_absent_evaluation_hand_invalidates_contract() -> None:
+    """A required hand absent from the whole eval split must remain an explicit contract miss."""
+    required_group = ("right", "front", "anomaly", "model-v1", "roi-v1")
+    thresholds = [
+        {
+            "hand": "left",
+            "view": "front",
+            "branch": "anomaly",
+            "model_version": "model-v1",
+            "roi_version": "roi-v1",
+            "low_threshold": 0.4,
+            "high_threshold": 0.8,
+            "normal_count": 2,
+            "defect_count": 2,
+            "status": "ok",
+        },
+        {
+            "hand": required_group[0],
+            "view": required_group[1],
+            "branch": required_group[2],
+            "model_version": required_group[3],
+            "roi_version": required_group[4],
+            "low_threshold": 0.4,
+            "high_threshold": 0.8,
+            "normal_count": 2,
+            "defect_count": 2,
+            "status": "ok",
+        },
+    ]
+    rows = [_row("left-defect", raw_score=0.9, gt_label=1, split="test")]
+
+    metrics = part_level_metrics(rows, thresholds, required_groups=(required_group,))
+
+    assert metrics["overall"]["calibration_valid"] is False
+    assert metrics["overall"]["recall"] is None
+    assert metrics["overall"]["escape_rate_95_upper"] is None
+    assert metrics["missing_required_groups"] == [list(required_group)]
+
+
 def test_insufficient_required_threshold_invalidates_otherwise_complete_view(tmp_path: Path) -> None:
     """Another branch covering the same view must not hide an insufficient exact group."""
     input_csv = tmp_path / "calibration.csv"

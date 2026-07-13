@@ -390,13 +390,22 @@ def part_level_metrics(
             msg = f"duplicate threshold group: {key}"
             raise ValueError(msg)
         threshold_by_key[key] = threshold
-    overall_outcomes, overall_valid = _classify_rows(parsed, threshold_by_key, required_keys)
-    overall = _metric_block(overall_outcomes, calibration_valid=overall_valid)
-    grouped = []
     all_part_ids_by_hand: dict[str, set[str]] = defaultdict(set)
-    labels = {row.part_id: row.gt_label for row in parsed}
+    observed_keys_by_part: dict[str, set[GroupKey]] = defaultdict(set)
     for row in parsed:
         all_part_ids_by_hand[row.hand].add(row.part_id)
+        observed_keys_by_part[row.part_id].add(row.group_key)
+    missing_required_keys = tuple(
+        key
+        for key in required_keys
+        if not all_part_ids_by_hand[key[0]]
+        or any(key not in observed_keys_by_part[part_id] for part_id in all_part_ids_by_hand[key[0]])
+    )
+    overall_outcomes, overall_valid = _classify_rows(parsed, threshold_by_key, required_keys)
+    overall_valid = overall_valid and not missing_required_keys
+    overall = _metric_block(overall_outcomes, calibration_valid=overall_valid)
+    grouped = []
+    labels = {row.part_id: row.gt_label for row in parsed}
     for key in sorted({row.group_key for row in parsed} | set(threshold_by_key) | set(required_keys)):
         rows_by_part: dict[str, list[_CalibrationRow]] = defaultdict(list)
         for row in parsed:
@@ -419,11 +428,15 @@ def part_level_metrics(
                 group_valid &= row_valid
             outcome = "STRONG" if "STRONG" in levels else "GRAY" if "GRAY" in levels else "CLEAR"
             outcomes[part_id] = (labels[part_id], outcome)
-        if key in required_keys and (threshold is None or threshold.status != "ok"):
+        if key in required_keys and (threshold is None or threshold.status != "ok" or key in missing_required_keys):
             group_valid = False
         metrics = _metric_block(outcomes, calibration_valid=group_valid)
         grouped.append({**dict(zip(GROUP_FIELDS, key, strict=True)), **metrics})
-    return {"overall": overall, "groups": grouped}
+    return {
+        "overall": overall,
+        "groups": grouped,
+        "missing_required_groups": [list(key) for key in missing_required_keys],
+    }
 
 
 def load_calibration_rows(input_csv: Path) -> list[dict[str, str]]:
