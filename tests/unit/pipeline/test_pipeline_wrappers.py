@@ -394,6 +394,27 @@ def test_fuse_inspection_results_parser_accepts_optional_branch_csvs(tmp_path: P
     assert args.output_dir == tmp_path / "fused"
 
 
+def test_fuse_inspection_results_parser_accepts_zs32_audit_options(tmp_path: Path) -> None:
+    """Stage 18 should expose strict ZS32 audit controls."""
+    wrapper = _load_module("pipeline_fuse_inspection_zs32_parser", "pipeline/18_fuse_inspection_results.py")
+
+    args = wrapper.build_parser().parse_args(
+        [
+            "--profile",
+            "zs32",
+            "--audit-dir",
+            str(tmp_path / "audit"),
+            "--require-complete-evidence",
+            "--output-dir",
+            str(tmp_path / "out"),
+        ],
+    )
+
+    assert args.profile == "zs32"
+    assert args.audit_dir == tmp_path / "audit"
+    assert args.require_complete_evidence is True
+
+
 def test_fuse_inspection_results_run_writes_expected_decisions(tmp_path: Path) -> None:
     """The fusion wrapper should run an end-to-end CSV smoke test."""
     wrapper = _load_module("pipeline_fuse_inspection_run", "pipeline/18_fuse_inspection_results.py")
