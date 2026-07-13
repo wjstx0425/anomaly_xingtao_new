@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 import cv2
 import numpy as np
+import pytest
 
 
 def _load_module(name: str, relative_path: str) -> ModuleType:
@@ -413,6 +414,61 @@ def test_fuse_inspection_results_parser_accepts_zs32_audit_options(tmp_path: Pat
     assert args.profile == "zs32"
     assert args.audit_dir == tmp_path / "audit"
     assert args.require_complete_evidence is True
+
+
+def test_calibrate_zs32_fusion_parser_accepts_grouped_calibration_options(tmp_path: Path) -> None:
+    """Stage 30 should expose bounded calibration controls and repeatable required views."""
+    wrapper = _load_module("pipeline_calibrate_zs32_fusion", "pipeline/30_calibrate_zs32_fusion.py")
+
+    args = wrapper.build_parser().parse_args(
+        [
+            "--input-csv",
+            str(tmp_path / "calibration.csv"),
+            "--output-dir",
+            str(tmp_path / "reports"),
+            "--target-recall",
+            "0.99",
+            "--normal-quantile",
+            "0.995",
+            "--fit-split",
+            "calibration",
+            "--eval-split",
+            "test",
+            "--required-view",
+            "front",
+            "--required-view",
+            "back",
+            "--required-group",
+            "left:front:anomaly_front:model-v1:roi-v1",
+        ],
+    )
+
+    assert args.input_csv == tmp_path / "calibration.csv"
+    assert args.output_dir == tmp_path / "reports"
+    assert args.target_recall == pytest.approx(0.99)
+    assert args.normal_quantile == pytest.approx(0.995)
+    assert args.fit_split == "calibration"
+    assert args.eval_split == "test"
+    assert args.required_view == ["front", "back"]
+    assert args.required_group == [("left", "front", "anomaly_front", "model-v1", "roi-v1")]
+
+
+@pytest.mark.parametrize(("option", "value"), [("--target-recall", "0"), ("--normal-quantile", "1.1")])
+def test_calibrate_zs32_fusion_parser_rejects_out_of_range_rates(option: str, value: str, tmp_path: Path) -> None:
+    """Stage 30 rate arguments must stay in the open-zero, closed-one interval."""
+    wrapper = _load_module(f"pipeline_calibrate_zs32_fusion_{option}", "pipeline/30_calibrate_zs32_fusion.py")
+
+    with pytest.raises(SystemExit):
+        wrapper.build_parser().parse_args(
+            [
+                "--input-csv",
+                str(tmp_path / "calibration.csv"),
+                "--output-dir",
+                str(tmp_path / "reports"),
+                option,
+                value,
+            ],
+        )
 
 
 def test_fuse_inspection_results_run_writes_expected_decisions(tmp_path: Path) -> None:
