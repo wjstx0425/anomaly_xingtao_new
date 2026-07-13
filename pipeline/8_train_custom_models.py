@@ -43,7 +43,20 @@ from queue import Queue
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MODEL_CHOICES = ("patchcore", "efficient_ad", "anomaly_dino")
-VIEW_CHOICES = ("left_top", "left_bottom", "right_top", "right_bottom", "no_hand_top", "no_hand_bottom")
+VIEW_CHOICES = (
+    "left_top",
+    "left_bottom",
+    "right_top",
+    "right_bottom",
+    "no_hand_top",
+    "no_hand_bottom",
+    "right_front",
+    "right_front_left",
+    "right_front_right",
+    "right_back",
+    "right_back_left",
+    "right_back_right",
+)
 
 
 @dataclass(frozen=True)
@@ -120,6 +133,19 @@ def _parse_ratio(value: str) -> float:
     return ratio
 
 
+def _parse_normal_test_ratio(value: str) -> float:
+    """Parse an optional normal holdout ratio in the half-open range [0, 1)."""
+    try:
+        ratio = float(value)
+    except ValueError as error:
+        msg = "Normal-test ratio must be a number."
+        raise argparse.ArgumentTypeError(msg) from error
+    if ratio < 0 or ratio >= 1:
+        msg = "Normal-test ratio must satisfy 0 <= value < 1."
+        raise argparse.ArgumentTypeError(msg)
+    return ratio
+
+
 def _parse_run_suffix(value: str) -> str:
     """Parse a safe optional suffix for model run names."""
     if not value:
@@ -157,6 +183,8 @@ def _common_workflow_args(args: argparse.Namespace, model_name: str | None = Non
         str(args.num_workers),
         "--train-sampling-ratio",
         str(args.train_sampling_ratio),
+        "--normal-test-ratio",
+        str(args.normal_test_ratio),
         "--eval-batch-size",
         str(args.eval_batch_size),
         "--deploy-fpr",
@@ -516,6 +544,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.set_defaults(skip_blue_removal=True)
     parser.add_argument("--train-sampling-ratio", type=_parse_ratio, default=1.0, help="Normal-train sampling ratio.")
+    parser.add_argument(
+        "--normal-test-ratio",
+        type=_parse_normal_test_ratio,
+        default=0.2,
+        help="Normal capture-group fraction held out when normal_test is absent.",
+    )
     parser.add_argument("--eval-batch-size", type=int, default=1, help="Evaluation batch size.")
     parser.add_argument("--deploy-fpr", type=float, default=0.05, help="Allowed normal_test false-positive rate.")
     parser.add_argument("--seed", type=int, default=42, help="Dataset split and sampling seed.")

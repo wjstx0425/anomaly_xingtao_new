@@ -668,6 +668,50 @@ preprocess 一次，再按模型并行训练，最后生成汇总表：
 <output-root>/reports/model_comparison.csv
 ```
 
+### ZS32 right 六视角数据
+
+`right/` 数据集支持以下六个独立视角：
+
+```text
+right_front right_front_left right_front_right
+right_back  right_back_left  right_back_right
+```
+
+原始目录可以包含缺陷类型和采集批次，例如：
+
+```text
+right/front/normal/<session>/images/*.png
+right/front/defect/<defect_type>/<session>/images/*.png
+```
+
+如果没有 `normal_test`，工作流默认按文件名中的 `groupNNN` 固定留出 20% 正常组，
+并让六个视角的同一 group 保持相同 train/test 划分。可用
+`--normal-test-ratio` 调整；显式存在 `normal_test` 时不会重新划分。
+
+源图约为 4:3 时，首轮 PatchCore 可执行：
+
+```bash
+.venv/bin/python pipeline/8_train_custom_models.py \
+  --data-root /path/to/right \
+  --output-root results/zs32_right_patchcore \
+  --views right_front right_front_left right_front_right \
+          right_back right_back_left right_back_right \
+  --models patchcore \
+  --gpus 0 \
+  --roi full \
+  --image-size 504,672 \
+  --normal-test-ratio 0.2 \
+  --patchcore-batch-size 1 \
+  --patchcore-layers layer2 \
+  --patchcore-precision float16 \
+  --patchcore-coreset-ratio 0.1 \
+  --deploy-fpr 0.0 \
+  --dry-run
+```
+
+确认 dry-run 的路径后去掉 `--dry-run`。六个视角会各自训练模型，不会混成
+一个视觉分布。
+
 ## 4. 推理
 
 对原始图片或目录推理：
