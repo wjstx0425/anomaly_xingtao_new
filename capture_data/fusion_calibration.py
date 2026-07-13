@@ -7,15 +7,17 @@ from __future__ import annotations
 
 import csv
 import json
+import shutil
+import tempfile
 from collections import defaultdict
 from dataclasses import asdict, dataclass
 from io import StringIO
 from math import ceil, isfinite
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping, Sequence
-    from pathlib import Path
 
 GROUP_FIELDS = ("hand", "view", "branch", "model_version", "roi_version")
 ZS32_REQUIRED_VIEWS = ("front", "front_left", "front_right", "back", "back_left", "back_right")
@@ -430,12 +432,20 @@ def load_calibration_rows(input_csv: Path) -> list[dict[str, str]]:
         return list(csv.DictReader(file))
 
 
-def _atomic_write_text(path: Path, content: str) -> None:
-    """Publish one complete text artifact with a same-directory atomic replace."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(content, encoding="utf-8")
-    temporary.replace(path)
+def _publish_report_directory(output_dir: Path, reports: Mapping[str, str]) -> None:
+    """Stage a complete immutable report snapshot and publish it with one directory rename."""
+    if output_dir.exists():
+        msg = f"output directory already exists: {output_dir}"
+        raise FileExistsError(msg)
+    output_dir.parent.mkdir(parents=True, exist_ok=True)
+    temporary_dir = Path(tempfile.mkdtemp(prefix=f".{output_dir.name}.tmp-", dir=output_dir.parent))
+    try:
+        for name, content in reports.items():
+            (temporary_dir / name).write_text(content, encoding="utf-8")
+        temporary_dir.replace(output_dir)
+    except BaseException:
+        shutil.rmtree(temporary_dir, ignore_errors=True)
+        raise
 
 
 def _threshold_csv(thresholds: Sequence[ThresholdRecord]) -> str:
@@ -458,6 +468,7 @@ def _summary(
     eval_split: str,
     missing_fit_views: Sequence[str],
     missing_evaluation_views: Sequence[str],
+    invalid_threshold_groups: Sequence[GroupKey],
 ) -> str:
     """Build the human-readable calibration summary."""
     part_ids = {str(row["part_id"]).strip() for row in rows}
@@ -481,6 +492,7 @@ def _summary(
             f"- evaluation split: `{eval_split}`",
             f"- missing fit views: `{list(missing_fit_views)}`",
             f"- missing evaluation views: `{list(missing_evaluation_views)}`",
+            f"- invalid threshold groups: `{[list(key) for key in invalid_threshold_groups]}`",
             f"- calibration valid: `{overall['calibration_valid']}`",
             f"- observed part escape count: `{overall['escape_count']}`",
             f"- observed part non-CLEAR recall: `{overall['non_clear_recall']}`",
@@ -538,19 +550,30 @@ def run_calibration(
         required_views=(),
         required_groups=required_groups,
     )
-    deployed_groups = tuple(
+    threshold_groups = tuple(
         (threshold.hand, threshold.view, threshold.branch, threshold.model_version, threshold.roi_version)
         for threshold in thresholds
-        if threshold.status == "ok"
     )
-    effective_required_groups = tuple(required_groups) or deployed_groups
+    effective_required_groups = tuple(sorted(set(required_groups) | set(threshold_groups)))
+    threshold_by_key = {
+        (threshold.hand, threshold.view, threshold.branch, threshold.model_version, threshold.roi_version): threshold
+        for threshold in thresholds
+    }
+    invalid_threshold_groups = [
+        key
+        for key in effective_required_groups
+        if (threshold := threshold_by_key.get(key)) is None
+        or threshold.status != "ok"
+        or threshold.low_threshold is None
+        or threshold.high_threshold is None
+    ]
     metrics = part_level_metrics(
         rows,
         thresholds,
         eval_split=eval_split,
         required_groups=effective_required_groups,
     )
-    coverage_valid = not missing_fit_views and not missing_evaluation_views
+    coverage_valid = not missing_fit_views and not missing_evaluation_views and not invalid_threshold_groups
     if not coverage_valid:
         metrics["overall"].update(
             {
@@ -571,6 +594,7 @@ def run_calibration(
         "evaluation_part_count": len({str(row["part_id"]).strip() for row in eval_rows}),
         "missing_fit_views": missing_fit_views,
         "missing_evaluation_views": missing_evaluation_views,
+        "invalid_threshold_groups": [list(key) for key in invalid_threshold_groups],
         **metrics,
     }
     threshold_payload = {
@@ -582,12 +606,11 @@ def run_calibration(
         "required_groups": [list(_normalize_group_key(value)) for value in effective_required_groups],
         "thresholds": [asdict(threshold) for threshold in thresholds],
     }
-    _atomic_write_text(output_dir / "thresholds.json", json.dumps(threshold_payload, indent=2, sort_keys=True) + "\n")
-    _atomic_write_text(output_dir / "thresholds.csv", _threshold_csv(thresholds))
-    _atomic_write_text(output_dir / "calibration_metrics.json", json.dumps(metrics, indent=2, sort_keys=True) + "\n")
-    _atomic_write_text(
-        output_dir / "calibration_summary.md",
-        _summary(
+    reports = {
+        "thresholds.json": json.dumps(threshold_payload, indent=2, sort_keys=True) + "\n",
+        "thresholds.csv": _threshold_csv(thresholds),
+        "calibration_metrics.json": json.dumps(metrics, indent=2, sort_keys=True) + "\n",
+        "calibration_summary.md": _summary(
             rows,
             thresholds,
             metrics,
@@ -597,6 +620,8 @@ def run_calibration(
             eval_split=eval_split,
             missing_fit_views=missing_fit_views,
             missing_evaluation_views=missing_evaluation_views,
+            invalid_threshold_groups=invalid_threshold_groups,
         ),
-    )
+    }
+    _publish_report_directory(output_dir, reports)
     return metrics

@@ -366,6 +366,43 @@ def test_missing_required_eval_group_forces_review_and_invalidates_safety_metric
     assert overall["escape_rate_95_upper"] is None
 
 
+def test_insufficient_required_threshold_invalidates_otherwise_complete_view(tmp_path: Path) -> None:
+    """Another branch covering the same view must not hide an insufficient exact group."""
+    input_csv = tmp_path / "calibration.csv"
+    fieldnames = list(_row("part", raw_score=0.1, gt_label=0))
+    required_groups = (
+        ("left", "front", "primary", "model-v1", "roi-v1"),
+        ("left", "front", "auxiliary", "model-v1", "roi-v1"),
+    )
+    rows = [
+        _row("cal-normal", branch="primary", raw_score=0.1, gt_label=0),
+        _row("cal-defect", branch="primary", raw_score=0.8, gt_label=1),
+        _row("cal-normal", branch="auxiliary", raw_score=0.2, gt_label=0),
+        _row("test-normal", branch="primary", raw_score=0.1, gt_label=0, split="test"),
+        _row("test-defect", branch="primary", raw_score=0.8, gt_label=1, split="test"),
+    ]
+    with input_csv.open("w", encoding="utf-8", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    output_dir = tmp_path / "reports"
+    metrics = run_calibration(
+        input_csv,
+        output_dir,
+        required_views=("front",),
+        required_groups=required_groups,
+    )
+
+    assert metrics["overall"]["calibration_valid"] is False
+    assert metrics["overall"]["recall"] is None
+    assert metrics["overall"]["escape_rate_95_upper"] is None
+    assert metrics["invalid_threshold_groups"] == [list(required_groups[1])]
+    summary = (output_dir / "calibration_summary.md").read_text(encoding="utf-8")
+    assert "invalid threshold groups" in summary
+    assert "auxiliary" in summary
+
+
 @pytest.mark.parametrize(
     ("low", "high", "status"),
     [(float("nan"), 0.8, "ok"), (0.9, 0.8, "ok"), (0.4, 0.8, "unknown")],
@@ -419,7 +456,75 @@ def test_atomic_replace_failure_does_not_publish_partial_report(
     with pytest.raises(OSError, match="injected replace failure"):
         run_calibration(input_csv, output_dir)
 
-    assert not (output_dir / "thresholds.json").exists()
+    assert not output_dir.exists()
+
+
+@pytest.mark.parametrize("failed_write", [2, 3])
+def test_report_write_failure_never_publishes_output_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failed_write: int,
+) -> None:
+    """Failure while staging any report must leave no final or temporary report directory."""
+    input_csv = tmp_path / "calibration.csv"
+    fieldnames = list(_row("part", raw_score=0.1, gt_label=0))
+    with input_csv.open("w", encoding="utf-8", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(
+            [
+                _row("cal-normal", raw_score=0.1, gt_label=0),
+                _row("cal-defect", raw_score=0.8, gt_label=1),
+                _row("test-normal", raw_score=0.1, gt_label=0, split="test"),
+                _row("test-defect", raw_score=0.8, gt_label=1, split="test"),
+            ],
+        )
+    original_write_text = Path.write_text
+    write_count = 0
+
+    def fail_selected_write(path: Path, content: str, *, encoding: str | None = None) -> int:
+        nonlocal write_count
+        write_count += 1
+        if write_count == failed_write:
+            msg = "injected report write failure"
+            raise OSError(msg)
+        return original_write_text(path, content, encoding=encoding)
+
+    monkeypatch.setattr(Path, "write_text", fail_selected_write)
+    output_dir = tmp_path / "reports"
+
+    with pytest.raises(OSError, match="injected report write failure"):
+        run_calibration(input_csv, output_dir, required_views=("front",))
+
+    assert not output_dir.exists()
+    assert not list(tmp_path.glob(".reports.tmp-*"))
+
+
+def test_existing_output_directory_is_rejected_without_changes(tmp_path: Path) -> None:
+    """Immutable report snapshots must never overwrite or mix with an existing directory."""
+    input_csv = tmp_path / "calibration.csv"
+    fieldnames = list(_row("part", raw_score=0.1, gt_label=0))
+    with input_csv.open("w", encoding="utf-8", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(
+            [
+                _row("cal-normal", raw_score=0.1, gt_label=0),
+                _row("cal-defect", raw_score=0.8, gt_label=1),
+                _row("test-normal", raw_score=0.1, gt_label=0, split="test"),
+                _row("test-defect", raw_score=0.8, gt_label=1, split="test"),
+            ],
+        )
+    output_dir = tmp_path / "reports"
+    output_dir.mkdir()
+    marker = output_dir / "keep.txt"
+    marker.write_text("unchanged", encoding="utf-8")
+
+    with pytest.raises(FileExistsError, match="already exists"):
+        run_calibration(input_csv, output_dir, required_views=("front",))
+
+    assert {path.name for path in output_dir.iterdir()} == {"keep.txt"}
+    assert marker.read_text(encoding="utf-8") == "unchanged"
 
 
 def test_run_calibration_defaults_to_all_six_zs32_views(tmp_path: Path) -> None:
