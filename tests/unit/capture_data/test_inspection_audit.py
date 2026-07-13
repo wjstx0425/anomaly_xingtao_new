@@ -1,0 +1,131 @@
+# Copyright (C) 2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+
+"""Tests for immutable ZS32 inspection audit evidence."""
+
+from __future__ import annotations
+
+import hashlib
+import importlib.util
+import json
+import sys
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+import pytest
+
+if TYPE_CHECKING:
+    from types import ModuleType
+
+
+def _load_module(name: str, filename: str) -> ModuleType:
+    """Load one capture-data helper from its file path."""
+    script_path = Path(__file__).resolve().parents[3] / "capture_data" / filename
+    spec = importlib.util.spec_from_file_location(name, script_path)
+    if spec is None or spec.loader is None:
+        msg = f"Could not load {script_path}"
+        raise RuntimeError(msg)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_build_part_audit_retains_complete_machine_evidence(tmp_path: Path) -> None:
+    """Audit JSON keeps six views, scores, thresholds, margins, versions, hashes, and triggers."""
+    fusion = _load_module("audit_test_fusion", "fusion_engine.py")
+    audit_module = _load_module("audit_test_module", "inspection_audit.py")
+    source = tmp_path / "source.png"
+    evidence = tmp_path / "heatmap.png"
+    source.write_bytes(b"x")
+    evidence.write_bytes(b"y")
+    prediction = fusion.BranchPrediction(
+        part_id="p1",
+        side="zs32",
+        view="front",
+        slot_id=None,
+        branch="anomaly_front",
+        pred_label=0,
+        score=0.4,
+        threshold=None,
+        defect_type=None,
+        reason="gray evidence",
+        source_path=str(source),
+        evidence_path=str(evidence),
+        low_threshold=0.3,
+        high_threshold=0.5,
+        model_version="model-v1",
+        threshold_version="threshold-v2",
+        roi_version="roi-v3",
+        template_version="template-v4",
+    )
+    triggers = (
+        fusion.TriggerEvidence("front:anomaly_front", "anomaly_front", "zs32", "front", "GRAY", 0.4, 0.3, 0.5, "gray"),
+    )
+
+    audit = audit_module.build_part_audit("p1", [prediction], machine_status="REVIEW", triggered_evidence=triggers)
+
+    assert audit["schema_version"] == "1.0"
+    assert set(audit["views"]) == {"front", "front_left", "front_right", "back", "back_left", "back_right"}
+    branch = audit["views"]["front"][0]
+    assert branch["score"] == pytest.approx(0.4)
+    assert branch["low_threshold"] == pytest.approx(0.3)
+    assert branch["high_threshold"] == pytest.approx(0.5)
+    assert branch["low_margin"] == pytest.approx(0.1)
+    assert branch["high_margin"] == pytest.approx(-0.1)
+    assert branch["model_version"] == "model-v1"
+    assert branch["threshold_version"] == "threshold-v2"
+    assert branch["roi_version"] == "roi-v3"
+    assert branch["template_version"] == "template-v4"
+    assert branch["source_sha256"] == hashlib.sha256(b"x").hexdigest()
+    assert branch["evidence_path"] == str(evidence)
+    assert audit["triggers"][0]["evidence_id"] == "front:anomaly_front"
+    assert audit["machine_status"] == "REVIEW"
+    assert audit["review"]["status"] == "PENDING"
+    assert audit["review_status"] is None
+    assert audit["released_status"] is None
+
+
+def test_missing_evidence_path_is_retained(tmp_path: Path) -> None:
+    """Missing evidence artifacts remain explicit instead of disappearing from the audit."""
+    fusion = _load_module("audit_missing_fusion", "fusion_engine.py")
+    audit_module = _load_module("audit_missing_module", "inspection_audit.py")
+    missing = tmp_path / "missing.png"
+    prediction = fusion.BranchPrediction(
+        "p1",
+        "zs32",
+        "front",
+        None,
+        "geometry",
+        1,
+        0.8,
+        None,
+        "less",
+        None,
+        None,
+        evidence_path=str(missing),
+    )
+
+    audit = audit_module.build_part_audit("p1", [prediction], machine_status="NG", triggered_evidence=())
+
+    branch = audit["views"]["front"][0]
+    assert branch["evidence_path"] == str(missing)
+    assert branch["evidence_exists"] is False
+
+
+def test_atomic_write_failure_does_not_publish_final_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed atomic replace must not publish a partial final audit."""
+    audit_module = _load_module("audit_atomic_module", "inspection_audit.py")
+    output = tmp_path / "audit" / "p1.json"
+
+    def fail_replace(_self: Path, _target: Path) -> Path:
+        msg = "replace failed"
+        raise OSError(msg)
+
+    monkeypatch.setattr(Path, "replace", fail_replace)
+
+    with pytest.raises(OSError, match="replace failed"):
+        audit_module.write_part_audit({"schema_version": "1.0"}, output)
+
+    assert not output.exists()
+    assert json.loads(output.with_suffix(".json.tmp").read_text(encoding="utf-8"))["schema_version"] == "1.0"

@@ -8,9 +8,12 @@ from __future__ import annotations
 import importlib.util
 import sys
 from pathlib import Path
-from types import ModuleType
+from typing import TYPE_CHECKING
 
 import pytest
+
+if TYPE_CHECKING:
+    from types import ModuleType
 
 
 def load_fusion_module() -> ModuleType:
@@ -101,6 +104,153 @@ def _clear_zs32_rows(fusion: ModuleType, part_id: str) -> list[object]:
             ],
         )
     return rows
+
+
+def _face_rows(fusion: ModuleType, part_id: str, face: str) -> list[object]:
+    """Return the three rows belonging to one physical face."""
+    return [row for row in _clear_zs32_rows(fusion, part_id) if str(row.view).startswith(face)]
+
+
+def test_front_face_never_returns_final_ok() -> None:
+    """A clear front stage must wait for the matching back stage."""
+    fusion = load_fusion_module()
+
+    result = fusion.fuse_face_predictions("p1", _face_rows(fusion, "p1", "front"), face="front", config=_zs32_config())
+
+    assert result.stage_status == "FRONT_CLEAR"
+    assert result.final_status is None
+    assert result.inspection_complete is False
+
+
+def test_front_strong_is_front_ng_but_marks_inspection_incomplete() -> None:
+    """Front-side NG remains staged until back-side evidence is captured."""
+    fusion = load_fusion_module()
+    rows = _face_rows(fusion, "p1", "front")
+    rows[4] = fusion.BranchPrediction(**{**rows[4].__dict__, "pred_label": 1})
+
+    result = fusion.fuse_face_predictions("p1", rows, face="front", config=_zs32_config())
+
+    assert result.stage_status == "FRONT_NG"
+    assert result.final_status is None
+    assert result.inspection_complete is False
+
+
+def test_front_review_and_back_stage_equivalents() -> None:
+    """Both faces expose CLEAR, REVIEW, and NG staged states without early release."""
+    fusion = load_fusion_module()
+    front_rows = _face_rows(fusion, "p1", "front")
+    front_rows[2] = fusion.BranchPrediction(**{**front_rows[2].__dict__, "score": 0.4})
+    back_clear = fusion.fuse_face_predictions(
+        "p1",
+        _face_rows(fusion, "p1", "back"),
+        face="back",
+        config=_zs32_config(),
+    )
+    back_ng_rows = _face_rows(fusion, "p1", "back")
+    back_ng_rows[4] = fusion.BranchPrediction(**{**back_ng_rows[4].__dict__, "pred_label": 1})
+
+    front_review = fusion.fuse_face_predictions("p1", front_rows, face="front", config=_zs32_config())
+    back_ng = fusion.fuse_face_predictions("p1", back_ng_rows, face="back", config=_zs32_config())
+
+    assert front_review.stage_status == "FRONT_REVIEW"
+    assert back_clear.stage_status == "BACK_CLEAR"
+    assert back_ng.stage_status == "BACK_NG"
+    assert back_clear.final_status is None
+
+
+def test_face_prediction_rejects_wrong_face_and_identity() -> None:
+    """Face fusion must reject unsupported faces and mixed part identities."""
+    fusion = load_fusion_module()
+    rows = _face_rows(fusion, "other", "front")
+
+    with pytest.raises(ValueError, match="part_id"):
+        fusion.fuse_face_predictions("p1", rows, face="front", config=_zs32_config())
+    with pytest.raises(ValueError, match="face"):
+        fusion.fuse_face_predictions("p1", [], face="side", config=_zs32_config())
+
+
+def test_face_prediction_without_config_fails_closed_on_missing_view() -> None:
+    """Face fusion must require all three physical views even without a config."""
+    fusion = load_fusion_module()
+    rows = [row for row in _face_rows(fusion, "p1", "front") if row.view != "front_right"]
+
+    result = fusion.fuse_face_predictions("p1", rows, face="front")
+
+    assert result.stage_status == "FRONT_REVIEW"
+    assert "front_right" in result.reason
+
+
+@pytest.mark.parametrize(
+    ("front_stage", "back_stage", "expected"),
+    [
+        ("FRONT_CLEAR", "BACK_CLEAR", "OK"),
+        ("FRONT_REVIEW", "BACK_CLEAR", "REVIEW"),
+        ("FRONT_CLEAR", "BACK_REVIEW", "REVIEW"),
+        ("FRONT_NG", "BACK_CLEAR", "NG"),
+        ("FRONT_CLEAR", "BACK_NG", "NG"),
+    ],
+)
+def test_final_combination(front_stage: str, back_stage: str, expected: str) -> None:
+    """Final OK requires two clear faces; REVIEW and NG fail closed."""
+    fusion = load_fusion_module()
+    front = fusion.FaceDecision(
+        part_id="p1",
+        face="front",
+        stage_status=front_stage,
+        final_status=None,
+        inspection_complete=False,
+        triggered_evidence=(),
+        reason=front_stage,
+    )
+    back = fusion.FaceDecision(
+        part_id="p1",
+        face="back",
+        stage_status=back_stage,
+        final_status=None,
+        inspection_complete=False,
+        triggered_evidence=(),
+        reason=back_stage,
+    )
+
+    result = fusion.combine_face_decisions(front, back)
+
+    assert result.final_status == expected
+
+
+def test_final_combination_rejects_identity_mismatch() -> None:
+    """Front and back evidence from different parts must never be combined."""
+    fusion = load_fusion_module()
+    front = fusion.FaceDecision(
+        part_id="p1",
+        face="front",
+        stage_status="FRONT_CLEAR",
+        final_status=None,
+        inspection_complete=False,
+        triggered_evidence=(),
+        reason="clear",
+    )
+    back = fusion.FaceDecision(
+        part_id="p2",
+        face="back",
+        stage_status="BACK_CLEAR",
+        final_status=None,
+        inspection_complete=False,
+        triggered_evidence=(),
+        reason="clear",
+    )
+
+    with pytest.raises(ValueError, match="part_id"):
+        fusion.combine_face_decisions(front, back)
+
+
+def test_final_combination_rejects_malformed_stage_status() -> None:
+    """A stage with the wrong face prefix must never be interpreted as CLEAR."""
+    fusion = load_fusion_module()
+    front = fusion.FaceDecision("p1", "front", "BACK_CLEAR", None, False, (), "invalid")
+    back = fusion.FaceDecision("p1", "back", "BACK_CLEAR", None, False, (), "clear")
+
+    with pytest.raises(ValueError, match="stage_status"):
+        fusion.combine_face_decisions(front, back)
 
 
 def test_gray_evidence_returns_review_and_strong_wins() -> None:

@@ -156,6 +156,19 @@ class FusedDecision:
     triggered_evidence: tuple[TriggerEvidence, ...] = ()
 
 
+@dataclass(frozen=True)
+class FaceDecision:
+    """Staged fusion result for one physical face of a part."""
+
+    part_id: str
+    face: str
+    stage_status: str
+    final_status: str | None
+    inspection_complete: bool
+    triggered_evidence: tuple[TriggerEvidence, ...]
+    reason: str
+
+
 def _clean_text(value: Any) -> str | None:
     """Return a stripped string or ``None`` for empty CSV values."""
     if value is None:
@@ -667,6 +680,130 @@ def fuse_part_predictions(
         defect_type=None,
         triggered_branch=None,
         reason="all available reliable branches below threshold",
+        triggered_evidence=triggers,
+    )
+
+
+def _face_config(config: Mapping[str, Any], face: str) -> dict[str, Any]:
+    """Return a shallow fusion config restricted to the three views of one face."""
+    face_views = {face, f"{face}_left", f"{face}_right"}
+    face_config = dict(config)
+    ok_requires = config.get("ok_requires")
+    if isinstance(ok_requires, Mapping):
+        filtered_requires = dict(ok_requires)
+        required_keys = _string_sequence(ok_requires.get("required_view_keys"))
+        filtered_requires["required_view_keys"] = [
+            key for key in required_keys if key.rsplit(":", maxsplit=1)[-1] in face_views
+        ]
+        face_config["ok_requires"] = filtered_requires
+    required_branches = config.get("required_branches_by_view")
+    if isinstance(required_branches, Mapping):
+        face_config["required_branches_by_view"] = {
+            view: branches for view, branches in required_branches.items() if str(view) in face_views
+        }
+    return face_config
+
+
+def fuse_face_predictions(
+    part_id: str,
+    predictions: Sequence[BranchPrediction],
+    *,
+    face: str,
+    config: Mapping[str, Any] | None = None,
+) -> FaceDecision:
+    """Fuse exactly one three-view face without releasing a final OK.
+
+    Args:
+        part_id (str): Stable part identity shared by every prediction.
+        predictions (Sequence[BranchPrediction]): Rows for the selected face.
+        face (str): Physical face, either ``front`` or ``back``.
+        config (Mapping[str, Any] | None): Strict fusion configuration.
+
+    Returns:
+        FaceDecision: A staged CLEAR, REVIEW, or NG result with no final release.
+
+    Raises:
+        ValueError: If the face, part identity, or supplied views are invalid.
+    """
+    if face not in {"front", "back"}:
+        msg = "face must be 'front' or 'back'"
+        raise ValueError(msg)
+    mismatched_parts = sorted({prediction.part_id for prediction in predictions if prediction.part_id != part_id})
+    if mismatched_parts:
+        msg = f"part_id mismatch: expected {part_id}, found {', '.join(mismatched_parts)}"
+        raise ValueError(msg)
+    required_views = {face, f"{face}_left", f"{face}_right"}
+    wrong_views = sorted({str(prediction.view) for prediction in predictions if prediction.view not in required_views})
+    if wrong_views:
+        msg = f"predictions contain views outside {face} face: {', '.join(wrong_views)}"
+        raise ValueError(msg)
+    observed_views = {prediction.view for prediction in predictions}
+    missing_views = sorted(required_views - observed_views)
+    decision = fuse_part_predictions(
+        part_id,
+        predictions,
+        missing_required=missing_views,
+        config=_face_config(config or {}, face),
+    )
+    if decision.final_status == "OK":
+        state = "CLEAR"
+    elif decision.final_status == "REVIEW" or decision.final_status in {"RETAKE", "INVALID_CAPTURE"}:
+        state = "REVIEW"
+    else:
+        state = "NG"
+    return FaceDecision(
+        part_id=part_id,
+        face=face,
+        stage_status=f"{face.upper()}_{state}",
+        final_status=None,
+        inspection_complete=False,
+        triggered_evidence=decision.triggered_evidence,
+        reason=decision.reason,
+    )
+
+
+def combine_face_decisions(front: FaceDecision, back: FaceDecision) -> FusedDecision:
+    """Combine matching staged faces into the only releasable part decision.
+
+    Args:
+        front (FaceDecision): Completed front-face stage.
+        back (FaceDecision): Completed back-face stage.
+
+    Returns:
+        FusedDecision: ``OK`` only for CLEAR+CLEAR, otherwise REVIEW or NG.
+
+    Raises:
+        ValueError: If identities or face roles do not match.
+    """
+    if front.part_id != back.part_id:
+        msg = f"part_id mismatch: front={front.part_id}, back={back.part_id}"
+        raise ValueError(msg)
+    if front.face != "front" or back.face != "back":
+        msg = "combine_face_decisions requires front then back face decisions"
+        raise ValueError(msg)
+    valid_front_stages = {"FRONT_CLEAR", "FRONT_REVIEW", "FRONT_NG"}
+    valid_back_stages = {"BACK_CLEAR", "BACK_REVIEW", "BACK_NG"}
+    if front.stage_status not in valid_front_stages or back.stage_status not in valid_back_stages:
+        msg = f"invalid stage_status pair: {front.stage_status}, {back.stage_status}"
+        raise ValueError(msg)
+    stages = (front.stage_status, back.stage_status)
+    if any(stage.endswith("_NG") for stage in stages):
+        status, label = "NG", 1
+    elif all(stage.endswith("_CLEAR") for stage in stages):
+        status, label = "OK", 0
+    else:
+        status, label = "REVIEW", None
+    triggers = (*front.triggered_evidence, *back.triggered_evidence)
+    return FusedDecision(
+        part_id=front.part_id,
+        final_status=status,
+        final_label=label,
+        defect_side=None,
+        defect_view=None,
+        defect_slot=None,
+        defect_type=None,
+        triggered_branch=None,
+        reason=f"{front.stage_status} + {back.stage_status}",
         triggered_evidence=triggers,
     )
 
