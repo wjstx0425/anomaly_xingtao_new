@@ -91,6 +91,7 @@ import cv2  # noqa: E402
 import matplotlib  # noqa: E402
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
+from lightning import seed_everything
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
@@ -882,6 +883,7 @@ def train_experiments(args: argparse.Namespace) -> None:
 
     for view in _selected_views(args.views):
         for model_name in model_names:
+            seed_everything(args.seed, workers=True)
             run_name = _model_run_name(model_name, args)
             run_dir = _run_dir(output_root, view, run_name)
             visualizations_dir = run_dir / "visualizations" / "test"

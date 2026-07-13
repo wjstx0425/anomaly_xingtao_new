@@ -44,6 +44,7 @@ uv sync
 | `27_prepare_zs32_label_studio.py` | 准备 ZS32 Label Studio 本地文件目录 | 汇总六视图缺陷图并生成 manifest 和标注界面配置 |
 | `28_prepare_zs32_yolo_dataset.py` | 构建 ZS32 六视角 YOLO 数据集 | 合并 Label Studio 框、空视角、真实/镜像正常负样本并按工件拆分 |
 | `29_zs32_fixed_roi.py` | 选择六视角固定 ROI 并裁剪 YOLO 数据集 | OpenCV 可视化框选，保持原 split 并转换 bbox |
+| `30_crop_zs32_patchcore_dataset.py` | 分别框选左右手六视角 ROI 并裁剪 PatchCore 数据集 | 生成独立裁剪数据，不修改原始图片 |
 
 最常用流程：
 
@@ -711,6 +712,22 @@ right/front/defect/<defect_type>/<session>/images/*.png
 
 确认 dry-run 的路径后去掉 `--dry-run`。六个视角会各自训练模型，不会混成
 一个视觉分布。
+
+固定使用 `wide_resnet50_2/layer2/256x256/coreset=0.01/k=9/float16/deploy_fpr=0.05/seed=42`
+训练六个独立视角时，使用可断点续跑的串行脚本：
+
+```bash
+HF_HUB_OFFLINE=1 bash pipeline/run_wrn50_fixed_six_views.sh \
+  dataset/right \
+  results/six_view_fixed_seed42 \
+  0
+```
+
+脚本按 `right_front` 到 `right_back_right` 的固定顺序逐一调用
+`8_train_custom_models.py`。每个视角使用独立输出目录；已有 `summary.csv` 的视角跳过，
+已有 checkpoint 的视角只评估，只有 manifest 的视角复用预处理。失败视角记录在
+`results/six_view_fixed_seed42/failed_views.txt`，重复执行同一命令即可继续；六个报告全部
+通过完整性校验后生成 `results/six_view_fixed_seed42/six_view_summary.csv`。
 
 ## 4. 推理
 
@@ -1634,6 +1651,27 @@ uv run --no-sync python pipeline/29_zs32_fixed_roi.py convert
 默认输出为 `dataset/zs32_six_view_roi_yolo`，训练入口是其中的 `data.yaml`。转换会保留原来的
 train/val/test、`sample_id` 和空标签；跨越 ROI 边界的框会裁到边缘，完全位于 ROI 外的框会丢弃，
 命令行与 manifest 分别报告裁框和丢框数量。重新生成已有输出时显式添加 `--overwrite`。
+
+PatchCore 重训使用 stage 30，左右手的六个视角分别框选 ROI：
+
+```bash
+uv run --no-sync python pipeline/30_crop_zs32_patchcore_dataset.py select
+uv run --no-sync python pipeline/30_crop_zs32_patchcore_dataset.py convert
+```
+
+默认读取 `dataset/right` 和 `dataset/left`，配置保存到 `dataset/zs32_patchcore_roi_config.json`，
+裁剪结果输出到 `dataset/zs32_patchcore_roi`。输出视角严格保留原图片所在目录，即使文件名 view 不同也不会调换位置；`convert` 会显示检查和裁剪进度条。重新生成已有输出时添加 `--overwrite`。
+
+使用 RTX 4090 强配置重新训练 right 六视角：
+
+```bash
+HF_HUB_OFFLINE=1 bash pipeline/run_patchcore_roi_six_views.sh
+```
+
+该脚本固定使用 `wide_resnet50_2`、`layer2 layer3`、coreset `0.05`、float32、训练/评估 batch `16`、
+邻居数 `9`、`256×256`、workers `2` 和 seed `42`。默认输出到
+`results/six_view_roi_wrn_l23_r005_bs16_fp32_seed42`，不会覆盖上一版 ROI 训练结果。也可以传入
+`DATA_ROOT [RUN_BASE] [GPU]` 覆盖三个路径参数。
 
 ## 工业融合检测 MVP-1
 

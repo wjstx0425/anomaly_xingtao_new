@@ -13,6 +13,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - 🚀 **pipeline**: Add geometry threshold fallback diagnostics for slot/type/region, slot, defect-type, and global lookup levels.
 - 🚀 **pipeline**: Add whole-image quality gate calibration, demo WARN reason reporting, and multi-view manifest generation.
 - 🚀 **pipeline**: Add a C789 YOLO defect collection helper that captures full trays, crops all six slots as defects, and flattens the crops for bbox annotation.
+- 🚀 **pipeline**: Add deterministic, serial, resumable six-view PatchCore training with independent checkpoints, thresholds, logs, and a merged metrics report.
+- 🚀 **pipeline**: Add stage 30 to select per-hand six-view ROIs and crop right/left datasets for PatchCore retraining.
 
 ### Removed
 

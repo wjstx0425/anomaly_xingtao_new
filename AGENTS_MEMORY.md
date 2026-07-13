@@ -1,5 +1,42 @@
 # AGENTS Memory
 
+## ZS32 PatchCore left/right per-view ROI dataset (2026-07-13, design approved)
+
+- Add a standalone stage 30 tool for cropping `dataset/right` and `dataset/left` into a reusable PatchCore tree under `dataset/zs32_patchcore_roi`; do not extend stage 29 YOLO behavior or crop dynamically inside training.
+- Use 12 independent ROIs: six canonical views for each of `right` and `left`. Store pixel half-open `xyxy` coordinates in `dataset/zs32_patchcore_roi_config.json` and previews under `dataset/zs32_patchcore_roi_previews`.
+- Preserve the hand-relative `view/{normal,normal_test,defect}/<defect_type>/<session>/images` tree. Write `crop_manifest.csv`, `roi_config.json`, and `summary.json`; original datasets remain unchanged.
+- Validate filename hand/view identity, but always use the original parent view directory for ROI selection and output routing. Filename-view mismatches are never moved; `resolved_view` equals `source_view` and `view_corrected` stays false.
+- Default to no overwrite. `--overwrite` may rebuild only after a complete preflight validates all inputs and target mappings.
+- Approved design: `docs/superpowers/specs/2026-07-13-zs32-patchcore-roi-dataset-design.md`. Stage 30 is implemented, the 12-ROI config/previews exist, and the full cropped dataset was generated under `dataset/zs32_patchcore_roi`.
+- Implementation plan: `docs/superpowers/plans/2026-07-13-zs32-patchcore-roi-dataset.md`; it separates strict config/discovery, interactive selection, transactional conversion, and CLI/docs/final verification into four TDD tasks.
+- Task 1 routing was revised after user review: filename hand/view validation remains, while normal completeness, ROI selection, output paths, manifest, and summary all follow the original parent view directory. The 24 filename/directory mismatches remain in their original folders.
+- Task 2 complete and reviewed: `select_patchcore_rois()` preloads 12 readable normal references, checks one common source size, then opens right-six followed by left-six selectors, reuses an existing config as initial ROIs, writes `<hand>_<view>_roi.png` previews, and atomically replaces the config only after all selections/previews succeed. Tests reached `32` passing cases; reviewer noted only a Minor missing injected mid-selection exception test, not a functional defect.
+- Minimal stage-30 entrypoint: `pipeline/30_crop_zs32_patchcore_dataset.py`. `convert` shows `Checking images` and `Cropping images` progress bars. The directory-preserving dataset was regenerated and verified with `2010` images (`right=852`, `left=1158`), `routed_changes=0`, `view_corrected=0`, complete manifest paths, and untouched source files. The focused suite passes `50` tests plus Ruff F/I, `py_compile`, and `git diff --check`.
+- Historical ROI training results based on the earlier routing were deleted before this directory-preserving recrop and must not be reused. Retraining should create fresh `results/six_view_roi_fixed_seed42`.
+- Strong ROI PatchCore runner prepared (not executed): `pipeline/run_patchcore_roi_six_views.sh`. It opts into configurable defaults exposed by `run_wrn50_fixed_six_views.sh` and fixes `wide_resnet50_2`, layers `layer2 layer3`, coreset `0.05`, float32, train/eval batch `16`, workers `2`, k `9`, image size `256x256`, deploy FPR `0.05`, and seed `42`. Its isolated default output is `results/six_view_roi_wrn_l23_r005_bs16_fp32_seed42`, suffix `wrn_l23_s256_r005_k9_fp32_bs16_fpr005_seed42`. The user will run training manually.
+
+## ZS32 six-view fixed PatchCore training (2026-07-13, complete)
+
+- Requested `/home/ljl/anomaly_xingtao` and `/DATA/ljl/right` do not exist on this machine. The adjusted checkout is `/home/yunjing/anomalib` (remote `mygithub` points to `git@github.com:wjstx0425/anomaly_xingtao.git`) and the adjusted data root is `/home/yunjing/anomalib/dataset/right`.
+- Fixed output root: `/home/yunjing/anomalib/results/six_view_fixed_seed42`; GPU: `0`; suffix: `wrn_l2_s256_r001_k9_fp16_fpr005_seed42`.
+- Fixed PatchCore settings: `wide_resnet50_2`, `layer2`, `256,256`, ROI `full`, coreset `0.01`, neighbors `9`, feature precision `float16`, train/eval batch `4`, workers `2`, normal holdout `0.2`, deploy FPR `0.05`, seed `42`.
+- Views are `right_front`, `right_front_left`, `right_front_right`, `right_back`, `right_back_left`, and `right_back_right`, trained serially with independent output roots/checkpoints/thresholds.
+- The strict offline timm preload check passed: `HF_HUB_OFFLINE=1 .venv/bin/python -c 'import timm; timm.create_model("wide_resnet50_2", pretrained=True, features_only=True, out_indices=(2,)); print("wide_resnet50_2 cached")'` printed `wide_resnet50_2 cached`.
+- `examples/api/03_models/zs32_defect_workflow.py` now calls `seed_everything(args.seed, workers=True)` at the start of every `(view, model)` training iteration, before datamodule/model construction.
+- Serial/resumable runner: `pipeline/run_wrn50_fixed_six_views.sh`. Per-view outputs are `<output-root>/<view>`; per-view orchestration logs append to `<output-root>/<view>/runner.log`; durable failures append to `<output-root>/failed_views.txt`.
+- TDD/static verification before real training: the runner tests first failed because the script was absent, then the combined related suite passed `43` tests; `bash -n`, `py_compile`, focused Ruff `F/I`, and `git diff --check` passed.
+- The real host exposes one RTX 4090 on GPU 0. At the pre-training check, another user-owned YOLO sweep (`examples/c789/sweep_zs32.py --stage all --experiment-id zs32_full_v2 --resume`) occupied about 24.6 GiB; do not terminate it.
+- Real execution command: `HF_HUB_OFFLINE=1 bash pipeline/run_wrn50_fixed_six_views.sh /home/yunjing/anomalib/dataset/right /home/yunjing/anomalib/results/six_view_fixed_seed42 0`.
+- All six independent train and evaluate jobs succeeded. The first merge attempt correctly failed closed because its model-schema check expected `patchcore` while the workflow writes the suffixed run name; after a TDD regression fix to require `patchcore_<suffix>`, rerunning the identical command skipped all six completed views and generated the aggregate without retraining or overwriting results.
+- Final aggregate: `/home/yunjing/anomalib/results/six_view_fixed_seed42/six_view_summary.csv`; verified exactly six rows, and every referenced checkpoint and per-view summary exists. `failed_views.txt` is absent.
+- Final image/sample deployment metrics are identical at this dataset grouping level:
+  - `right_front`: threshold `0.3961148560`, FPR `0.0434782609`, accuracy `0.9807692308`, recall `1.0`, F1 `0.9830508475`.
+  - `right_front_left`: threshold `0.6611694098`, FPR `0.0434782609`, accuracy `0.8076923077`, recall `0.6896551724`, F1 `0.8`. This is the expected weak view and was not tuned differently.
+  - `right_front_right`: threshold `0.4201563299`, FPR `0.0434782609`, accuracy `0.9807692308`, recall `1.0`, F1 `0.9830508475`.
+  - `right_back`: threshold `0.3071553111`, FPR `0.0434782609`, accuracy `0.9807692308`, recall `1.0`, F1 `0.9830508475`.
+  - `right_back_left`: threshold `0.4350364804`, FPR `0.0434782609`, accuracy `0.9807692308`, recall `1.0`, F1 `0.9830508475`.
+  - `right_back_right`: threshold `0.4216867387`, FPR `0.0434782609`, accuracy `0.9807692308`, recall `1.0`, F1 `0.9830508475`.
+
 ## ZS32 serial-bound three-camera capture
 
 - The runnable entrypoint is `pipeline/1_collect_multicamera_data.py`; its default mode is single exposure, while `--hdr` explicitly enables the retained HDR path.

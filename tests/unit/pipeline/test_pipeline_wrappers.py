@@ -29,6 +29,22 @@ def _load_module(name: str, relative_path: str) -> ModuleType:
     return module
 
 
+def test_zs32_workflow_seeds_each_experiment_before_construction() -> None:
+    """Each ZS32 view/model experiment should start from the configured seed."""
+    script_path = Path(__file__).resolve().parents[3] / "examples/api/03_models/zs32_defect_workflow.py"
+    source = script_path.read_text(encoding="utf-8")
+
+    assert "from lightning import seed_everything" in source
+    train_source = source[source.index("def train_experiments(") : source.index("def _find_checkpoint(")]
+    inner_loop_index = train_source.index("        for model_name in model_names:")
+    seed_index = train_source.index("            seed_everything(args.seed, workers=True)")
+    datamodule_index = train_source.index("datamodule = _build_datamodule(")
+    model_index = train_source.index("model = _build_model(")
+
+    assert inner_loop_index < seed_index < datamodule_index
+    assert seed_index < model_index
+
+
 def test_multicamera_collection_wrapper_forwards_arguments_unchanged() -> None:
     """The numbered wrapper should delegate every capture option unchanged."""
     wrapper = _load_module("pipeline_collect_multicamera", "pipeline/1_collect_multicamera_data.py")
