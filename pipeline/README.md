@@ -1678,6 +1678,96 @@ HF_HUB_OFFLINE=1 bash pipeline/run_patchcore_roi_six_views.sh
 
 ## 工业融合检测 MVP-1
 
+### ZS32 右手六视角统一推理入口（Stage 32）
+
+`pipeline/32_run_zs32_multimodel_inference.py` 已把当前六个右手 PatchCore checkpoint 和一个 YOLO
+`best.pt` 固定到 `config/fusion/zs32_runtime_models.json`。运行时会先校验权重 SHA-256 和六张原图
+`4024×3036` 尺寸，再分别使用 `dataset/zs32_patchcore_roi_config.json` 和
+`dataset/zs32_six_view_roi_config.json` 裁剪；六个 PatchCore 常驻加载、逐视角推理，YOLO 常驻加载并一次
+batch 推理六张 ROI。YOLO 的 `candidate_conf=0.001` 只是尽量保留候选框的采集下限，不是最终 NG 阈值。
+
+只有模型证据时先运行 `infer`。六个参数必须传原始六视角图，不要提前裁剪：
+
+```bash
+uv run python pipeline/32_run_zs32_multimodel_inference.py infer \
+  --part-id zs32_right_part001 \
+  --capture-session 20260713_session001 \
+  --group-id group001 \
+  --hand right \
+  --front-image /absolute/path/right_front.png \
+  --front-left-image /absolute/path/right_front_left.png \
+  --front-right-image /absolute/path/right_front_right.png \
+  --back-image /absolute/path/right_back.png \
+  --back-left-image /absolute/path/right_back_left.png \
+  --back-right-image /absolute/path/right_back_right.png \
+  --output-dir results/zs32_runtime/part001
+```
+
+输出包含 `patchcore.csv`、`yolo.csv`、`runtime_manifest.json`、`runtime_summary.json`、两类 ROI crop、
+PatchCore 热图和 YOLO 框图。每条 branch 都保留连续 `score`、原图/证据路径与 SHA-256、实际权重版本；YOLO
+无框明确写为 `detections=[]`、`score=0.0`。checkpoint 内部类别名 `item` 会同时保留为
+`checkpoint_class_name`，部署证据使用明确业务语义 `class_name=defect`。没有 Stage 31 locked 双阈值时，输出必定是
+`machine_status=REVIEW, inspection_complete=false`，不会把旧 `six_view_summary.csv` 的单阈值冒充正式融合阈值。
+当前配置只有右手权重，`--hand left` 会在加载模型前拒绝。
+
+如果模板模型已经训练好，可增加：
+
+```bash
+--template-model-dir results/zs32_template_gate/v1
+```
+
+入口会先按 PatchCore ROI 裁图并依次执行六视角模板门禁；任一视角 REVIEW/NG_TEMPLATE/异常都会立即停止，
+PatchCore 和 YOLO 不会加载或执行。六视角全部 PASS 后才继续模型推理，并输出 `template_match.csv`。
+
+收集标定集或独立测试集连续分数时，给每个物理零件增加成对参数：
+
+```bash
+--gt-label 0 --split calibration
+# 缺陷零件使用：--gt-label 1 --split calibration
+# 独立评估零件使用 split=test
+```
+
+这会额外生成该零件 12 条 PatchCore/YOLO `calibration_rows.csv`。必须按物理 `part_id` 汇总正常与缺陷数据，
+并合并 template/quality/registration/geometry 四类分支的标定行，才能用右手 36 组合同拟合正式阈值：
+
+```bash
+uv run python pipeline/31_calibrate_zs32_fusion.py \
+  --input-csv results/zs32_fusion/calibration_rows.csv \
+  --deployment-profile config/fusion/zs32_right_six_view.json \
+  --output-dir results/zs32_fusion/right_calibration_v1 \
+  --target-recall 1.0 \
+  --normal-quantile 0.995
+```
+
+正式 `fuse` 模式要求 locked `thresholds.json` 和剩余四类证据全部存在；缺一个参数就会在模型执行前失败，
+不会用投票补齐：
+
+```bash
+uv run python pipeline/32_run_zs32_multimodel_inference.py fuse \
+  --part-id zs32_right_part001 \
+  --capture-session 20260713_session001 \
+  --group-id group001 \
+  --hand right \
+  --front-image /absolute/path/right_front.png \
+  --front-left-image /absolute/path/right_front_left.png \
+  --front-right-image /absolute/path/right_front_right.png \
+  --back-image /absolute/path/right_back.png \
+  --back-left-image /absolute/path/right_back_left.png \
+  --back-right-image /absolute/path/right_back_right.png \
+  --template-model-dir results/zs32_template_gate/v1 \
+  --quality-csv results/zs32_fusion/part001/quality_gate.csv \
+  --registration-csv results/zs32_fusion/part001/registration.csv \
+  --geometry-csv results/zs32_fusion/part001/geometry.csv \
+  --threshold-artifact results/zs32_fusion/right_calibration_v1/thresholds.json \
+  --output-dir results/zs32_runtime/part001_fused
+```
+
+该模式在进程内调用 Stage 18 的 `--profile zs32-right`。只有右手 36 条必需证据、版本、双阈值、文件与哈希
+全部一致且 Stage 18 审计标记 `inspection_complete=true` 时，才可能输出 OK；否则保持 REVIEW、RETAKE、
+INVALID_CAPTURE 或相应 NG。正式 `fuse` 不接受旧 `template_match.csv` 替代本次在线模板门禁；两个 strict
+profile 都会忽略 CSV 自报的 `evidence_level`，按 locked `score/low/high` 重新计算证据等级。原有
+`--profile zs32` 双手 72 组合同保持不变。
+
 ### ZS32 六视角严格融合
 
 ZS32 上线配置固定为 `config/fusion/zs32_six_view.json`。传统整视角模板匹配是第一个产品检测项目：

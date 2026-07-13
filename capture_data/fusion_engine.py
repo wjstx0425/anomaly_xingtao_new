@@ -39,6 +39,7 @@ DEFAULT_STATUS_BY_BRANCH = {
     "yolo": "NG_YOLO",
 }
 GATE_BRANCHES = {"quality", "quality_gate", "registration"}
+STRICT_ZS32_PROFILES = {"zs32_six_view_v1", "zs32_right_six_view_v1"}
 BRANCH_FIELDNAMES = [
     "part_id",
     "side",
@@ -133,9 +134,9 @@ class BranchPrediction:
     detections: tuple[dict[str, Any], ...] | None = None
 
 
-def classify_evidence(prediction: BranchPrediction) -> EvidenceLevel:
-    """Classify a branch prediction using explicit, dual, or legacy evidence semantics."""
-    if prediction.evidence_level is not None:
+def classify_evidence(prediction: BranchPrediction, *, use_explicit_level: bool = True) -> EvidenceLevel:
+    """Classify evidence, optionally ignoring an untrusted declared evidence band."""
+    if use_explicit_level and prediction.evidence_level is not None:
         return EvidenceLevel(prediction.evidence_level.upper())
     low, high, score = prediction.low_threshold, prediction.high_threshold, prediction.score
     if low is None and high is None:
@@ -643,24 +644,18 @@ def _classified_triggers(
         if prediction.branch in GATE_BRANCHES:
             continue
         reason = None
-        if strict_zs32 and prediction.status is not None and prediction.status.upper() == "SUSPECT":
+        try:
+            level = classify_evidence(prediction, use_explicit_level=not strict_zs32)
+        except (ValueError, TypeError):
+            if strict_zs32:
+                continue
+            raise
+        strict_suspect = strict_zs32 and prediction.status is not None and prediction.status.upper() == "SUSPECT"
+        if strict_suspect and (level is EvidenceLevel.CLEAR or prediction.score is None):
             level = EvidenceLevel.GRAY
-        else:
-            try:
-                level = classify_evidence(prediction)
-            except (ValueError, TypeError):
-                if strict_zs32:
-                    continue
-                raise
-            if (
-                level is EvidenceLevel.CLEAR
-                and suspect_enabled
-                and _is_near_threshold(prediction, near_threshold_ratio)
-            ):
-                level = EvidenceLevel.GRAY
-                reason = (
-                    f"{prediction.branch} near threshold score={prediction.score:g} threshold={prediction.threshold:g}"
-                )
+        if level is EvidenceLevel.CLEAR and suspect_enabled and _is_near_threshold(prediction, near_threshold_ratio):
+            level = EvidenceLevel.GRAY
+            reason = f"{prediction.branch} near threshold score={prediction.score:g} threshold={prediction.threshold:g}"
         if level is not EvidenceLevel.CLEAR:
             raw_classified.append((prediction, level, reason))
     base_id_counts: dict[str, int] = defaultdict(int)
@@ -849,14 +844,22 @@ def _strict_contract_faults(
     return sorted(set(invalid)), sorted(set(review))
 
 
-def _classification_faults(predictions: Sequence[BranchPrediction]) -> list[str]:
+def _classification_faults(predictions: Sequence[BranchPrediction], *, strict_zs32: bool = False) -> list[str]:
     """Return malformed evidence faults without hiding other valid STRONG evidence."""
     faults = []
     for prediction in predictions:
         if prediction.branch in GATE_BRANCHES:
             continue
         try:
-            classify_evidence(prediction)
+            authoritative = classify_evidence(prediction, use_explicit_level=not strict_zs32)
+            if strict_zs32 and prediction.evidence_level is not None:
+                declared = EvidenceLevel(prediction.evidence_level.upper())
+                if declared is not authoritative:
+                    evidence_id = f"{prediction.view or 'unknown'}:{prediction.branch}"
+                    faults.append(
+                        f"evidence_level mismatch for {evidence_id}: declared {declared.value}, "
+                        f"locked thresholds compute {authoritative.value}",
+                    )
         except (ValueError, TypeError) as error:
             faults.append(str(error))
     return faults
@@ -932,7 +935,7 @@ def fuse_part_predictions(
 ) -> FusedDecision:
     """Fuse branch predictions into a fail-closed decision while retaining every trigger."""
     fusion_config = config or {}
-    strict_zs32 = _clean_text(fusion_config.get("profile")) == "zs32_six_view_v1"
+    strict_zs32 = _clean_text(fusion_config.get("profile")) in STRICT_ZS32_PROFILES
     missing = [item for item in missing_required if item]
     classified_triggers = _classified_triggers(predictions, fusion_config, strict_zs32=strict_zs32)
     gate_triggers = _nonpass_gate_triggers(predictions, fusion_config, strict_zs32=strict_zs32)
@@ -944,7 +947,7 @@ def fuse_part_predictions(
         contract_invalid, contract_review = _strict_contract_faults(predictions, fusion_config)
         invalid_faults.extend(contract_invalid)
         review_faults.extend(contract_review)
-        review_faults.extend(_classification_faults(predictions))
+        review_faults.extend(_classification_faults(predictions, strict_zs32=True))
         invalid_faults.extend(f"missing required input: {item}" for item in missing)
         invalid_faults.extend(
             f"missing required view: {item}" for item in missing_required_views(predictions, fusion_config)

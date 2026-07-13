@@ -29,6 +29,11 @@ from capture_data.fusion_calibration import (  # noqa: E402
 from capture_data.inspection_audit import build_part_audit, sha256_file, write_part_audit  # noqa: E402
 
 ZS32_PROFILE_PATH = REPO_ROOT / "config/fusion/zs32_six_view.json"
+ZS32_RIGHT_PROFILE_PATH = REPO_ROOT / "config/fusion/zs32_right_six_view.json"
+STRICT_PROFILE_PATHS = {
+    "zs32": ZS32_PROFILE_PATH,
+    "zs32-right": ZS32_RIGHT_PROFILE_PATH,
+}
 
 
 class DiagnosticGenerationError(RuntimeError):
@@ -57,7 +62,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Additional branch CSV as BRANCH=PATH, e.g. yolo=results/yolo_predictions.csv.",
     )
     parser.add_argument("--fusion-config", type=Path, help="YAML/JSON fusion config.")
-    parser.add_argument("--profile", choices=("zs32",), help="Named strict fusion profile.")
+    parser.add_argument("--profile", choices=tuple(STRICT_PROFILE_PATHS), help="Named strict fusion profile.")
     parser.add_argument(
         "--threshold-artifact",
         type=Path,
@@ -81,7 +86,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _fusion_config_path(args: argparse.Namespace) -> Path | None:
     """Resolve a named profile without silently merging another config."""
-    profile_path = ZS32_PROFILE_PATH if args.profile == "zs32" else None
+    profile_path = STRICT_PROFILE_PATHS.get(args.profile)
     if (
         profile_path is not None
         and args.fusion_config is not None
@@ -127,10 +132,12 @@ def _profile_threshold_contract(profile_path: Path) -> tuple[str, set[tuple[str,
 
 def _load_threshold_artifact(  # noqa: C901
     path: Path | None,
+    *,
+    profile_path: Path = ZS32_PROFILE_PATH,
 ) -> tuple[dict[tuple[str, str, str, str, str], dict[str, Any]], dict[str, Any]]:
     """Validate and load a locked stage-31 threshold deployment artifact."""
     if path is None:
-        msg = "--threshold-artifact is required for --profile zs32"
+        msg = "--threshold-artifact is required for a strict ZS32 profile"
         raise ValueError(msg)
     if not path.is_file():
         msg = f"threshold artifact does not exist: {path}"
@@ -153,7 +160,7 @@ def _load_threshold_artifact(  # noqa: C901
     if payload.get("calibration_valid") is not True:
         msg = "threshold artifact calibration_valid must be true"
         raise ValueError(msg)
-    profile_sha256, expected_groups = _profile_threshold_contract(ZS32_PROFILE_PATH)
+    profile_sha256, expected_groups = _profile_threshold_contract(profile_path)
     if payload.get("profile_sha256") != profile_sha256 or payload.get("config_sha256") != profile_sha256:
         msg = "threshold artifact profile/config SHA256 does not match the current ZS32 config"
         raise ValueError(msg)
@@ -610,8 +617,9 @@ def _publish_generation(
 
 def run_fusion(args: argparse.Namespace) -> list[fusion.FusedDecision]:
     """Run CSV-based fusion and write branch/fused reports."""
-    config = fusion.load_fusion_config(_fusion_config_path(args))
-    strict_zs32 = args.profile == "zs32"
+    profile_path = _fusion_config_path(args)
+    config = fusion.load_fusion_config(profile_path)
+    strict_zs32 = args.profile in STRICT_PROFILE_PATHS
     _validate_generation_target(args, strict_zs32=strict_zs32)
     warnings: list[str] = []
     threshold_by_group: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
@@ -619,7 +627,10 @@ def run_fusion(args: argparse.Namespace) -> list[fusion.FusedDecision]:
     threshold_faults: list[str] = []
     if strict_zs32:
         try:
-            threshold_by_group, threshold_metadata = _load_threshold_artifact(args.threshold_artifact)
+            threshold_by_group, threshold_metadata = _load_threshold_artifact(
+                args.threshold_artifact,
+                profile_path=profile_path,
+            )
         except (OSError, TypeError, ValueError) as error:
             reason = f"threshold artifact validation failed: {error}"
             threshold_faults.append(reason)

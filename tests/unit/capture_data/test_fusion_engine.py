@@ -1460,6 +1460,54 @@ def test_strict_profile_maps_suspect_input_to_review() -> None:
     assert [item.level for item in decision.triggered_evidence] == ["GRAY"]
 
 
+def test_right_strict_profile_recomputes_declared_clear_from_locked_thresholds() -> None:
+    """A forged CLEAR band must not hide a strong score in the right-only profile."""
+    fusion = load_fusion_module()
+    config = _strict_zs32_config()
+    config["profile"] = "zs32_right_six_view_v1"
+    config["identity"]["profile"] = "zs32_right_six_view_v1"
+    config["identity"]["allowed_hands"] = ["right"]
+    config["expected_versions"] = [item for item in config["expected_versions"] if item["hand"] == "right"]
+    rows = [
+        fusion.BranchPrediction(**{**row.__dict__, "profile": "zs32_right_six_view_v1"})
+        for row in _strict_zs32_rows(fusion, "p1", hand="right")
+    ]
+    target = next(index for index, row in enumerate(rows) if row.branch == "anomaly_front")
+    rows[target] = fusion.BranchPrediction(
+        **{
+            **rows[target].__dict__,
+            "score": 999.0,
+            "pred_label": 0,
+            "evidence_level": "CLEAR",
+        },
+    )
+
+    decision = fusion.fuse_part_predictions("p1", rows, config=config)
+
+    assert decision.final_status == "NG_ANOMALY"
+    assert decision.triggered_evidence[0].level == "STRONG"
+
+
+def test_right_strict_profile_rejects_wrong_version() -> None:
+    """The right-only profile must enforce the same version contract as the full profile."""
+    fusion = load_fusion_module()
+    config = _strict_zs32_config()
+    config["profile"] = "zs32_right_six_view_v1"
+    config["identity"]["profile"] = "zs32_right_six_view_v1"
+    config["identity"]["allowed_hands"] = ["right"]
+    config["expected_versions"] = [item for item in config["expected_versions"] if item["hand"] == "right"]
+    rows = [
+        fusion.BranchPrediction(**{**row.__dict__, "profile": "zs32_right_six_view_v1"})
+        for row in _strict_zs32_rows(fusion, "p1", hand="right")
+    ]
+    rows[0] = fusion.BranchPrediction(**{**rows[0].__dict__, "model_version": "wrong-model"})
+
+    decision = fusion.fuse_part_predictions("p1", rows, config=config)
+
+    assert decision.final_status == "REVIEW"
+    assert "model_version mismatch" in decision.reason
+
+
 def test_load_branch_csvs_normalize_geometry_and_anomaly_predictions(tmp_path: Path) -> None:
     """Existing geometry/anomaly CSV columns should become unified branch rows."""
     fusion = load_fusion_module()

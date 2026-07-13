@@ -1,5 +1,16 @@
 # AGENTS Memory
 
+## ZS32 right-hand unified PatchCore + YOLO runtime (2026-07-13)
+
+- Use `pipeline/32_run_zs32_multimodel_inference.py` as the single entrypoint. `infer` preserves continuous evidence and remains REVIEW; `fuse` calls strict Stage 18 only when all required external branches and locked thresholds are supplied.
+- Runtime code is `capture_data/zs32_model_runtime.py`; pinned local assets are declared in `config/fusion/zs32_runtime_models.json` with SHA-256. It loads six right-hand PatchCore checkpoints from `results/six_view_roi_fixed_seed42` and YOLO `best.pt` from `/home/yunjing/ultralytics-c789/final_n640_p1_seed42/weights`.
+- PatchCore and YOLO must keep separate ROI configs. YOLO `candidate_conf=0.001` is an evidence collection floor; no legacy single deploy threshold is authoritative for final fusion.
+- Template matching, when configured, runs on PatchCore ROI crops before model backends and short-circuits on any non-PASS result.
+- `config/fusion/zs32_right_six_view.json` is the right-only 36-group strict contract exposed as `--profile zs32-right`. The original `config/fusion/zs32_six_view.json` remains the two-hand 72-group contract.
+- No final OK is allowed without a valid Stage-31 artifact and complete template/quality/registration/PatchCore/YOLO/geometry evidence. Missing inputs fail closed to REVIEW or the appropriate non-release state.
+- Both full and right-only strict profiles recompute evidence bands from locked continuous thresholds; never trust a CSV `evidence_level` over `score/low/high`. Stage 32 `fuse` requires the online template model and does not accept an old template CSV as a gate replacement.
+- Real end-to-end CPU smoke output `/tmp/zs32-stage32-real-smoke` confirmed 6 PatchCore + 6 YOLO evidence rows, 12 calibration rows, all 12 overlays, no runtime errors, and the expected REVIEW/incomplete result without locked fusion inputs.
+
 ## ZS32 PatchCore left/right per-view ROI dataset (2026-07-13, design approved)
 
 - Add a standalone stage 30 tool for cropping `dataset/right` and `dataset/left` into a reusable PatchCore tree under `dataset/zs32_patchcore_roi`; do not extend stage 29 YOLO behavior or crop dynamically inside training.

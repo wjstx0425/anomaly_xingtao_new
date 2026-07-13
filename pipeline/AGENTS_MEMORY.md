@@ -35,3 +35,20 @@
 - Strict fusion now requires six branches per view, including `template_match`; the left/right contract is 72 exact groups. `template_match` is ordinary anomaly evidence, not a quality/registration RETAKE gate.
 - `/tmp/zs32-template-gate-smoke-*` models are reduced-width smoke artifacts only and must not be deployed.
 - Local merge verification after combining Stage 30 PatchCore and template-first fusion: `333 passed, 1 warning`; the backup branch is `backup/main-before-zs32-fusion-20260713`, and nothing was pushed to GitHub.
+
+## ZS32 right-hand unified multi-model runtime (2026-07-13)
+
+- Unified entrypoint: `pipeline/32_run_zs32_multimodel_inference.py`; core runtime: `capture_data/zs32_model_runtime.py`.
+- Checked-in model bundle: `config/fusion/zs32_runtime_models.json`. It pins six checkpoints below `results/six_view_roi_fixed_seed42` and YOLO `/home/yunjing/ultralytics-c789/final_n640_p1_seed42/weights/best.pt` by SHA-256. The assets are local/ignored and must exist on the deployment host.
+- Current weights are right-hand only. Reject left requests before model loading; do not reuse the right models or YOLO ROI for left parts.
+- PatchCore and YOLO use different ROI files. PatchCore runs once per canonical view with one persistent model/Engine per view; YOLO runs one six-image batch with `candidate_conf=0.001`, which is only a candidate acquisition floor.
+- `infer` writes `patchcore.csv`, `yolo.csv`, heatmaps/box overlays, crop files, hashes, `runtime_manifest.json`, and optional Stage-31-compatible `calibration_rows.csv`. Without locked dual thresholds it must remain REVIEW/incomplete.
+- `--template-model-dir` uses the PatchCore ROI and runs before any PatchCore/YOLO backend. A non-PASS result short-circuits and publishes no fabricated downstream evidence.
+- Right-only strict profile: `config/fusion/zs32_right_six_view.json`, named Stage-18 profile `zs32-right`, exactly 36 versioned groups. Keep the original `zs32` two-hand 72-group profile unchanged.
+- `fuse` requires the locked right-profile Stage-31 artifact plus template, quality, registration, geometry, PatchCore, and YOLO evidence. Only Stage 18 may turn the runtime result into a complete OK.
+- Production `fuse` deliberately requires `--template-model-dir`; an old `template_match.csv` cannot replace the online first-stage gate or bypass current-image binding.
+- Strict fusion profiles are `zs32_six_view_v1` and `zs32_right_six_view_v1`. For both, `fusion_engine` ignores CSV-declared `evidence_level` and recomputes CLEAR/GRAY/STRONG from the continuous score and locked low/high thresholds, preventing forged CLEAR evidence from overriding a strong score.
+- YOLO config maps checkpoint class `item` to deployment semantic `defect`; detection evidence retains both `class_name=defect` and `checkpoint_class_name=item`.
+- Backend initialization failures publish per-view error JSON and a REVIEW/incomplete generation instead of exiting without diagnostics.
+- Final related verification after implementation and safety review fixes: 267 tests passed; config assets and the 36 runtime/profile model groups aligned; compileall, full Ruff on new files, focused F/I on touched legacy files, JSON check, CLI help, and `git diff --check` passed.
+- Real CPU smoke used all six `group001` normal images from session `20260711_165347_078120` and wrote `/tmp/zs32-stage32-real-smoke`: 6 PatchCore rows, 6 YOLO rows, 12 calibration rows, 6 heatmaps, and 6 YOLO overlays with no runtime errors. It correctly remained REVIEW because no threshold/template/quality/registration/geometry bundle was supplied. Observed PatchCore scores were `0.39345, 0.49116, 0.38902, 0.32278, 0.30612, 0.10668`; YOLO retained low-confidence candidates in the first three views and explicit empty lists for the last three.

@@ -190,6 +190,8 @@ def _downstream_mapping(result: object) -> dict[str, Any]:
 def template_results_to_branch_rows(
     request: InspectionRequest,
     template_results: tuple[dict[str, Any], ...],
+    *,
+    profile: str = "zs32_six_view_v1",
 ) -> list[dict[str, Any]]:
     """Convert six validated gate results into strict Stage-18 branch rows."""
     results_by_view = {str(result.get("view", "")): result for result in template_results}
@@ -216,7 +218,7 @@ def template_results_to_branch_rows(
                 "view": view,
                 "hand": request.hand,
                 "product": "ZS32",
-                "profile": "zs32_six_view_v1",
+                "profile": profile,
                 "capture_session": request.capture_session,
                 "group_id": request.group_id,
                 "slot_id": None,
@@ -251,9 +253,11 @@ def write_template_match_csv(
     request: InspectionRequest,
     template_results: tuple[dict[str, Any], ...],
     output_csv: Path,
+    *,
+    profile: str = "zs32_six_view_v1",
 ) -> Path:
     """Atomically publish strict template evidence for Stage 18."""
-    rows = template_results_to_branch_rows(request, template_results)
+    rows = template_results_to_branch_rows(request, template_results, profile=profile)
     output_csv.parent.mkdir(parents=True, exist_ok=True)
     temporary = output_csv.with_suffix(output_csv.suffix + ".tmp")
     with temporary.open("w", encoding="utf-8", newline="") as file:
