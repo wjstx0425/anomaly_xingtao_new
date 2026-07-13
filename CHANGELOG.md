@@ -24,6 +24,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Fixed
 
 - 🐞 **data**: Reject negative `--normal-test-ratio` values before normal/normal_test splitting.
+- 🐞 **pipeline**: Bind strict ZS32 product/hand/view/branch identities and four-version evidence to atomic, non-releasable audit generations while preserving legacy C789 `SUSPECT` and immutable STRONG NG decisions.
 - 🐞 **pipeline**: Avoid ambiguous basename/stem fusion matches and keep invalid missing-prediction inputs out of invalid reject success counts.
 
 ## [v2.4.2] - 2026-05-15

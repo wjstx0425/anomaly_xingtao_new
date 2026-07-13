@@ -639,7 +639,8 @@ def _strict_contract_faults(
     expected_profile = _clean_text(identity_config.get("profile"))
     allowed_hands = _string_sequence(
         identity_config.get(
-            "allowed_hands", identity_config.get("required_hands", identity_config.get("required_hand"))
+            "allowed_hands",
+            identity_config.get("required_hands", identity_config.get("required_hand")),
         ),
     )
     required_side = _clean_text(identity_config.get("required_side"))
@@ -669,9 +670,11 @@ def _strict_contract_faults(
             review.append(f"duplicate expected_versions identity: {':'.join(identity)}")
             continue
         expected_all[identity] = item
-        for field in STRICT_VERSION_FIELDS:
-            if _clean_text(item.get(field)) is None:
-                review.append(f"missing {field} expectation for {':'.join(identity)}")
+        review.extend(
+            f"missing {field} expectation for {':'.join(identity)}"
+            for field in STRICT_VERSION_FIELDS
+            if _clean_text(item.get(field)) is None
+        )
 
     part_hands = sorted({prediction.hand or "" for prediction in predictions})
     if len(part_hands) != 1:
@@ -680,9 +683,11 @@ def _strict_contract_faults(
     if part_hand not in allowed_hands:
         invalid.append(f"unexpected hand for part: {part_hand or 'missing'}")
     expected = {identity: value for identity, value in expected_all.items() if identity[0] == part_hand}
-    for hand in allowed_hands:
-        if not any(identity[0] == hand for identity in expected_all):
-            review.append(f"missing expected_versions hand contract: {hand}")
+    review.extend(
+        f"missing expected_versions hand contract: {hand}"
+        for hand in allowed_hands
+        if not any(identity[0] == hand for identity in expected_all)
+    )
 
     observed: dict[tuple[str, str, str, str], list[BranchPrediction]] = defaultdict(list)
     for prediction in predictions:
@@ -708,8 +713,9 @@ def _strict_contract_faults(
                 if expected_value is not None and actual_value != expected_value:
                     review.append(f"{field} mismatch for {':'.join(identity)}")
     if expected:
-        for identity in observed.keys() - expected.keys():
-            invalid.append(f"unexpected strict identity: {':'.join(identity)}")
+        invalid.extend(
+            f"unexpected strict identity: {':'.join(identity)}" for identity in observed.keys() - expected.keys()
+        )
 
     required_views = {identity[2] for identity in expected}
     for field in ("source_path", "source_hash", "manifest_identity"):
@@ -720,9 +726,11 @@ def _strict_contract_faults(
             value = _clean_text(getattr(prediction, field))
             if value is not None:
                 views_by_value[value].add(str(prediction.view))
-        for views in views_by_value.values():
-            if len(views) > 1:
-                invalid.append(f"reused {field} across required views: {', '.join(sorted(views))}")
+        invalid.extend(
+            f"reused {field} across required views: {', '.join(sorted(views))}"
+            for views in views_by_value.values()
+            if len(views) > 1
+        )
 
     return sorted(set(invalid)), sorted(set(review))
 

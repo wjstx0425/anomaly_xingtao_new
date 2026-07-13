@@ -277,6 +277,32 @@ def test_require_complete_evidence_forces_review_even_with_strong_trigger(tmp_pa
     assert any(trigger.evidence_id == "system:incomplete_evidence" for trigger in decisions[0].triggered_evidence)
 
 
+def test_capture_fault_blocks_release_without_downgrading_strong_ng(tmp_path: Path) -> None:
+    """A duplicate capture remains incomplete but cannot erase machine STRONG evidence."""
+    stage18 = _load_stage18("pipeline_fuse_inspection_duplicate_source_strong")
+    predictions_csv = _write_complete_predictions(
+        tmp_path,
+        gray_evidence=False,
+        strong_evidence=True,
+        fault="duplicate_source_hash",
+    )
+    output_dir = tmp_path / "out"
+    args = stage18.build_parser().parse_args(
+        ["--profile", "zs32", "--branch-csv", f"normalized={predictions_csv}", "--output-dir", str(output_dir)],
+    )
+
+    decisions = stage18.run_fusion(args)
+
+    assert decisions[0].final_status == "NG_ANOMALY"
+    assert decisions[0].final_label == 1
+    assert decisions[0].triggered_branch == "anomaly_front"
+    audit = json.loads((output_dir / "audit/part001.json").read_text(encoding="utf-8"))
+    assert audit["machine_status"] == "NG_ANOMALY"
+    assert audit["inspection_complete"] is False
+    assert any(trigger["evidence_id"] == "system:identity_fault" for trigger in audit["triggers"])
+    assert audit["released_status"] is None
+
+
 def test_zs32_always_requires_evidence_without_optional_flag(tmp_path: Path) -> None:
     """The strict profile cannot bypass evidence completeness through CLI omission."""
     stage18 = _load_stage18("pipeline_fuse_inspection_mandatory_evidence")

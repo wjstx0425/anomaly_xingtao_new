@@ -6,10 +6,12 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import shutil
 import tempfile
 from collections import defaultdict
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from io import StringIO
 from math import ceil, isfinite
@@ -17,7 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping, Sequence
+    from collections.abc import Iterable, Sequence
 
 GROUP_FIELDS = ("hand", "view", "branch", "model_version", "roi_version")
 ZS32_REQUIRED_VIEWS = ("front", "front_left", "front_right", "back", "back_left", "back_right")
@@ -534,6 +536,7 @@ def run_calibration(
     eval_split: str = "test",
     required_views: Sequence[str] | None = None,
     required_groups: Sequence[GroupKey] = (),
+    deployment_contract: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Fit thresholds, evaluate parts, and atomically publish offline reports.
 
@@ -546,6 +549,8 @@ def run_calibration(
         eval_split (str): Held-out split used exclusively for reported metrics.
         required_views (Sequence[str] | None): Views required in both splits; defaults to all six ZS32 views.
         required_groups (Sequence[GroupKey]): Exact versioned groups required for fit and evaluation.
+        deployment_contract (Mapping[str, Any] | None): Exact strict-profile identity/version contract consumed by
+            stage 18, including the source profile hash.
 
     Returns:
         dict[str, Any]: Metrics payload written to ``calibration_metrics.json``.
@@ -616,6 +621,16 @@ def run_calibration(
         "invalid_threshold_groups": [list(key) for key in invalid_threshold_groups],
         **metrics,
     }
+    serialized_thresholds = [asdict(threshold) for threshold in thresholds]
+    canonical_thresholds = json.dumps(serialized_thresholds, separators=(",", ":"), sort_keys=True).encode()
+    expected_versions = [] if deployment_contract is None else deployment_contract.get("expected_versions", [])
+    threshold_versions = sorted(
+        {
+            str(record["threshold_version"])
+            for record in expected_versions
+            if isinstance(record, Mapping) and record.get("threshold_version")
+        },
+    )
     threshold_payload = {
         "target_recall": target_recall,
         "normal_quantile": normal_quantile,
@@ -623,7 +638,10 @@ def run_calibration(
         "evaluation_split": eval_split,
         "required_views": list(effective_required_views),
         "required_groups": [list(_normalize_group_key(value)) for value in effective_required_groups],
-        "thresholds": [asdict(threshold) for threshold in thresholds],
+        "thresholds": serialized_thresholds,
+        "threshold_records_sha256": hashlib.sha256(canonical_thresholds).hexdigest(),
+        "threshold_versions": threshold_versions,
+        "deployment_contract": None if deployment_contract is None else dict(deployment_contract),
     }
     reports = {
         "thresholds.json": json.dumps(threshold_payload, indent=2, sort_keys=True) + "\n",

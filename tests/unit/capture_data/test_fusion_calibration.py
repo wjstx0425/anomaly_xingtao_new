@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 from pathlib import Path
 
@@ -257,6 +258,56 @@ def test_run_calibration_atomically_writes_all_reports(tmp_path: Path) -> None:
     assert "production escapes" in summary
 
 
+def test_threshold_report_binds_exact_stage18_deployment_contract(tmp_path: Path) -> None:
+    """Stage 30 artifacts must identify the strict profile and immutable threshold records."""
+    input_csv = tmp_path / "calibration.csv"
+    fieldnames = list(_row("part", raw_score=0.1, gt_label=0))
+    with input_csv.open("w", encoding="utf-8", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(
+            [
+                _row("normal", raw_score=0.1, gt_label=0),
+                _row("defect", raw_score=0.8, gt_label=1),
+                _row("test-normal", raw_score=0.1, gt_label=0, split="test"),
+                _row("test-defect", raw_score=0.8, gt_label=1, split="test"),
+            ],
+        )
+    expected_versions = [
+        {
+            "hand": "left",
+            "side": "zs32",
+            "view": "front",
+            "branch": "anomaly",
+            "model_version": "model-v1",
+            "threshold_version": "threshold-v7",
+            "roi_version": "roi-v1",
+            "template_version": "template-v3",
+        },
+    ]
+    deployment_contract = {
+        "product": "ZS32",
+        "profile": "zs32_six_view_v1",
+        "allowed_hands": ["left", "right"],
+        "required_side": "zs32",
+        "config_sha256": "a" * 64,
+        "expected_versions": expected_versions,
+    }
+
+    run_calibration(
+        input_csv,
+        tmp_path / "reports",
+        required_views=("front",),
+        deployment_contract=deployment_contract,
+    )
+
+    payload = json.loads((tmp_path / "reports/thresholds.json").read_text(encoding="utf-8"))
+    assert payload["deployment_contract"] == deployment_contract
+    assert payload["threshold_versions"] == ["threshold-v7"]
+    canonical = json.dumps(payload["thresholds"], separators=(",", ":"), sort_keys=True).encode()
+    assert payload["threshold_records_sha256"] == hashlib.sha256(canonical).hexdigest()
+
+
 def test_fit_uses_only_selected_split_without_test_leakage() -> None:
     """Held-out defect scores must not influence fitted deployment thresholds."""
     rows = [
@@ -406,7 +457,10 @@ def test_required_group_for_absent_evaluation_hand_invalidates_contract() -> Non
     metrics = part_level_metrics(rows, thresholds, required_groups=(required_group,))
 
     assert metrics["overall"]["calibration_valid"] is False
+    assert metrics["overall"]["escape_rate"] is None
     assert metrics["overall"]["recall"] is None
+    assert metrics["overall"]["normal_reject_rate"] is None
+    assert metrics["overall"]["review_rate"] is None
     assert metrics["overall"]["escape_rate_95_upper"] is None
     assert metrics["missing_required_groups"] == [list(required_group)]
 

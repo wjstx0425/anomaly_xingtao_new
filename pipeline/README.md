@@ -1641,7 +1641,7 @@ train/val/test、`sample_id` 和空标签；跨越 ROI 边界的框会裁到边�
 
 ZS32 上线配置固定为 `config/fusion/zs32_six_view.json`。先用按物理 `part_id` 划分的
 calibration/test 分数离线拟合各 `hand/view/branch/model_version/roi_version` 组的双阈值；stage 30
-只写报告，不会原地修改上线配置：
+默认读取这一份 strict profile，自动要求其中 60 个精确的左/右手分支组，但不会原地修改上线配置：
 
 ```bash
 uv run python pipeline/30_calibrate_zs32_fusion.py \
@@ -1654,7 +1654,11 @@ uv run python pipeline/30_calibrate_zs32_fusion.py \
 校准输入字段为 `part_id,hand,view,branch,raw_score,gt_label,split,model_version,roi_version`。
 输出目录包含 `thresholds.json`、`thresholds.csv`、`calibration_metrics.json` 和
 `calibration_summary.md`；阈值记录同时给出 `low_threshold`、`high_threshold`、normal/defect 样本数和
-`status`，指标按物理工件报告 escape、recall、review、normal reject 及零逃逸的单侧 95% 上界。
+`status`。`thresholds.json` 还写入 stage 18 共享的 product/profile/hand/side 身份、全部
+`expected_versions`、profile SHA-256、`threshold_versions` 与阈值记录 SHA-256；任一必需组缺失两类
+标定数据都会保持 `insufficient_data`/`calibration_valid=false`。标定无效时，`escape_rate`、recall、
+normal reject rate 和 review rate 等安全率全部为 `null`；未经合同验证的原始观测率只保留为
+`diagnostic_observed_*`，不可当作上线指标。
 
 生产融合命令为：
 
@@ -1672,11 +1676,12 @@ uv run python pipeline/18_fuse_inspection_results.py \
   --branch-csv anomaly_back_right=results/zs32_fusion/anomaly_back_right.csv \
   --branch-csv yolo=results/zs32_fusion/yolo.csv \
   --branch-csv geometry=results/zs32_fusion/geometry.csv \
-  --require-complete-evidence \
   --output-dir results/zs32_fusion/fused_v1
 ```
 
-各 branch CSV 会标准化为 `branch_predictions.csv`，字段含 `part_id`、`side`、`view`、`slot_id`、
+严格 profile 不需要额外开关就会强制源图和证据文件完整；`--require-complete-evidence` 仅保留给兼容流程。
+各 branch CSV 会标准化为 `branch_predictions.csv`，字段含 `part_id`、`product`、`profile`、`hand`、
+`side`、`view`、`slot_id`、`source_hash`、`manifest_identity`、
 `branch`、`pred_label`、连续 `score`、旧单阈值 `threshold`、`low_threshold`、`high_threshold`、
 `evidence_level`、`defect_type`、`evidence_type`、`gt_defect_type`、`reason`、`source_path`、
 `evidence_path`、`status` 以及 `model_version`、`threshold_version`、`roi_version`、
@@ -1690,6 +1695,8 @@ uv run python pipeline/18_fuse_inspection_results.py \
 版本一致、证据文件完整且全部为 CLEAR 才能自动 `OK`；任一 STRONG 直接进入对应 `NG_*`，任一 GRAY、
 缺 branch 或版本不一致进入 `REVIEW`，采集身份/完整性错误进入 `INVALID_CAPTURE`，质量或配准失败进入
 `RETAKE`。YOLO 无框只是该 YOLO 行的 CLEAR 证据，不能抵消其它视角或分支的 GRAY/STRONG。
+一旦已有合法 STRONG，缺证据、版本/运行故障或采集错误只会追加 system trigger、使
+`inspection_complete=false` 并阻止发布，不会把不可变的机器 `NG_*` 降为 REVIEW/INVALID_CAPTURE。
 
 正面三个视角只能产生 `FRONT_CLEAR`、`FRONT_REVIEW` 或 `FRONT_NG`，此时 `final_status` 仍为空；
 翻面后，同一 `part_id` 的背面三个视角产生对应 `BACK_*`，仅 `FRONT_CLEAR + BACK_CLEAR` 能组合为
@@ -1701,6 +1708,11 @@ uv run python pipeline/18_fuse_inspection_results.py \
 机器结果不会被人工结论覆盖；初始 `review.status=PENDING`，`review_status=null` 且
 `released_status=null`。人工复检必须查看原图、热图/检测框/几何 overlay 和所有触发原因，再由独立发布
 流程填写复检与放行状态。
+
+stage 18 把 `branch_predictions.csv`、`fused_predictions.csv`、`summary.md` 和所有 audit JSON 先写入唯一
+sibling staging 目录，只在哈希、序列化和所有写入完成后执行一次目录 rename。已存在的
+`--output-dir` 会直接拒绝；任一发布失败都不会留下可消费的 OK 代际。严格输入的双阈值或
+`evidence_level` 畸形时，CLI 会先发布不可放行的诊断代际，然后以非零状态退出。
 
 `pipeline/18_fuse_inspection_results.py` 是新的 fail-closed 融合入口。它不会覆盖
 `pipeline/12_geometry_eval.py` 生成的旧版 `fused_predictions.csv`，而是把现有

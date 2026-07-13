@@ -216,11 +216,12 @@ def _apply_stage_faults(
     """Apply strict stage faults without downgrading a machine NG to REVIEW."""
     if invalid_faults:
         reason = "; ".join(invalid_faults)
+        immutable_ng = decision.final_status.startswith("NG_")
         return replace(
             decision,
-            final_status="INVALID_CAPTURE",
-            final_label=None,
-            triggered_branch="system",
+            final_status=decision.final_status if immutable_ng else "INVALID_CAPTURE",
+            final_label=decision.final_label if immutable_ng else None,
+            triggered_branch=decision.triggered_branch if immutable_ng else "system",
             reason=f"{decision.reason}; {reason}",
             triggered_evidence=(*decision.triggered_evidence, _system_trigger("system:identity_fault", reason)),
         )

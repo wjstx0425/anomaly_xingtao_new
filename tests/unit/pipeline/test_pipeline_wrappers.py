@@ -453,6 +453,32 @@ def test_calibrate_zs32_fusion_parser_accepts_grouped_calibration_options(tmp_pa
     assert args.required_group == [("left", "front", "anomaly_front", "model-v1", "roi-v1")]
 
 
+def test_calibrate_zs32_fusion_loads_stage18_profile_contract() -> None:
+    """Stage 30 must publish the exact profile identity and four-version gate consumed by stage 18."""
+    wrapper = _load_module("pipeline_calibrate_zs32_contract", "pipeline/30_calibrate_zs32_fusion.py")
+
+    contract = wrapper.load_deployment_contract(wrapper.ZS32_PROFILE_PATH)
+
+    assert contract["product"] == "ZS32"
+    assert contract["profile"] == "zs32_six_view_v1"
+    assert contract["allowed_hands"] == ["left", "right"]
+    assert contract["required_side"] == "zs32"
+    assert len(contract["config_sha256"]) == 64
+    assert len(contract["expected_versions"]) == 60
+    assert {record["threshold_version"] for record in contract["expected_versions"]} == {
+        "zs32-thresholds-2026.07.13",
+    }
+    required_groups = wrapper.required_groups_from_contract(contract)
+    assert len(required_groups) == 60
+    assert (
+        "left",
+        "front",
+        "anomaly_front",
+        "zs32-models-2026.07.13",
+        "zs32-roi-2026.07.12",
+    ) in required_groups
+
+
 @pytest.mark.parametrize(("option", "value"), [("--target-recall", "0"), ("--normal-quantile", "1.1")])
 def test_calibrate_zs32_fusion_parser_rejects_out_of_range_rates(option: str, value: str, tmp_path: Path) -> None:
     """Stage 30 rate arguments must stay in the open-zero, closed-one interval."""
@@ -584,8 +610,7 @@ def test_fuse_inspection_results_loads_yolo_branch_csv_by_default(tmp_path: Path
     branch_csv.write_text(
         "\n".join(
             [
-                "part_id,side,view,slot_id,pred_label,score,threshold,defect_type,reason,"
-                "source_path,evidence_path",
+                "part_id,side,view,slot_id,pred_label,score,threshold,defect_type,reason,source_path,evidence_path",
                 "part_yolo,top,uniform,slot06,1,0.91,0.5,defect,yolo box confidence above threshold,"
                 "part_yolo_top_uniform_slot06.png,evidence/part_yolo.png",
             ],
@@ -1082,7 +1107,9 @@ def test_visualize_traditional_results_writes_contact_sheet(tmp_path: Path) -> N
 
     assert outputs == [tmp_path / "visual" / "surface_review_defect-all_page01.jpg"]
     assert outputs[0].is_file()
-    localization_path = tmp_path / "visual" / "localization" / "surface_review_surface_1_1_slot01_slot01_localization.jpg"
+    localization_path = (
+        tmp_path / "visual" / "localization" / "surface_review_surface_1_1_slot01_slot01_localization.jpg"
+    )
     assert localization_path.is_file()
     localization = cv2.imread(str(localization_path))
     assert localization is not None
