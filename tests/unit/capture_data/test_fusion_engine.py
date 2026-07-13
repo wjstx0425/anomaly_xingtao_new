@@ -37,17 +37,13 @@ def _zs32_config() -> dict[str, object]:
     return {
         "ok_requires": {"required_view_keys": [f"zs32:{view}" for view in ZS32_VIEWS]},
         "required_branches_by_view": {
-            view: ["quality_gate", "registration", f"anomaly_{view}", "yolo", "geometry"]
-            for view in ZS32_VIEWS
+            view: ["quality_gate", "registration", f"anomaly_{view}", "yolo", "geometry"] for view in ZS32_VIEWS
         },
         "branch_order": ["geometry", "yolo", *(f"anomaly_{view}" for view in ZS32_VIEWS)],
         "rules": {
             "geometry": {"status_on_positive": "NG_GEOMETRY"},
             "yolo": {"status_on_positive": "NG_YOLO"},
-            **{
-                f"anomaly_{view}": {"status_on_positive": "NG_ANOMALY"}
-                for view in ZS32_VIEWS
-            },
+            **{f"anomaly_{view}": {"status_on_positive": "NG_ANOMALY"} for view in ZS32_VIEWS},
         },
     }
 
@@ -104,6 +100,59 @@ def _clear_zs32_rows(fusion: ModuleType, part_id: str) -> list[object]:
             ],
         )
     return rows
+
+
+STRICT_VERSIONS = {
+    "model_version": "zs32-models-2026.07.13",
+    "threshold_version": "zs32-thresholds-2026.07.13",
+    "roi_version": "zs32-roi-2026.07.12",
+    "template_version": "zs32-templates-2026.07.13",
+}
+
+
+def _strict_zs32_config() -> dict[str, object]:
+    """Return a complete two-hand production identity/version contract."""
+    config = _zs32_config()
+    config.update(
+        {
+            "profile": "zs32_six_view_v1",
+            "identity": {
+                "product": "ZS32",
+                "profile": "zs32_six_view_v1",
+                "allowed_hands": ["left", "right"],
+                "required_side": "zs32",
+            },
+            "expected_versions": [
+                {
+                    "hand": hand,
+                    "side": "zs32",
+                    "view": view,
+                    "branch": branch,
+                    **STRICT_VERSIONS,
+                }
+                for hand in ("left", "right")
+                for view in ZS32_VIEWS
+                for branch in ("quality_gate", "registration", f"anomaly_{view}", "yolo", "geometry")
+            ],
+        },
+    )
+    return config
+
+
+def _strict_zs32_rows(fusion: ModuleType, part_id: str, *, hand: str = "left") -> list[object]:
+    """Build complete strict rows carrying real deployment identity and versions."""
+    return [
+        fusion.BranchPrediction(
+            **{
+                **row.__dict__,
+                "product": "ZS32",
+                "profile": "zs32_six_view_v1",
+                "hand": hand,
+                **STRICT_VERSIONS,
+            },
+        )
+        for row in _clear_zs32_rows(fusion, part_id)
+    ]
 
 
 def _face_rows(fusion: ModuleType, part_id: str, face: str) -> list[object]:
@@ -447,6 +496,150 @@ def test_all_six_views_and_required_branches_clear_returns_ok() -> None:
     assert decision.final_status == "OK"
     assert decision.final_label == 0
     assert decision.triggered_evidence == ()
+
+
+def test_normalized_csv_preserves_full_zs32_identity_including_hand(tmp_path: Path) -> None:
+    """CSV normalization must retain the identity dimensions used by the strict gate."""
+    fusion = load_fusion_module()
+    csv_path = tmp_path / "identity.csv"
+    csv_path.write_text(
+        "part_id,product,profile,hand,side,view,branch,pred_label,source_hash,manifest_identity\n"
+        "p1,ZS32,zs32_six_view_v1,left,zs32,front,geometry,0,abc123,capture-001\n",
+        encoding="utf-8",
+    )
+
+    prediction = fusion.load_branch_predictions_csv(csv_path, branch="geometry")[0]
+    output = tmp_path / "normalized.csv"
+    fusion.write_branch_predictions_csv([prediction], output)
+
+    assert prediction.product == "ZS32"
+    assert prediction.profile == "zs32_six_view_v1"
+    assert prediction.hand == "left"
+    assert prediction.source_hash == "abc123"
+    assert prediction.manifest_identity == "capture-001"
+    header = output.read_text(encoding="utf-8").splitlines()[0].split(",")
+    assert header[:3] == ["part_id", "side", "view"]
+    assert {"product", "profile", "hand"} <= set(header)
+
+
+@pytest.mark.parametrize(("field", "wrong_value"), [("hand", "right"), ("side", "back")])
+def test_wrong_hand_or_side_cannot_satisfy_strict_required_identity(field: str, wrong_value: str) -> None:
+    """A row from the wrong physical identity must not satisfy a required branch."""
+    fusion = load_fusion_module()
+    rows = _strict_zs32_rows(fusion, "p1")
+    target = next(index for index, row in enumerate(rows) if row.view == "front" and row.branch == "geometry")
+    rows[target] = fusion.BranchPrediction(**{**rows[target].__dict__, field: wrong_value})
+
+    decision = fusion.fuse_part_predictions("p1", rows, config=_strict_zs32_config())
+
+    assert decision.final_status == "INVALID_CAPTURE"
+    expected_reason = "mixed hand identity" if field == "hand" else "left:zs32:front:geometry"
+    assert expected_reason in decision.reason
+
+
+@pytest.mark.parametrize("hand", ["left", "right"])
+def test_strict_identity_accepts_complete_single_hand_parts(hand: str) -> None:
+    """The shared profile accepts either declared hand when the whole part is consistent."""
+    fusion = load_fusion_module()
+
+    decision = fusion.fuse_part_predictions(
+        "p1",
+        _strict_zs32_rows(fusion, "p1", hand=hand),
+        config=_strict_zs32_config(),
+    )
+
+    assert decision.final_status == "OK"
+
+
+def test_strict_identity_rejects_mixed_hands_within_one_part() -> None:
+    """Left/right evidence may not be combined under one physical part identity."""
+    fusion = load_fusion_module()
+    rows = _strict_zs32_rows(fusion, "p1")
+    rows[-1] = fusion.BranchPrediction(**{**rows[-1].__dict__, "hand": "right"})
+
+    decision = fusion.fuse_part_predictions("p1", rows, config=_strict_zs32_config())
+
+    assert decision.final_status == "INVALID_CAPTURE"
+    assert "mixed hand identity" in decision.reason
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("model_version", None),
+        ("threshold_version", "wrong-thresholds"),
+        ("roi_version", None),
+        ("template_version", "wrong-template"),
+    ],
+)
+def test_strict_expected_versions_are_required_and_exact(field: str, value: str | None) -> None:
+    """Every applicable strict identity must provide all four exact deployment versions."""
+    fusion = load_fusion_module()
+    rows = _strict_zs32_rows(fusion, "p1")
+    target = next(index for index, row in enumerate(rows) if row.view == "front" and row.branch == "geometry")
+    rows[target] = fusion.BranchPrediction(**{**rows[target].__dict__, field: value})
+
+    decision = fusion.fuse_part_predictions("p1", rows, config=_strict_zs32_config())
+
+    assert decision.final_status == "REVIEW"
+    assert f"{field} mismatch for left:zs32:front:geometry" in decision.reason
+
+
+def test_missing_strict_expected_versions_config_fails_closed() -> None:
+    """A strict deployment without an expected-version contract cannot release OK."""
+    fusion = load_fusion_module()
+    config = _strict_zs32_config()
+    config.pop("expected_versions")
+
+    decision = fusion.fuse_part_predictions("p1", _strict_zs32_rows(fusion, "p1"), config=config)
+
+    assert decision.final_status == "REVIEW"
+    assert "missing expected_versions contract" in decision.reason
+
+
+@pytest.mark.parametrize("identity_field", ["source_path", "source_hash", "manifest_identity"])
+def test_reused_source_identity_across_required_views_is_invalid_capture(identity_field: str) -> None:
+    """Distinct required views of one part must never reuse one captured image identity."""
+    fusion = load_fusion_module()
+    rows = _strict_zs32_rows(fusion, "p1")
+    updates = {
+        "source_path": "captures/reused.png",
+        "source_hash": "sha256-reused",
+        "manifest_identity": "manifest-image-reused",
+    }
+    for index, row in enumerate(rows):
+        if row.view in {"front", "back"}:
+            rows[index] = fusion.BranchPrediction(**{**row.__dict__, identity_field: updates[identity_field]})
+
+    decision = fusion.fuse_part_predictions("p1", rows, config=_strict_zs32_config())
+
+    assert decision.final_status == "INVALID_CAPTURE"
+    assert f"reused {identity_field} across required views" in decision.reason
+
+
+def test_strong_ng_is_not_downgraded_by_incomplete_or_version_faults() -> None:
+    """Immutable STRONG evidence remains machine NG while system faults block release separately."""
+    fusion = load_fusion_module()
+    rows = [row for row in _strict_zs32_rows(fusion, "p1") if row.view != "back_right"]
+    target = next(index for index, row in enumerate(rows) if row.view == "front" and row.branch == "geometry")
+    rows[target] = fusion.BranchPrediction(
+        **{
+            **rows[target].__dict__,
+            "pred_label": 1,
+            "score": 0.8,
+            "low_threshold": 0.3,
+            "high_threshold": 0.5,
+            "model_version": "wrong-model",
+        },
+    )
+
+    decision = fusion.fuse_part_predictions("p1", rows, config=_strict_zs32_config())
+
+    assert decision.final_status == "NG_GEOMETRY"
+    assert decision.final_label == 1
+    assert decision.triggered_branch == "geometry"
+    assert decision.triggered_evidence[0].evidence_id == "front:geometry"
+    assert any(item.evidence_id == "system:input_contract" for item in decision.triggered_evidence)
 
 
 def test_dual_thresholds_classify_clear_gray_and_strong(tmp_path: Path) -> None:
@@ -843,8 +1036,8 @@ def test_near_threshold_prediction_returns_review_when_enabled() -> None:
     assert "near threshold" in decision.reason
 
 
-def test_surface_texture_suspect_input_maps_to_gray_review() -> None:
-    """Legacy SUSPECT inputs should become retained GRAY review evidence."""
+def test_legacy_surface_texture_suspect_preserves_suspect_status() -> None:
+    """Non-strict C789 fusion must retain its established SUSPECT output."""
     fusion = load_fusion_module()
     predictions = [
         fusion.BranchPrediction(
@@ -864,6 +1057,40 @@ def test_surface_texture_suspect_input_maps_to_gray_review() -> None:
     ]
 
     decision = fusion.fuse_part_predictions("part001", predictions)
+
+    assert decision.final_status == "SUSPECT"
+    assert decision.final_label == 1
+    assert decision.triggered_branch == "surface_texture"
+    assert [item.level for item in decision.triggered_evidence] == ["STRONG"]
+
+
+def test_strict_profile_maps_suspect_input_to_review() -> None:
+    """Only the strict ZS32 profile maps legacy SUSPECT evidence into REVIEW."""
+    fusion = load_fusion_module()
+    rows = _strict_zs32_rows(fusion, "p1")
+    target = next(index for index, row in enumerate(rows) if row.view == "front" and row.branch == "geometry")
+    rows[target] = fusion.BranchPrediction(
+        **{
+            **rows[target].__dict__,
+            "branch": "surface_texture",
+            "status": "SUSPECT",
+            "pred_label": 1,
+        },
+    )
+    config = _strict_zs32_config()
+    config["required_branches_by_view"]["front"] = [
+        "quality_gate",
+        "registration",
+        "anomaly_front",
+        "yolo",
+        "surface_texture",
+    ]
+    expected = config["expected_versions"]
+    for item in expected:
+        if item["view"] == "front" and item["branch"] == "geometry":
+            item["branch"] = "surface_texture"
+
+    decision = fusion.fuse_part_predictions("p1", rows, config=config)
 
     assert decision.final_status == "REVIEW"
     assert decision.final_label is None
