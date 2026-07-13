@@ -480,9 +480,7 @@ def test_selection_reuses_existing_rois_and_atomically_writes_all_12_entries(
     assert [call[2:] for call in selection_calls] == [(800, 600)] * 12
     assert [call[0].name for call in overlay_calls] == [f"{hand}_{view}_roi.png" for hand, view in expected_order]
     assert [call[1] for call in overlay_calls] == [(30, 40, 3)] * 12
-    assert [call[2] for call in overlay_calls] == [
-        (index, 1, index + 10, 20) for index in range(12)
-    ]
+    assert [call[2] for call in overlay_calls] == [(index, 1, index + 10, 20) for index in range(12)]
     assert replace_calls == [(config_path.with_suffix(".json.tmp"), config_path)]
     assert not config_path.with_suffix(".json.tmp").exists()
     assert json.loads(config_path.read_text(encoding="utf-8")) == payload
@@ -815,9 +813,10 @@ def test_conversion_preserves_pixels_hierarchy_extensions_and_writes_complete_me
     assert corrected_row == {
         "source_path": corrected_path.relative_to(repo_root).as_posix(),
         "output_path": (
-            output_root
-            / "right/back/defect/deform/defect_session/images/right_front_defect_corrected.tiff"
-        ).relative_to(repo_root).as_posix(),
+            output_root / "right/back/defect/deform/defect_session/images/right_front_defect_corrected.tiff"
+        )
+        .relative_to(repo_root)
+        .as_posix(),
         "hand": "right",
         "source_view": "back",
         "resolved_view": "back",
@@ -843,12 +842,8 @@ def test_conversion_preserves_pixels_hierarchy_extensions_and_writes_complete_me
         "by_hand_view": {
             hand: {
                 view: {
-                    "input": 1
-                    + int((hand, view) == ("left", "front_left"))
-                    + int((hand, view) == ("right", "back")),
-                    "output": 1
-                    + int((hand, view) == ("left", "front_left"))
-                    + int((hand, view) == ("right", "back")),
+                    "input": 1 + int((hand, view) == ("left", "front_left")) + int((hand, view) == ("right", "back")),
+                    "output": 1 + int((hand, view) == ("left", "front_left")) + int((hand, view) == ("right", "back")),
                     "corrected_views": 0,
                     "labels": {
                         "normal": 1,
@@ -1012,10 +1007,7 @@ def test_stage30_select_and_convert_delegate_and_print_results(
     """Stage 30 delegates both commands and reports ROI and conversion results."""
     stage30 = _load_stage30()
     payload = {
-        "hands": {
-            hand: {"views": {view: {"roi": [1, 2, 20, 25]} for view in VIEWS}}
-            for hand in HANDS
-        },
+        "hands": {hand: {"views": {view: {"roi": [1, 2, 20, 25]} for view in VIEWS}} for hand in HANDS},
     }
     calls: list[tuple[str, dict[str, object]]] = []
 

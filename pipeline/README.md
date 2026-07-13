@@ -45,6 +45,9 @@ uv sync
 | `28_prepare_zs32_yolo_dataset.py` | 构建 ZS32 六视角 YOLO 数据集 | 合并 Label Studio 框、空视角、真实/镜像正常负样本并按工件拆分 |
 | `29_zs32_fixed_roi.py` | 选择六视角固定 ROI 并裁剪 YOLO 数据集 | OpenCV 可视化框选，保持原 split 并转换 bbox |
 | `30_crop_zs32_patchcore_dataset.py` | 分别框选左右手六视角 ROI 并裁剪 PatchCore 数据集 | 生成独立裁剪数据，不修改原始图片 |
+| `31_calibrate_zs32_fusion.py` | 离线锁定 ZS32 72 组双阈值 | 输出不可原地覆盖的阈值 bundle 和校准报告 |
+| `train_zs32_template_gate.py` | 训练左右手六视角整图模板门禁 | 输出带双阈值、版本和模板哈希的 12 组模型 |
+| `predict_zs32_template_gate.py` | 执行第一个模板检测项目 | 非 PASS 返回非零退出码并阻止后续检测 |
 
 最常用流程：
 
@@ -1674,6 +1677,146 @@ HF_HUB_OFFLINE=1 bash pipeline/run_patchcore_roi_six_views.sh
 `DATA_ROOT [RUN_BASE] [GPU]` 覆盖三个路径参数。
 
 ## 工业融合检测 MVP-1
+
+### ZS32 六视角严格融合
+
+ZS32 上线配置固定为 `config/fusion/zs32_six_view.json`。传统整视角模板匹配是第一个产品检测项目：
+质量、身份和 ROI 可用性预检通过后，按 `front/front_left/front_right/back/back_left/back_right` 顺序执行
+`template_match`。只有六个视角都明确 `PASS` 才调用 PatchCore、YOLO 和 geometry；任一 `REVIEW`、
+`NG_TEMPLATE` 或模板资产异常都会立即停止并把未运行分支记录为 `SKIPPED`。模板 PASS 只允许继续，不能
+单独形成最终 OK。
+
+模板训练直接读取 stage 30 裁剪生成的 `crop_manifest.csv`。合并后的 main 仓库根目录可直接运行：
+
+```bash
+MAIN_ROOT=$(pwd)
+
+uv run python pipeline/train_zs32_template_gate.py \
+  --manifest "$MAIN_ROOT/dataset/zs32_patchcore_roi/crop_manifest.csv" \
+  --path-root "$MAIN_ROOT" \
+  --output-dir "$MAIN_ROOT/results/zs32_template_gate/v1" \
+  --model-version zs32-models-2026.07.13 \
+  --threshold-version zs32-thresholds-2026.07.13 \
+  --roi-version zs32-roi-2026.07.12 \
+  --template-version zs32-templates-2026.07.13
+```
+
+训练以 `(hand, view)` 建立 12 个组，正常模板图、阈值正常图和 test 按物理 `part_id` 隔离；不会使用默认
+`0.8` 阈值，也不会覆盖已存在的输出目录。风险分数统一为 `risk=1-similarity`：`risk<T_low` 为 PASS，
+`T_low<=risk<T_high` 为 REVIEW，`risk>=T_high` 为 NG_TEMPLATE。模型 JSON 和单图预测会保留连续分数、
+双阈值、最佳模板、位移、模板 SHA-256 和四类版本。`model.sha256` 锁定包含在线阈值和模板索引的
+`model.json`，模板相对路径也不得逃出模型目录。训练目录还会输出 `calibration_rows.csv`，其模板分数与
+模型阈值同源，供 Stage 31 合并到其它五类分支的总校准 CSV。单图门禁可独立检查：
+
+```bash
+uv run python pipeline/predict_zs32_template_gate.py \
+  --model-dir "$MAIN_ROOT/results/zs32_template_gate/v1" \
+  --image /absolute/path/to/front_roi.png \
+  --hand right \
+  --view front \
+  --output-json /tmp/front_template_gate.json
+```
+
+退出码 `0/10/20/2` 分别表示 PASS/REVIEW/NG_TEMPLATE/模板资产或输入无效。在线 Python 编排接口位于
+`capture_data/zs32_inspection_orchestrator.py`；下游 runner 同时接收 `InspectionRequest` 和六条模板结果，
+可用 `template_results_to_branch_rows()`/`write_template_match_csv()` 生成 Stage 18 输入。短路时不会伪造
+后续分支 CLEAR，也不会调用 Stage 18。
+
+完成模板门禁后，再用按物理 `part_id` 划分的
+calibration/test 分数离线拟合各 `hand/view/branch/model_version/roi_version` 组的双阈值；Stage 31
+默认读取这一份 strict profile，自动要求其中 72 个精确的左/右手分支组，但不会原地修改上线配置：
+
+```bash
+uv run python pipeline/31_calibrate_zs32_fusion.py \
+  --input-csv results/zs32_fusion/calibration_rows.csv \
+  --output-dir results/zs32_fusion/calibration_v1 \
+  --target-recall 1.0 \
+  --normal-quantile 0.995
+```
+
+校准输入字段为 `part_id,hand,view,branch,raw_score,gt_label,split,model_version,roi_version`。
+输出目录包含 `thresholds.json`、`thresholds.csv`、`calibration_metrics.json` 和
+`calibration_summary.md`；阈值记录同时给出 `low_threshold`、`high_threshold`、normal/defect 样本数和
+`status`。`thresholds.json` 还写入 stage 18 共享的 product/profile/hand/side 身份、全部
+`expected_versions`、profile SHA-256、`threshold_versions` 与阈值记录 SHA-256；任一必需组缺失两类
+标定数据都会保持 `insufficient_data`/`calibration_valid=false`。标定无效时，`escape_rate`、recall、
+normal reject rate 和 review rate 等安全率全部为 `null`；未经合同验证的原始观测率只保留为
+`diagnostic_observed_*`，不可当作上线指标。
+
+`thresholds.json` 是不可绕过的上线 bundle：包含 `artifact_schema/version`、`calibration_valid`、
+profile/config SHA-256、72 个 exact group、canonical `threshold_records_sha256` 以及排除自身哈希字段后重算的
+`artifact_sha256`。不要手工修改该文件，也不要从 branch CSV 反向生成阈值 bundle。
+
+生产融合命令为：
+
+```bash
+uv run python pipeline/18_fuse_inspection_results.py \
+  --profile zs32 \
+  --manifest results/zs32_fusion/inspection_manifest.csv \
+  --quality-csv results/zs32_fusion/quality_gate.csv \
+  --registration-csv results/zs32_fusion/registration.csv \
+  --template-match-csv results/zs32_fusion/template_match.csv \
+  --branch-csv anomaly_front=results/zs32_fusion/anomaly_front.csv \
+  --branch-csv anomaly_front_left=results/zs32_fusion/anomaly_front_left.csv \
+  --branch-csv anomaly_front_right=results/zs32_fusion/anomaly_front_right.csv \
+  --branch-csv anomaly_back=results/zs32_fusion/anomaly_back.csv \
+  --branch-csv anomaly_back_left=results/zs32_fusion/anomaly_back_left.csv \
+  --branch-csv anomaly_back_right=results/zs32_fusion/anomaly_back_right.csv \
+  --branch-csv yolo=results/zs32_fusion/yolo.csv \
+  --branch-csv geometry=results/zs32_fusion/geometry.csv \
+  --threshold-artifact results/zs32_fusion/calibration_v1/thresholds.json \
+  --output-dir results/zs32_fusion/fused_v1
+```
+
+严格 profile 不需要额外开关就会强制源图和证据文件完整；`--require-complete-evidence` 仅保留给兼容流程。
+各 branch CSV 会标准化为 `branch_predictions.csv`，字段含 `part_id`、`product`、`profile`、`hand`、
+`capture_session`、`group_id`、`side`、`view`、`slot_id`、`source_hash`、`evidence_hash`、`manifest_identity`、
+`branch`、`pred_label`、连续 `score`、旧单阈值 `threshold`、`low_threshold`、`high_threshold`、
+`evidence_level`、`defect_type`、`evidence_type`、`gt_defect_type`、`reason`、`source_path`、
+`evidence_path`、`status` 以及 `model_version`、`threshold_version`、`roi_version`、
+`template_version`、`detections`。严格 ZS32 的每一行必须携带非空且工件内完全一致的
+`capture_session/group_id`；缺失或混用会进入 `INVALID_CAPTURE`。`fused_predictions.csv` 的字段为
+`part_id`、`final_status`、`final_label`、
+`defect_side`、`defect_view`、`defect_slot`、`defect_type`、`triggered_branch` 和 `reason`；
+`summary.md` 汇总 parts/branches、OK、NG、REVIEW、RETAKE、INVALID_CAPTURE、兼容模式的
+`suspect` 及完整/不完整检查数。
+
+最终状态只有五类语义：`OK`、`REVIEW`、`RETAKE`、`INVALID_CAPTURE` 和具体的 `NG_*`
+（`NG_TEMPLATE`/`NG_ANOMALY`/`NG_GEOMETRY`/`NG_YOLO`）。只有六视角、每视角全部必需 branch、质量与配准 PASS、
+版本一致、证据文件完整且全部为 CLEAR 才能自动 `OK`；任一 STRONG 直接进入对应 `NG_*`，任一 GRAY、
+缺 branch 或版本不一致进入 `REVIEW`，采集身份/完整性错误进入 `INVALID_CAPTURE`，质量或配准失败进入
+`RETAKE`。YOLO 无框只是该 YOLO 行的 CLEAR 证据，不能抵消其它视角或分支的 GRAY/STRONG。
+一旦已有合法 STRONG，缺证据、版本/运行故障或采集错误只会追加 system trigger、使
+`inspection_complete=false` 并阻止发布，不会把不可变的机器 `NG_*` 降为 REVIEW/INVALID_CAPTURE。
+严格 ZS32 的质量与配准行必须在 `status` 中显式写 `PASS`；字段缺失、空白或任意其它值都属于 gate
+fault，不能发布 OK。每个 non-PASS 行都会作为独立 trigger 保留，不会被第一个 gate 或 STRONG 证据覆盖；
+已有 STRONG 时机器 NG 保持不变，但检查仍为不完整且不可放行。非严格兼容流程仍可沿用 `pred_label=0`。
+
+YOLO 每个视角只提交一条 summary branch identity，`detections` 是 JSON list。缺字段或空白表示 evidence
+缺失，与显式无框 `[]` 不同；严格 ZS32 只接受后者作为 CLEAR。每个 box 必须包含合法的 class、有限且位于
+`[0,1]` 的 confidence、四个递增有限坐标 `xyxy`、正有限 area，所带 ROI/border flags 必须为 boolean；
+多框不会被当成重复 required branch。缺失或畸形 summary 会进入不可放行诊断代际并非零退出。
+
+正面三个视角只能产生 `FRONT_CLEAR`、`FRONT_REVIEW` 或 `FRONT_NG`，此时 `final_status` 仍为空；
+翻面后，同一 `part_id` 的背面三个视角产生对应 `BACK_*`，仅 `FRONT_CLEAR + BACK_CLEAR` 能组合为
+最终 `OK`。其它组合保持 REVIEW 或 NG，不能以多数投票覆盖强阳性。
+
+严格 profile 默认把逐工件审计写入 `results/zs32_fusion/fused_v1/audit/<part_id>.json`。JSON 保存
+`schema_version`、`capture_session/group_id`、六视角的每一行原始分数/双阈值/阈值 margin、路径与 SHA-256、
+模型/阈值/ROI/模板版本、structured YOLO boxes、locked threshold artifact path/file/artifact/record hashes、
+全部触发证据，以及彼此独立的 `machine_status`、`review.status`、`review_status`、`released_status`。
+输入没有真实采集 timestamp 时审计字段保持 `null`，不会把当前时间冒充为采集证据。
+机器结果不会被人工结论覆盖；初始 `review.status=PENDING`，`review_status=null` 且
+`released_status=null`。人工复检必须查看原图、热图/检测框/几何 overlay 和所有触发原因，再由独立发布
+流程填写复检与放行状态。
+
+stage 18 会先核对 locked bundle 的 schema、有效标定状态、profile hash、72 组完整性、两层哈希，
+再逐行要求 CSV `low/high` 与 bundle 的权威数值完全一致。缺失、篡改、不完整、标定无效或数值不符都会
+先发布不可放行的诊断代际，再非零退出。然后 stage 18 把 `branch_predictions.csv`、`fused_predictions.csv`、
+`summary.md`、`threshold_artifact.json` 和所有 audit JSON 先写入唯一
+sibling staging 目录，只在哈希、序列化和所有写入完成后执行一次目录 rename。已存在的
+`--output-dir` 会直接拒绝；任一发布失败都不会留下可消费的 OK 代际。严格输入的双阈值或
+`evidence_level` 畸形时，CLI 会先发布不可放行的诊断代际，然后以非零状态退出。
 
 `pipeline/18_fuse_inspection_results.py` 是新的 fail-closed 融合入口。它不会覆盖
 `pipeline/12_geometry_eval.py` 生成的旧版 `fused_predictions.csv`，而是把现有

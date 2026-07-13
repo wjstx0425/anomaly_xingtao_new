@@ -11,14 +11,25 @@ import re
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass
+from enum import Enum
+from math import isfinite
+from numbers import Real
 from pathlib import Path
 from typing import Any
 
-
 PASS_STATUS = "PASS"
 FAIL_STATUS = "FAIL"
-DEFAULT_BRANCH_ORDER = ("geometry", "crack", "anomaly_dino", "efficient_ad", "surface_texture", "yolo")
+DEFAULT_BRANCH_ORDER = (
+    "template_match",
+    "geometry",
+    "crack",
+    "anomaly_dino",
+    "efficient_ad",
+    "surface_texture",
+    "yolo",
+)
 DEFAULT_STATUS_BY_BRANCH = {
+    "template_match": "NG_TEMPLATE",
     "geometry": "NG_GEOMETRY",
     "crack": "NG_CRACK",
     "anomaly_dino": "NG_ANOMALY",
@@ -32,6 +43,11 @@ BRANCH_FIELDNAMES = [
     "part_id",
     "side",
     "view",
+    "hand",
+    "product",
+    "profile",
+    "capture_session",
+    "group_id",
     "slot_id",
     "branch",
     "pred_label",
@@ -44,6 +60,17 @@ BRANCH_FIELDNAMES = [
     "source_path",
     "evidence_path",
     "status",
+    "low_threshold",
+    "high_threshold",
+    "evidence_level",
+    "model_version",
+    "threshold_version",
+    "roi_version",
+    "template_version",
+    "source_hash",
+    "evidence_hash",
+    "manifest_identity",
+    "detections",
 ]
 KNOWN_DEFECT_TYPES = {"corner", "crack", "deform", "less", "more", "surface"}
 FUSED_FIELDNAMES = [
@@ -57,6 +84,14 @@ FUSED_FIELDNAMES = [
     "triggered_branch",
     "reason",
 ]
+
+
+class EvidenceLevel(str, Enum):
+    """Strength of evidence emitted by a prediction branch."""
+
+    CLEAR = "CLEAR"
+    GRAY = "GRAY"
+    STRONG = "STRONG"
 
 
 @dataclass(frozen=True)
@@ -80,6 +115,57 @@ class BranchPrediction:
     evidence_path: str | None = None
     evidence_type: str | None = None
     gt_defect_type: str | None = None
+    low_threshold: float | None = None
+    high_threshold: float | None = None
+    evidence_level: str | None = None
+    model_version: str | None = None
+    threshold_version: str | None = None
+    roi_version: str | None = None
+    template_version: str | None = None
+    hand: str | None = None
+    product: str | None = None
+    profile: str | None = None
+    source_hash: str | None = None
+    evidence_hash: str | None = None
+    manifest_identity: str | None = None
+    capture_session: str | None = None
+    group_id: str | None = None
+    detections: tuple[dict[str, Any], ...] | None = None
+
+
+def classify_evidence(prediction: BranchPrediction) -> EvidenceLevel:
+    """Classify a branch prediction using explicit, dual, or legacy evidence semantics."""
+    if prediction.evidence_level is not None:
+        return EvidenceLevel(prediction.evidence_level.upper())
+    low, high, score = prediction.low_threshold, prediction.high_threshold, prediction.score
+    if low is None and high is None:
+        return EvidenceLevel.STRONG if prediction.pred_label == 1 else EvidenceLevel.CLEAR
+    if score is None or low is None or high is None:
+        msg = f"incomplete dual thresholds for {prediction.part_id}:{prediction.branch}"
+        raise ValueError(msg)
+    if not all(isfinite(value) for value in (score, low, high)) or low > high:
+        msg = f"invalid dual thresholds for {prediction.part_id}:{prediction.branch}"
+        raise ValueError(msg)
+    if score >= high:
+        return EvidenceLevel.STRONG
+    if score >= low:
+        return EvidenceLevel.GRAY
+    return EvidenceLevel.CLEAR
+
+
+@dataclass(frozen=True)
+class TriggerEvidence:
+    """One retained GRAY or STRONG branch trigger."""
+
+    evidence_id: str
+    branch: str
+    side: str
+    view: str | None
+    level: str
+    score: float | None
+    low_threshold: float | None
+    high_threshold: float | None
+    reason: str
 
 
 @dataclass(frozen=True)
@@ -95,6 +181,25 @@ class FusedDecision:
     defect_type: str | None
     triggered_branch: str | None
     reason: str
+    triggered_evidence: tuple[TriggerEvidence, ...] = ()
+
+
+@dataclass(frozen=True)
+class FaceDecision:
+    """Staged fusion result for one physical face of a part."""
+
+    part_id: str
+    face: str
+    stage_status: str
+    final_status: str | None
+    inspection_complete: bool
+    triggered_evidence: tuple[TriggerEvidence, ...]
+    reason: str
+    defect_side: str | None = None
+    defect_view: str | None = None
+    defect_slot: str | None = None
+    defect_type: str | None = None
+    triggered_branch: str | None = None
 
 
 def _clean_text(value: Any) -> str | None:
@@ -146,6 +251,88 @@ def _int_label(value: Any, *, default: int = 0) -> int:
     if lowered in {"0", "false", "no", "n", "ok", "normal", PASS_STATUS.lower(), "warn"}:
         return 0
     return int(float(text))
+
+
+def _structured_detections(value: object) -> tuple[dict[str, Any], ...] | None:
+    """Parse one JSON-list detection summary while preserving every box field."""
+    text = _clean_text(value)
+    if text is None:
+        return None
+    parsed = json.loads(text)
+    if not isinstance(parsed, list):
+        msg = "detections must be a JSON list"
+        raise TypeError(msg)
+    detections: list[dict[str, Any]] = []
+    for index, detection in enumerate(parsed):
+        if not isinstance(detection, Mapping):
+            msg = f"detection {index} must be a JSON object"
+            raise TypeError(msg)
+        detections.append(dict(detection))
+    return tuple(detections)
+
+
+def _finite_real(value: object) -> bool:
+    """Return whether a value is a finite real number but not a boolean."""
+    return isinstance(value, Real) and not isinstance(value, bool) and isfinite(value)
+
+
+def _yolo_detection_faults(prediction: BranchPrediction) -> list[str]:
+    """Validate the strict per-box YOLO evidence contract."""
+    identity = ":".join(
+        (prediction.hand or "", prediction.side, prediction.view or "", prediction.branch),
+    )
+    if prediction.detections is None:
+        return [f"missing detections for strict YOLO summary: {identity}"]
+    if not isinstance(prediction.detections, Sequence) or isinstance(prediction.detections, (str, bytes)):
+        return [f"detections must be a sequence for strict YOLO summary: {identity}"]
+
+    faults: list[str] = []
+    for index, detection in enumerate(prediction.detections):
+        prefix = f"invalid YOLO detection {identity}:{index}"
+        if not isinstance(detection, Mapping):
+            faults.append(f"{prefix}: box must be an object")
+            continue
+        faults.extend(
+            f"{prefix}: missing {field}" for field in ("class", "confidence", "xyxy", "area") if field not in detection
+        )
+
+        class_value = detection.get("class")
+        valid_class = (
+            isinstance(class_value, str)
+            and bool(class_value.strip())
+            or isinstance(class_value, int)
+            and not isinstance(class_value, bool)
+            and class_value >= 0
+        )
+        if "class" in detection and not valid_class:
+            faults.append(f"{prefix}: class must be a nonempty name or nonnegative integer")
+
+        confidence = detection.get("confidence")
+        if "confidence" in detection and (not _finite_real(confidence) or not 0 <= confidence <= 1):
+            faults.append(f"{prefix}: confidence must be finite and within [0, 1]")
+
+        xyxy = detection.get("xyxy")
+        valid_xyxy = (
+            isinstance(xyxy, Sequence)
+            and not isinstance(xyxy, (str, bytes))
+            and len(xyxy) == 4
+            and all(_finite_real(coordinate) and coordinate >= 0 for coordinate in xyxy)
+        )
+        if "xyxy" in detection and not valid_xyxy:
+            faults.append(f"{prefix}: xyxy must contain four finite nonnegative coordinates")
+        elif valid_xyxy and (xyxy[2] <= xyxy[0] or xyxy[3] <= xyxy[1]):
+            faults.append(f"{prefix}: xyxy must have increasing coordinates")
+
+        area = detection.get("area")
+        if "area" in detection and (not _finite_real(area) or area <= 0):
+            faults.append(f"{prefix}: area must be finite and positive")
+
+        faults.extend(
+            f"{prefix}: {flag} must be boolean"
+            for flag in ("in_roi", "border", "touches_border")
+            if flag in detection and not isinstance(detection[flag], bool)
+        )
+    return faults
 
 
 def _source_path(row: Mapping[str, Any]) -> str | None:
@@ -256,7 +443,11 @@ def _branch_reason(prediction: BranchPrediction) -> str:
     return f"{prediction.branch} positive{score}{threshold}".strip()
 
 
-def _gate_missing_decision(part_id: str, branch: str) -> FusedDecision:
+def _gate_missing_decision(
+    part_id: str,
+    branch: str,
+    triggered_evidence: tuple[TriggerEvidence, ...] = (),
+) -> FusedDecision:
     """Return a retake decision for a configured PASS prerequisite missing its branch row."""
     return FusedDecision(
         part_id=part_id,
@@ -268,11 +459,18 @@ def _gate_missing_decision(part_id: str, branch: str) -> FusedDecision:
         defect_type=None,
         triggered_branch=branch,
         reason=f"missing required {branch} PASS",
+        triggered_evidence=triggered_evidence,
     )
 
 
-def _gate_not_pass_decision(part_id: str, prediction: BranchPrediction) -> FusedDecision:
+def _gate_not_pass_decision(
+    part_id: str,
+    prediction: BranchPrediction,
+    triggered_evidence: tuple[TriggerEvidence, ...] = (),
+) -> FusedDecision:
     """Return a retake decision for a gate row that is present but not PASS."""
+    status = _clean_text(prediction.status)
+    observed = status if status is not None else "missing status (explicit PASS required)"
     return FusedDecision(
         part_id=part_id,
         final_status="RETAKE",
@@ -282,7 +480,8 @@ def _gate_not_pass_decision(part_id: str, prediction: BranchPrediction) -> Fused
         defect_slot=prediction.slot_id,
         defect_type=prediction.defect_type,
         triggered_branch=prediction.branch,
-        reason=f"required {prediction.branch} PASS but got {prediction.status}",
+        reason=f"required {prediction.branch} PASS but got {observed}",
+        triggered_evidence=triggered_evidence,
     )
 
 
@@ -322,6 +521,7 @@ def required_view_keys(config: Mapping[str, Any], explicit_required_views: Seque
     required = {item for item in explicit_required_views if item}
     ok_requires = config.get("ok_requires", {})
     if isinstance(ok_requires, Mapping):
+        required.update(_string_sequence(ok_requires.get("required_view_keys")))
         sides = _string_sequence(ok_requires.get("required_sides"))
         views = _string_sequence(ok_requires.get("required_views"))
         required.update(f"{side}:{view}" for side in sides for view in views)
@@ -345,6 +545,22 @@ def missing_required_views(
     return sorted(required - observed)
 
 
+def missing_required_branch_keys(
+    predictions: Sequence[BranchPrediction],
+    config: Mapping[str, Any],
+) -> list[str]:
+    """Return required view:branch keys absent from normalized predictions."""
+    configured = config.get("required_branches_by_view", {})
+    if not isinstance(configured, Mapping):
+        return []
+    observed = {(prediction.view, prediction.branch) for prediction in predictions if prediction.view}
+    missing: list[str] = []
+    for view in sorted(str(item) for item in configured):
+        branches = _string_sequence(configured.get(view))
+        missing.extend(f"{view}:{branch}" for branch in branches if (view, branch) not in observed)
+    return missing
+
+
 def _is_near_threshold(prediction: BranchPrediction, ratio: float) -> bool:
     """Return whether a negative branch is close enough to its threshold for review."""
     if prediction.pred_label != 0 or prediction.score is None or prediction.threshold is None:
@@ -360,6 +576,7 @@ def _decision_from_prediction(
     final_label: int | None,
     prediction: BranchPrediction,
     reason: str,
+    triggered_evidence: tuple[TriggerEvidence, ...] = (),
 ) -> FusedDecision:
     """Create a fused decision from one triggering branch prediction."""
     return FusedDecision(
@@ -372,6 +589,337 @@ def _decision_from_prediction(
         defect_type=prediction.defect_type,
         triggered_branch=prediction.branch,
         reason=reason,
+        triggered_evidence=triggered_evidence,
+    )
+
+
+def _evidence_reason(prediction: BranchPrediction, level: EvidenceLevel) -> str:
+    """Return a compact explanation for retained evidence."""
+    if prediction.reason:
+        return prediction.reason
+    score = "" if prediction.score is None else f" score={prediction.score:g}"
+    low = "" if prediction.low_threshold is None else f" low_threshold={prediction.low_threshold:g}"
+    high = "" if prediction.high_threshold is None else f" high_threshold={prediction.high_threshold:g}"
+    return f"{prediction.branch} {level.value.lower()} evidence{score}{low}{high}"
+
+
+def _trigger_evidence(
+    prediction: BranchPrediction,
+    level: EvidenceLevel,
+    reason: str | None = None,
+    evidence_id: str | None = None,
+) -> TriggerEvidence:
+    """Convert one classified prediction into immutable trigger evidence."""
+    view = prediction.view or "unknown"
+    return TriggerEvidence(
+        evidence_id=evidence_id or f"{view}:{prediction.branch}",
+        branch=prediction.branch,
+        side=prediction.side,
+        view=prediction.view,
+        level=level.value,
+        score=prediction.score,
+        low_threshold=prediction.low_threshold,
+        high_threshold=prediction.high_threshold,
+        reason=reason or _evidence_reason(prediction, level),
+    )
+
+
+def _classified_triggers(
+    predictions: Sequence[BranchPrediction],
+    config: Mapping[str, Any],
+    *,
+    strict_zs32: bool = False,
+) -> tuple[tuple[TriggerEvidence, BranchPrediction], ...]:
+    """Classify non-gate rows once and retain all GRAY/STRONG evidence in policy order."""
+    branch_order = _string_sequence(config.get("branch_order")) or DEFAULT_BRANCH_ORDER
+    branch_rank = {branch: index for index, branch in enumerate(branch_order)}
+    raw_classified: list[tuple[BranchPrediction, EvidenceLevel, str | None]] = []
+    suspect_policy = config.get("suspect_policy", {})
+    suspect_enabled = bool(suspect_policy.get("enable", False)) if isinstance(suspect_policy, Mapping) else False
+    near_threshold_ratio = (
+        float(suspect_policy.get("near_threshold_ratio", 0.9)) if isinstance(suspect_policy, Mapping) else 0.9
+    )
+    for prediction in predictions:
+        if prediction.branch in GATE_BRANCHES:
+            continue
+        reason = None
+        if strict_zs32 and prediction.status is not None and prediction.status.upper() == "SUSPECT":
+            level = EvidenceLevel.GRAY
+        else:
+            try:
+                level = classify_evidence(prediction)
+            except (ValueError, TypeError):
+                if strict_zs32:
+                    continue
+                raise
+            if (
+                level is EvidenceLevel.CLEAR
+                and suspect_enabled
+                and _is_near_threshold(prediction, near_threshold_ratio)
+            ):
+                level = EvidenceLevel.GRAY
+                reason = (
+                    f"{prediction.branch} near threshold score={prediction.score:g} threshold={prediction.threshold:g}"
+                )
+        if level is not EvidenceLevel.CLEAR:
+            raw_classified.append((prediction, level, reason))
+    base_id_counts: dict[str, int] = defaultdict(int)
+    for prediction, _, _ in raw_classified:
+        view = prediction.view or "unknown"
+        base_id_counts[f"{view}:{prediction.branch}"] += 1
+    used_ids: set[str] = set()
+    base_id_ordinals: dict[str, int] = defaultdict(int)
+    classified: list[tuple[TriggerEvidence, BranchPrediction]] = []
+    for prediction, level, reason in raw_classified:
+        view = prediction.view or "unknown"
+        base_id = f"{view}:{prediction.branch}"
+        base_id_ordinals[base_id] += 1
+        evidence_id = base_id
+        if base_id_counts[base_id] > 1:
+            slot_id = _clean_text(prediction.slot_id)
+            suffix = slot_id or str(base_id_ordinals[base_id])
+            evidence_id = f"{base_id}:{suffix}"
+            collision_index = 2
+            while evidence_id in used_ids:
+                evidence_id = f"{base_id}:{suffix}:{collision_index}"
+                collision_index += 1
+        used_ids.add(evidence_id)
+        classified.append((_trigger_evidence(prediction, level, reason, evidence_id), prediction))
+    classified.sort(
+        key=lambda item: (
+            branch_rank.get(item[0].branch, len(branch_rank)),
+            item[0].view or "",
+            item[0].evidence_id,
+        ),
+    )
+    return tuple(classified)
+
+
+def _nonfinite_prediction_faults(predictions: Sequence[BranchPrediction]) -> list[str]:
+    """Return non-finite numeric fields that make strict fusion input invalid."""
+    faults: list[str] = []
+    for prediction in predictions:
+        evidence_id = f"{prediction.view or 'unknown'}:{prediction.branch}"
+        for field, value in (
+            ("score", prediction.score),
+            ("threshold", prediction.threshold),
+            ("low_threshold", prediction.low_threshold),
+            ("high_threshold", prediction.high_threshold),
+        ):
+            if value is not None and not isfinite(value):
+                faults.append(f"non-finite {field}: {evidence_id}")
+    return faults
+
+
+STRICT_VERSION_FIELDS = ("model_version", "threshold_version", "roi_version", "template_version")
+
+
+def _strict_identity(prediction: BranchPrediction) -> tuple[str, str, str, str, str, str]:
+    """Return the complete production identity of one strict branch row."""
+    return (
+        prediction.product or "",
+        prediction.profile or "",
+        prediction.hand or "",
+        prediction.side,
+        prediction.view or "",
+        prediction.branch,
+    )
+
+
+def _strict_contract_faults(
+    predictions: Sequence[BranchPrediction],
+    config: Mapping[str, Any],
+) -> tuple[list[str], list[str]]:
+    """Return exact identity/capture faults and expected-version faults for strict ZS32."""
+    invalid: list[str] = []
+    review: list[str] = []
+    identity_config = config.get("identity")
+    if not isinstance(identity_config, Mapping):
+        invalid.append("missing strict identity contract")
+        identity_config = {}
+    expected_product = _clean_text(identity_config.get("product"))
+    expected_profile = _clean_text(identity_config.get("profile"))
+    allowed_hands = _string_sequence(
+        identity_config.get(
+            "allowed_hands",
+            identity_config.get("required_hands", identity_config.get("required_hand")),
+        ),
+    )
+    required_side = _clean_text(identity_config.get("required_side"))
+    for name, value in (
+        ("product", expected_product),
+        ("profile", expected_profile),
+        ("allowed_hands", allowed_hands),
+        ("required_side", required_side),
+    ):
+        if not value:
+            invalid.append(f"missing strict identity field: {name}")
+
+    expected_raw = config.get("expected_versions")
+    if not isinstance(expected_raw, Sequence) or isinstance(expected_raw, (str, bytes)) or not expected_raw:
+        review.append("missing expected_versions contract")
+        expected_raw = ()
+    expected_all: dict[tuple[str, str, str, str], Mapping[str, Any]] = {}
+    for index, item in enumerate(expected_raw):
+        if not isinstance(item, Mapping):
+            review.append(f"invalid expected_versions record: {index}")
+            continue
+        identity = tuple(_clean_text(item.get(field)) or "" for field in ("hand", "side", "view", "branch"))
+        if "" in identity:
+            review.append(f"incomplete expected_versions identity: {index}")
+            continue
+        if identity in expected_all:
+            review.append(f"duplicate expected_versions identity: {':'.join(identity)}")
+            continue
+        expected_all[identity] = item
+        review.extend(
+            f"missing {field} expectation for {':'.join(identity)}"
+            for field in STRICT_VERSION_FIELDS
+            if _clean_text(item.get(field)) is None
+        )
+
+    part_hands = sorted({prediction.hand or "" for prediction in predictions})
+    if len(part_hands) != 1:
+        invalid.append(f"mixed hand identity for part: {', '.join(part_hands)}")
+    part_hand = part_hands[0] if len(part_hands) == 1 else ""
+    if part_hand not in allowed_hands:
+        invalid.append(f"unexpected hand for part: {part_hand or 'missing'}")
+    part_ids = sorted({prediction.part_id for prediction in predictions})
+    if len(part_ids) > 1:
+        invalid.append(f"mixed part_id for part: {', '.join(part_ids)}")
+    for field in ("capture_session", "group_id"):
+        values = [_clean_text(getattr(prediction, field)) for prediction in predictions]
+        if any(value is None for value in values):
+            invalid.append(f"missing {field} for strict identity")
+        distinct = sorted({value for value in values if value is not None})
+        if len(distinct) > 1:
+            invalid.append(f"mixed {field} for part: {', '.join(distinct)}")
+    expected = {identity: value for identity, value in expected_all.items() if identity[0] == part_hand}
+    review.extend(
+        f"missing expected_versions hand contract: {hand}"
+        for hand in allowed_hands
+        if not any(identity[0] == hand for identity in expected_all)
+    )
+
+    observed: dict[tuple[str, str, str, str], list[BranchPrediction]] = defaultdict(list)
+    for prediction in predictions:
+        product, profile, hand, side, view, branch = _strict_identity(prediction)
+        identity = (hand, side, view, branch)
+        if product != (expected_product or "") or profile != (expected_profile or ""):
+            invalid.append(f"product/profile mismatch for {':'.join(identity)}")
+        if hand != part_hand or hand not in allowed_hands or side != (required_side or ""):
+            invalid.append(f"unexpected strict identity: {':'.join(identity)}")
+        if branch == "yolo":
+            invalid.extend(_yolo_detection_faults(prediction))
+        observed[identity].append(prediction)
+
+    for identity, expectation in expected.items():
+        rows = observed.get(identity, ())
+        if not rows:
+            invalid.append(f"missing required identity: {':'.join(identity)}")
+            continue
+        if len(rows) > 1:
+            invalid.append(f"duplicate required identity: {':'.join(identity)}")
+        for prediction in rows:
+            for field in STRICT_VERSION_FIELDS:
+                expected_value = _clean_text(expectation.get(field))
+                actual_value = _clean_text(getattr(prediction, field))
+                if expected_value is not None and actual_value != expected_value:
+                    review.append(f"{field} mismatch for {':'.join(identity)}")
+    if expected:
+        invalid.extend(
+            f"unexpected strict identity: {':'.join(identity)}" for identity in observed.keys() - expected.keys()
+        )
+
+    required_views = {identity[2] for identity in expected}
+    for field in ("source_path", "source_hash", "manifest_identity"):
+        views_by_value: dict[str, set[str]] = defaultdict(set)
+        for prediction in predictions:
+            if prediction.view not in required_views:
+                continue
+            value = _clean_text(getattr(prediction, field))
+            if value is not None:
+                views_by_value[value].add(str(prediction.view))
+        invalid.extend(
+            f"reused {field} across required views: {', '.join(sorted(views))}"
+            for views in views_by_value.values()
+            if len(views) > 1
+        )
+
+    return sorted(set(invalid)), sorted(set(review))
+
+
+def _classification_faults(predictions: Sequence[BranchPrediction]) -> list[str]:
+    """Return malformed evidence faults without hiding other valid STRONG evidence."""
+    faults = []
+    for prediction in predictions:
+        if prediction.branch in GATE_BRANCHES:
+            continue
+        try:
+            classify_evidence(prediction)
+        except (ValueError, TypeError) as error:
+            faults.append(str(error))
+    return faults
+
+
+def _nonpass_gate_triggers(
+    predictions: Sequence[BranchPrediction],
+    config: Mapping[str, Any],
+    *,
+    strict_zs32: bool,
+) -> tuple[TriggerEvidence, ...]:
+    """Retain every present quality or registration row that is not an explicit PASS."""
+    triggers: list[TriggerEvidence] = []
+    for prediction in predictions:
+        if prediction.branch not in GATE_BRANCHES:
+            continue
+        status = _clean_text(prediction.status)
+        requires_pass = _requires_pass(
+            config,
+            "quality_gate" if prediction.branch in {"quality", "quality_gate"} else "registration",
+        )
+        retain_status = strict_zs32 or requires_pass
+        explicit_nonpass = status is not None and status.upper() != PASS_STATUS
+        missing_strict_status = strict_zs32 and status is None
+        if prediction.pred_label != 1 and not (retain_status and explicit_nonpass or missing_strict_status):
+            continue
+        observed = status or "missing status (explicit PASS required)"
+        reason = prediction.reason or f"required {prediction.branch} PASS but got {observed}"
+        triggers.append(_trigger_evidence(prediction, EvidenceLevel.GRAY, reason))
+    return tuple(triggers)
+
+
+def _system_trigger(reasons: Sequence[str]) -> TriggerEvidence:
+    """Build one retained fail-closed trigger for incomplete strict inspection evidence."""
+    reason = "; ".join(reasons)
+    return TriggerEvidence(
+        evidence_id="system:input_contract",
+        branch="system",
+        side="zs32",
+        view=None,
+        level=EvidenceLevel.GRAY.value,
+        score=None,
+        low_threshold=None,
+        high_threshold=None,
+        reason=reason,
+    )
+
+
+def _system_fault_decision(part_id: str, status: str, reasons: Sequence[str]) -> FusedDecision:
+    """Create a fail-closed decision retaining strict input-validation reasons."""
+    reason = "; ".join(reasons)
+    trigger = _system_trigger(reasons)
+    return FusedDecision(
+        part_id=part_id,
+        final_status=status,
+        final_label=None,
+        defect_side=None,
+        defect_view=None,
+        defect_slot=None,
+        defect_type=None,
+        triggered_branch="system",
+        reason=reason,
+        triggered_evidence=(trigger,),
     )
 
 
@@ -382,9 +930,56 @@ def fuse_part_predictions(
     missing_required: Sequence[str] = (),
     config: Mapping[str, Any] | None = None,
 ) -> FusedDecision:
-    """Fuse branch predictions for one part into OK/NG/SUSPECT/RETAKE/INVALID_CAPTURE."""
+    """Fuse branch predictions into a fail-closed decision while retaining every trigger."""
     fusion_config = config or {}
+    strict_zs32 = _clean_text(fusion_config.get("profile")) == "zs32_six_view_v1"
     missing = [item for item in missing_required if item]
+    classified_triggers = _classified_triggers(predictions, fusion_config, strict_zs32=strict_zs32)
+    gate_triggers = _nonpass_gate_triggers(predictions, fusion_config, strict_zs32=strict_zs32)
+    triggers = (*tuple(item[0] for item in classified_triggers), *gate_triggers)
+    invalid_faults: list[str] = []
+    review_faults: list[str] = []
+    if strict_zs32:
+        invalid_faults.extend(_nonfinite_prediction_faults(predictions))
+        contract_invalid, contract_review = _strict_contract_faults(predictions, fusion_config)
+        invalid_faults.extend(contract_invalid)
+        review_faults.extend(contract_review)
+        review_faults.extend(_classification_faults(predictions))
+        invalid_faults.extend(f"missing required input: {item}" for item in missing)
+        invalid_faults.extend(
+            f"missing required view: {item}" for item in missing_required_views(predictions, fusion_config)
+        )
+        invalid_faults.extend(
+            f"missing required branch: {item}" for item in missing_required_branch_keys(predictions, fusion_config)
+        )
+        all_system_faults = [*sorted(set(invalid_faults)), *sorted(set(review_faults))]
+        if all_system_faults:
+            triggers = (*triggers, _system_trigger(all_system_faults))
+
+        first_strong = next(
+            (item for item in classified_triggers if item[0].level == EvidenceLevel.STRONG.value),
+            None,
+        )
+        if first_strong is not None:
+            _, prediction = first_strong
+            status = _status_from_branch(fusion_config, prediction.branch)
+            if status == "SUSPECT":
+                status = "REVIEW"
+            return _decision_from_prediction(
+                part_id,
+                status,
+                1 if status != "REVIEW" else None,
+                prediction,
+                _branch_reason(prediction),
+                triggers,
+            )
+        if invalid_faults:
+            decision = _system_fault_decision(part_id, "INVALID_CAPTURE", sorted(set(invalid_faults)))
+            return FusedDecision(**{**decision.__dict__, "triggered_evidence": triggers})
+        if review_faults:
+            decision = _system_fault_decision(part_id, "REVIEW", sorted(set(review_faults)))
+            return FusedDecision(**{**decision.__dict__, "triggered_evidence": triggers})
+
     if missing:
         return FusedDecision(
             part_id=part_id,
@@ -396,62 +991,85 @@ def fuse_part_predictions(
             defect_type=None,
             triggered_branch=None,
             reason="missing required input: " + ", ".join(sorted(missing)),
+            triggered_evidence=triggers,
         )
 
     for branch in ("quality", "quality_gate", "registration"):
         for prediction in predictions:
-            if prediction.branch == branch and prediction.pred_label == 1:
-                return _decision_from_prediction(part_id, "RETAKE", None, prediction, _branch_reason(prediction))
+            status = _clean_text(prediction.status)
+            nonpass_status = strict_zs32 and (status is None or status.upper() != PASS_STATUS)
+            if prediction.branch == branch and (prediction.pred_label == 1 or nonpass_status):
+                if nonpass_status:
+                    return _gate_not_pass_decision(part_id, prediction, triggers)
+                return _decision_from_prediction(
+                    part_id,
+                    "RETAKE",
+                    None,
+                    prediction,
+                    _branch_reason(prediction),
+                    triggers,
+                )
 
     if _requires_pass(fusion_config, "quality_gate") and not any(
         prediction.branch in {"quality", "quality_gate"} for prediction in predictions
     ):
-        return _gate_missing_decision(part_id, "quality_gate")
+        return _gate_missing_decision(part_id, "quality_gate", triggers)
     if _requires_pass(fusion_config, "quality_gate"):
         nonpass_quality = _first_nonpass_gate(predictions, {"quality", "quality_gate"})
         if nonpass_quality is not None:
-            return _gate_not_pass_decision(part_id, nonpass_quality)
+            return _gate_not_pass_decision(part_id, nonpass_quality, triggers)
         if not _gate_has_pass(predictions, {"quality", "quality_gate"}):
-            return _gate_missing_decision(part_id, "quality_gate")
+            return _gate_missing_decision(part_id, "quality_gate", triggers)
     if _requires_pass(fusion_config, "registration") and not any(
         prediction.branch == "registration" for prediction in predictions
     ):
-        return _gate_missing_decision(part_id, "registration")
+        return _gate_missing_decision(part_id, "registration", triggers)
     if _requires_pass(fusion_config, "registration"):
         nonpass_registration = _first_nonpass_gate(predictions, {"registration"})
         if nonpass_registration is not None:
-            return _gate_not_pass_decision(part_id, nonpass_registration)
+            return _gate_not_pass_decision(part_id, nonpass_registration, triggers)
         if not _gate_has_pass(predictions, {"registration"}):
-            return _gate_missing_decision(part_id, "registration")
+            return _gate_missing_decision(part_id, "registration", triggers)
 
-    branch_order = _string_sequence(fusion_config.get("branch_order")) or DEFAULT_BRANCH_ORDER
-    for branch in branch_order:
-        for prediction in predictions:
-            if prediction.branch == branch and prediction.pred_label == 1:
-                status = _status_from_branch(fusion_config, branch)
-                if prediction.status is not None and prediction.status.upper() == "SUSPECT":
-                    status = "SUSPECT"
-                return _decision_from_prediction(
-                    part_id,
-                    status,
-                    None if status == "SUSPECT" else 1,
-                    prediction,
-                    _branch_reason(prediction),
-                )
-
-    suspect_policy = fusion_config.get("suspect_policy", {})
-    suspect_enabled = bool(suspect_policy.get("enable", False)) if isinstance(suspect_policy, Mapping) else False
-    near_threshold_ratio = (
-        float(suspect_policy.get("near_threshold_ratio", 0.9)) if isinstance(suspect_policy, Mapping) else 0.9
+    first_strong = next(
+        (item for item in classified_triggers if item[0].level == EvidenceLevel.STRONG.value),
+        None,
     )
-    if suspect_enabled:
-        for prediction in predictions:
-            if prediction.branch not in GATE_BRANCHES and _is_near_threshold(prediction, near_threshold_ratio):
-                reason = (
-                    f"{prediction.branch} near threshold"
-                    f" score={prediction.score:g} threshold={prediction.threshold:g}"
-                )
-                return _decision_from_prediction(part_id, "SUSPECT", None, prediction, reason)
+    if first_strong is not None:
+        _, prediction = first_strong
+        status = _status_from_branch(fusion_config, prediction.branch)
+        return _decision_from_prediction(
+            part_id,
+            status,
+            None if status == "SUSPECT" else 1,
+            prediction,
+            _branch_reason(prediction),
+            triggers,
+        )
+
+    configured_missing_views = missing_required_views(predictions, fusion_config)
+    missing_branches = missing_required_branch_keys(predictions, fusion_config)
+    review_reasons = [*(f"missing required view: {item}" for item in configured_missing_views)]
+    review_reasons.extend(f"missing required branch: {item}" for item in missing_branches)
+    if triggers:
+        review_reasons.extend(trigger.reason for trigger in triggers)
+    if review_reasons:
+        prediction = classified_triggers[0][1] if classified_triggers else None
+        legacy_near_threshold = not strict_zs32 and any(
+            "near threshold" in trigger.reason for trigger, _ in classified_triggers
+        )
+        return FusedDecision(
+            part_id=part_id,
+            final_status="SUSPECT" if legacy_near_threshold else "REVIEW",
+            final_label=None,
+            defect_side=None if prediction is None else prediction.side,
+            defect_view=None if prediction is None else prediction.view,
+            defect_slot=None if prediction is None else prediction.slot_id,
+            defect_type=None if prediction is None else prediction.defect_type,
+            triggered_branch=None if prediction is None else prediction.branch,
+            reason="; ".join(review_reasons),
+            triggered_evidence=triggers,
+        )
 
     return FusedDecision(
         part_id=part_id,
@@ -463,6 +1081,140 @@ def fuse_part_predictions(
         defect_type=None,
         triggered_branch=None,
         reason="all available reliable branches below threshold",
+        triggered_evidence=triggers,
+    )
+
+
+def _face_config(config: Mapping[str, Any], face: str) -> dict[str, Any]:
+    """Return a shallow fusion config restricted to the three views of one face."""
+    face_views = {face, f"{face}_left", f"{face}_right"}
+    face_config = dict(config)
+    ok_requires = config.get("ok_requires")
+    if isinstance(ok_requires, Mapping):
+        filtered_requires = dict(ok_requires)
+        required_keys = _string_sequence(ok_requires.get("required_view_keys"))
+        filtered_requires["required_view_keys"] = [
+            key for key in required_keys if key.rsplit(":", maxsplit=1)[-1] in face_views
+        ]
+        face_config["ok_requires"] = filtered_requires
+    required_branches = config.get("required_branches_by_view")
+    if isinstance(required_branches, Mapping):
+        face_config["required_branches_by_view"] = {
+            view: branches for view, branches in required_branches.items() if str(view) in face_views
+        }
+    return face_config
+
+
+def fuse_face_predictions(
+    part_id: str,
+    predictions: Sequence[BranchPrediction],
+    *,
+    face: str,
+    config: Mapping[str, Any] | None = None,
+) -> FaceDecision:
+    """Fuse exactly one three-view face without releasing a final OK.
+
+    Args:
+        part_id (str): Stable part identity shared by every prediction.
+        predictions (Sequence[BranchPrediction]): Rows for the selected face.
+        face (str): Physical face, either ``front`` or ``back``.
+        config (Mapping[str, Any] | None): Strict fusion configuration.
+
+    Returns:
+        FaceDecision: A staged CLEAR, REVIEW, or NG result with no final release.
+
+    Raises:
+        ValueError: If the face, part identity, or supplied views are invalid.
+    """
+    if face not in {"front", "back"}:
+        msg = "face must be 'front' or 'back'"
+        raise ValueError(msg)
+    mismatched_parts = sorted({prediction.part_id for prediction in predictions if prediction.part_id != part_id})
+    if mismatched_parts:
+        msg = f"part_id mismatch: expected {part_id}, found {', '.join(mismatched_parts)}"
+        raise ValueError(msg)
+    required_views = {face, f"{face}_left", f"{face}_right"}
+    wrong_views = sorted({str(prediction.view) for prediction in predictions if prediction.view not in required_views})
+    if wrong_views:
+        msg = f"predictions contain views outside {face} face: {', '.join(wrong_views)}"
+        raise ValueError(msg)
+    observed_views = {prediction.view for prediction in predictions}
+    missing_views = sorted(required_views - observed_views)
+    decision = fuse_part_predictions(
+        part_id,
+        predictions,
+        missing_required=missing_views,
+        config=_face_config(config or {}, face),
+    )
+    if decision.final_status == "OK":
+        state = "CLEAR"
+    elif decision.final_status == "REVIEW" or decision.final_status in {"RETAKE", "INVALID_CAPTURE"}:
+        state = "REVIEW"
+    else:
+        state = "NG"
+    return FaceDecision(
+        part_id=part_id,
+        face=face,
+        stage_status=f"{face.upper()}_{state}",
+        final_status=None,
+        inspection_complete=False,
+        triggered_evidence=decision.triggered_evidence,
+        reason=decision.reason,
+        defect_side=decision.defect_side,
+        defect_view=decision.defect_view,
+        defect_slot=decision.defect_slot,
+        defect_type=decision.defect_type,
+        triggered_branch=decision.triggered_branch,
+    )
+
+
+def combine_face_decisions(front: FaceDecision, back: FaceDecision) -> FusedDecision:
+    """Combine matching staged faces into the only releasable part decision.
+
+    Args:
+        front (FaceDecision): Completed front-face stage.
+        back (FaceDecision): Completed back-face stage.
+
+    Returns:
+        FusedDecision: ``OK`` only for CLEAR+CLEAR, otherwise REVIEW or NG.
+
+    Raises:
+        ValueError: If identities or face roles do not match.
+    """
+    if front.part_id != back.part_id:
+        msg = f"part_id mismatch: front={front.part_id}, back={back.part_id}"
+        raise ValueError(msg)
+    if front.face != "front" or back.face != "back":
+        msg = "combine_face_decisions requires front then back face decisions"
+        raise ValueError(msg)
+    valid_front_stages = {"FRONT_CLEAR", "FRONT_REVIEW", "FRONT_NG"}
+    valid_back_stages = {"BACK_CLEAR", "BACK_REVIEW", "BACK_NG"}
+    if front.stage_status not in valid_front_stages or back.stage_status not in valid_back_stages:
+        msg = f"invalid stage_status pair: {front.stage_status}, {back.stage_status}"
+        raise ValueError(msg)
+    primary: FaceDecision | None
+    if front.stage_status == "FRONT_NG":
+        status, label, primary = "NG", 1, front
+    elif back.stage_status == "BACK_NG":
+        status, label, primary = "NG", 1, back
+    elif front.stage_status == "FRONT_REVIEW":
+        status, label, primary = "REVIEW", None, front
+    elif back.stage_status == "BACK_REVIEW":
+        status, label, primary = "REVIEW", None, back
+    else:
+        status, label, primary = "OK", 0, None
+    triggers = (*front.triggered_evidence, *back.triggered_evidence)
+    return FusedDecision(
+        part_id=front.part_id,
+        final_status=status,
+        final_label=label,
+        defect_side=None if primary is None else primary.defect_side,
+        defect_view=None if primary is None else primary.defect_view,
+        defect_slot=None if primary is None else primary.defect_slot,
+        defect_type=None if primary is None else primary.defect_type,
+        triggered_branch=None if primary is None else primary.triggered_branch,
+        reason=f"{front.stage_status} + {back.stage_status}" if primary is None else primary.reason,
+        triggered_evidence=triggers,
     )
 
 
@@ -597,21 +1349,21 @@ def _prediction_from_row(row: Mapping[str, Any], branch: str) -> BranchPredictio
 
     if normalized_branch == "geometry":
         label = _int_label(_first_value(row, ("geometry_pred_label", "pred_label", "final_pred_label")))
-        score = _float_value(_first_value(row, ("geometry_score", "score", "final_score")))
+        score = _float_value(_first_value(row, ("raw_score", "geometry_score", "score", "final_score")))
         threshold = _float_value(_first_value(row, ("geometry_threshold", "threshold")))
         defect_type = _first_value(row, ("geometry_type", "defect_type"))
     elif normalized_branch in {"quality", "quality_gate", "registration"}:
         label = _int_label(_first_value(row, ("pred_label", "fail_label", "label", "status")), default=0)
         if status is not None and status.lower() == FAIL_STATUS.lower():
             label = 1
-        score = _float_value(_first_value(row, ("score", "quality_score", "registration_score")))
+        score = _float_value(_first_value(row, ("raw_score", "score", "quality_score", "registration_score")))
         threshold = _float_value(_first_value(row, ("threshold",)))
         defect_type = _first_value(row, ("defect_type",))
     else:
         label = _int_label(
             _first_value(row, ("deploy_pred_label", "pred_label", "review_pred_label", "anomalib_pred_label")),
         )
-        score = _float_value(_first_value(row, ("pred_score", "score", "anomaly_score", "deploy_score")))
+        score = _float_value(_first_value(row, ("raw_score", "pred_score", "score", "anomaly_score", "deploy_score")))
         threshold = _float_value(_first_value(row, ("deploy_threshold", "threshold", "anomaly_threshold")))
         defect_type = _first_value(row, ("defect_type",))
 
@@ -636,6 +1388,22 @@ def _prediction_from_row(row: Mapping[str, Any], branch: str) -> BranchPredictio
             _first_value(row, ("gt_defect_type", "ground_truth_defect_type", "label_defect_type"))
             or _gt_defect_type_from_path(source_path)
         ),
+        low_threshold=_float_value(row.get("low_threshold")),
+        high_threshold=_float_value(row.get("high_threshold")),
+        evidence_level=_clean_text(row.get("evidence_level")),
+        model_version=_clean_text(row.get("model_version")),
+        threshold_version=_clean_text(row.get("threshold_version")),
+        roi_version=_clean_text(row.get("roi_version")),
+        template_version=_clean_text(row.get("template_version")),
+        hand=_first_value(row, ("hand", "part_hand")),
+        product=_first_value(row, ("product", "product_id", "product_name")),
+        profile=_first_value(row, ("profile", "profile_id", "fusion_profile")),
+        source_hash=_first_value(row, ("source_hash", "source_sha256", "image_sha256")),
+        evidence_hash=_first_value(row, ("evidence_hash", "evidence_sha256", "template_sha256")),
+        manifest_identity=_first_value(row, ("manifest_identity", "manifest_image_id", "capture_id", "image_id")),
+        capture_session=_first_value(row, ("capture_session", "session_id")),
+        group_id=_first_value(row, ("group_id", "capture_group")),
+        detections=_structured_detections(_first_value(row, ("detections", "yolo_detections"))),
     )
 
 
@@ -673,6 +1441,10 @@ def write_branch_predictions_csv(predictions: Sequence[BranchPrediction], output
         writer.writeheader()
         for prediction in predictions:
             row = asdict(prediction)
+            detections = row["detections"]
+            row["detections"] = (
+                "" if detections is None else json.dumps(detections, separators=(",", ":"), sort_keys=True)
+            )
             writer.writerow({field: row.get(field) for field in BRANCH_FIELDNAMES})
 
 
@@ -683,7 +1455,8 @@ def write_fused_decisions_csv(decisions: Sequence[FusedDecision], output_csv: Pa
         writer = csv.DictWriter(file, fieldnames=FUSED_FIELDNAMES)
         writer.writeheader()
         for decision in decisions:
-            writer.writerow(asdict(decision))
+            row = asdict(decision)
+            writer.writerow({field: row.get(field) for field in FUSED_FIELDNAMES})
 
 
 def load_fusion_config(path: Path | None) -> dict[str, Any]:
@@ -810,8 +1583,7 @@ def _is_not_evaluated_missing_prediction(
     """Return whether a decision represents an input that was not evaluated by any branch."""
     marker = "not_evaluated/missing_prediction"
     return marker in decision.reason or any(
-        prediction.branch == "missing_prediction" or marker in (prediction.reason or "")
-        for prediction in predictions
+        prediction.branch == "missing_prediction" or marker in (prediction.reason or "") for prediction in predictions
     )
 
 
@@ -901,9 +1673,7 @@ def compute_benchmark_summary(
     counts["normal_fp_rate"] = counts["normal_false_positives"] / normal_total if normal_total else 0.0
     for defect_type in ("less", "more", "corner", "surface", "crack"):
         type_count = defect_type_counts[defect_type]
-        counts[f"{defect_type}_recall"] = (
-            type_count["detected"] / type_count["total"] if type_count["total"] else 0.0
-        )
+        counts[f"{defect_type}_recall"] = type_count["detected"] / type_count["total"] if type_count["total"] else 0.0
     return counts
 
 
@@ -936,7 +1706,9 @@ def benchmark_detail_rows(
                 "case_type": case_type,
                 "final_status": decision.final_status,
                 "final_label": "" if decision.final_label is None else decision.final_label,
-                "defect_type": gt_defect_type or decision.defect_type or (first_prediction.defect_type if first_prediction else ""),
+                "defect_type": gt_defect_type
+                or decision.defect_type
+                or (first_prediction.defect_type if first_prediction else ""),
                 "evidence_type": first_prediction.evidence_type if first_prediction else "",
                 "gt_defect_type": gt_defect_type or "",
                 "slot_id": decision.defect_slot or (first_prediction.slot_id if first_prediction else ""),

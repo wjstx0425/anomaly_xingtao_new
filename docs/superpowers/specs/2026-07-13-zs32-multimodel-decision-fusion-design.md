@@ -156,6 +156,8 @@ return REVIEW
 
 正面强 NG 后默认仍完成背面检测，以保存完整缺陷画像和支持各视角召回统计。如果节拍要求提前停止，记录必须包含 `inspection_complete=false` 和 `early_stop_reason`，且该记录不能作为六视角完整检查样本参与背面召回统计。
 
+2026-07-13 的执行策略补充：整视角 `template_match` 被指定为第一个产品检测项目。身份、图像可读性、质量和 ROI/配准等技术前提通过后，模板门禁先于 PatchCore、YOLO 和其他传统算子运行。任一模板结果为 GRAY/REVIEW、STRONG/NG_TEMPLATE 或模板资产异常时，立即停止所有后续检测并记录 `SKIPPED_BY_TEMPLATE_GATE`；只有六视角模板全部明确 CLEAR/PASS 才能进入后续模型。该早停记录必须保留连续 similarity/risk、双阈值、模板哈希、已检测/跳过视角、`inspection_complete=false` 和人工复检状态，不能伪造后续分支 CLEAR，也不能纳入六视角完整召回样本。
+
 ## 人工复检证据链
 
 复检界面以一个物理工件为单位展示两行六视角：正面三视角和背面三视角。每张图使用 CLEAR、GRAY、STRONG 和无效四类状态，并优先展开触发最终结果的视角。

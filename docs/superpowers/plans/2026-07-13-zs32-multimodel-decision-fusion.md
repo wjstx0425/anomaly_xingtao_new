@@ -4,7 +4,7 @@
 
 **Goal:** Extend the existing industrial fusion pipeline into a fail-closed ZS32 six-view system that preserves continuous scores, applies per-branch dual thresholds, supports front/back staged decisions, and writes auditable evidence for human review.
 
-**Architecture:** Keep CSV normalization and the final rule engine in `capture_data/fusion_engine.py`, but move nested evidence serialization into a focused `capture_data/inspection_audit.py` module and threshold fitting/reporting into `capture_data/fusion_calibration.py`. Extend stage 18 for production fusion and add stage 30 for offline threshold calibration; do not build the review GUI in this plan.
+**Architecture:** Keep CSV normalization and the final rule engine in `capture_data/fusion_engine.py`, but move nested evidence serialization into a focused `capture_data/inspection_audit.py` module and threshold fitting/reporting into `capture_data/fusion_calibration.py`. Extend stage 18 for production fusion and add stage 31 for offline threshold calibration; do not build the review GUI in this plan.
 
 **Tech Stack:** Python 3.10+, standard-library `csv`, `json`, `hashlib`, `dataclasses`, `pathlib`, existing optional PyYAML config loading, pytest, uv.
 
@@ -28,12 +28,12 @@
 - Create `capture_data/inspection_audit.py`: immutable JSON/CSV evidence assembly, image hashing, and atomic audit writes.
 - Create `capture_data/fusion_calibration.py`: grouped score loading, `T_low/T_high` fitting, part-level metrics, and confidence-bound helpers.
 - Modify `pipeline/18_fuse_inspection_results.py`: strict ZS32 profile inputs and audit output integration.
-- Create `pipeline/30_calibrate_zs32_fusion.py`: offline calibration CLI; it never changes deployed thresholds in place.
+- Create `pipeline/31_calibrate_zs32_fusion.py`: offline calibration CLI; it never changes deployed thresholds in place.
 - Create `config/fusion/zs32_six_view.json`: explicit production profile and required branches/views.
 - Modify `tests/unit/capture_data/test_fusion_engine.py`: compatibility, dual-threshold, all-trigger, and staged-state tests.
 - Create `tests/unit/capture_data/test_inspection_audit.py`: evidence schema, hashes, and atomic-write tests.
 - Create `tests/unit/capture_data/test_fusion_calibration.py`: grouped calibration and part-level metric tests.
-- Modify `tests/unit/pipeline/test_pipeline_wrappers.py`: stage-18 and stage-30 parser contracts.
+- Modify `tests/unit/pipeline/test_pipeline_wrappers.py`: stage-18 and stage-31 parser contracts.
 - Modify `pipeline/README.md`: commands, CSV contract, output semantics, and calibration workflow.
 - Modify `AGENTS_MEMORY.md`: implementation entrypoints, verified behavior, and exact validation results.
 
@@ -191,8 +191,8 @@ Change `FusedDecision` to retain the current primary fields plus `triggered_evid
 ```json
 {
   "required_branches_by_view": {
-    "front": ["quality_gate", "registration", "anomaly_front", "yolo", "geometry"],
-    "front_left": ["quality_gate", "registration", "anomaly_front_left", "yolo", "geometry"]
+    "front": ["template_match", "quality_gate", "registration", "anomaly_front", "yolo", "geometry"],
+    "front_left": ["template_match", "quality_gate", "registration", "anomaly_front_left", "yolo", "geometry"]
   }
 }
 ```
@@ -217,15 +217,16 @@ Create `config/fusion/zs32_six_view.json` with explicit keys:
     ]
   },
   "required_branches_by_view": {
-    "front": ["quality_gate", "registration", "anomaly_front", "yolo", "geometry"],
-    "front_left": ["quality_gate", "registration", "anomaly_front_left", "yolo", "geometry"],
-    "front_right": ["quality_gate", "registration", "anomaly_front_right", "yolo", "geometry"],
-    "back": ["quality_gate", "registration", "anomaly_back", "yolo", "geometry"],
-    "back_left": ["quality_gate", "registration", "anomaly_back_left", "yolo", "geometry"],
-    "back_right": ["quality_gate", "registration", "anomaly_back_right", "yolo", "geometry"]
+    "front": ["template_match", "quality_gate", "registration", "anomaly_front", "yolo", "geometry"],
+    "front_left": ["template_match", "quality_gate", "registration", "anomaly_front_left", "yolo", "geometry"],
+    "front_right": ["template_match", "quality_gate", "registration", "anomaly_front_right", "yolo", "geometry"],
+    "back": ["template_match", "quality_gate", "registration", "anomaly_back", "yolo", "geometry"],
+    "back_left": ["template_match", "quality_gate", "registration", "anomaly_back_left", "yolo", "geometry"],
+    "back_right": ["template_match", "quality_gate", "registration", "anomaly_back_right", "yolo", "geometry"]
   },
-  "branch_order": ["geometry", "yolo", "anomaly_front", "anomaly_front_left", "anomaly_front_right", "anomaly_back", "anomaly_back_left", "anomaly_back_right"],
+  "branch_order": ["template_match", "geometry", "yolo", "anomaly_front", "anomaly_front_left", "anomaly_front_right", "anomaly_back", "anomaly_back_left", "anomaly_back_right"],
   "rules": {
+    "template_match": {"status_on_positive": "NG_TEMPLATE"},
     "geometry": {"status_on_positive": "NG_GEOMETRY"},
     "yolo": {"status_on_positive": "NG_YOLO"},
     "anomaly_front": {"status_on_positive": "NG_ANOMALY"},
@@ -427,7 +428,7 @@ git commit -m "feat: emit ZS32 fusion audit records"
 
 **Files:**
 - Create: `capture_data/fusion_calibration.py`
-- Create: `pipeline/30_calibrate_zs32_fusion.py`
+- Create: `pipeline/31_calibrate_zs32_fusion.py`
 - Create: `tests/unit/capture_data/test_fusion_calibration.py`
 - Modify: `tests/unit/pipeline/test_pipeline_wrappers.py`
 
@@ -478,7 +479,7 @@ Choose `T_low` from defect calibration scores to meet the configured recall cons
 
 Compute part-level outcomes with the same OR/GRAY semantics as the fusion engine. Report overall and grouped escape count/rate, recall, normal reject rate, review rate, counts, and the zero-escape upper bound.
 
-- [ ] **Step 4: Add the stage-30 CLI and parser test**
+- [ ] **Step 4: Add the stage-31 CLI and parser test**
 
 Implement parser arguments:
 
@@ -496,8 +497,8 @@ Write `thresholds.json`, `thresholds.csv`, `calibration_metrics.json`, and `cali
 
 ```bash
 uv run pytest tests/unit/capture_data/test_fusion_calibration.py tests/unit/pipeline/test_pipeline_wrappers.py -k "fusion_calibration or calibrate_zs32" -v
-uv run python pipeline/30_calibrate_zs32_fusion.py --help
-uv run python -m py_compile capture_data/fusion_calibration.py pipeline/30_calibrate_zs32_fusion.py
+uv run python pipeline/31_calibrate_zs32_fusion.py --help
+uv run python -m py_compile capture_data/fusion_calibration.py pipeline/31_calibrate_zs32_fusion.py
 ```
 
 Expected: PASS; help shows all five options.
@@ -505,7 +506,7 @@ Expected: PASS; help shows all five options.
 - [ ] **Step 6: Commit Task 5**
 
 ```bash
-git add capture_data/fusion_calibration.py pipeline/30_calibrate_zs32_fusion.py tests/unit/capture_data/test_fusion_calibration.py tests/unit/pipeline/test_pipeline_wrappers.py
+git add capture_data/fusion_calibration.py pipeline/31_calibrate_zs32_fusion.py tests/unit/capture_data/test_fusion_calibration.py tests/unit/pipeline/test_pipeline_wrappers.py
 git commit -m "feat: calibrate ZS32 fusion thresholds"
 ```
 
@@ -546,7 +547,7 @@ Expected: all injected failures are fail-closed. If a case reaches OK, add the s
 Add a `ZS32 六视角严格融合` subsection to `pipeline/README.md` with these copy-pastable forms:
 
 ```bash
-uv run python pipeline/30_calibrate_zs32_fusion.py \
+uv run python pipeline/31_calibrate_zs32_fusion.py \
   --input-csv results/zs32_fusion/calibration_rows.csv \
   --output-dir results/zs32_fusion/calibration_v1 \
   --target-recall 1.0 \
@@ -557,12 +558,14 @@ uv run python pipeline/18_fuse_inspection_results.py \
   --manifest results/zs32_fusion/inspection_manifest.csv \
   --quality-csv results/zs32_fusion/quality_gate.csv \
   --registration-csv results/zs32_fusion/registration.csv \
+  --template-match-csv results/zs32_fusion/template_match.csv \
   --branch-csv anomaly_front=results/zs32_fusion/anomaly_front.csv \
   --branch-csv anomaly_front_left=results/zs32_fusion/anomaly_front_left.csv \
   --branch-csv anomaly_front_right=results/zs32_fusion/anomaly_front_right.csv \
   --branch-csv anomaly_back=results/zs32_fusion/anomaly_back.csv \
   --branch-csv anomaly_back_left=results/zs32_fusion/anomaly_back_left.csv \
   --branch-csv anomaly_back_right=results/zs32_fusion/anomaly_back_right.csv \
+  --threshold-artifact results/zs32_fusion/calibration_v1/thresholds.json \
   --branch-csv yolo=results/zs32_fusion/yolo.csv \
   --branch-csv geometry=results/zs32_fusion/geometry.csv \
   --require-complete-evidence \
@@ -579,9 +582,9 @@ Under `CHANGELOG.md` `## [Unreleased]` → `Added`, record the strict ZS32 dual-
 
 ```bash
 uv run pytest tests/unit/capture_data/test_fusion_engine.py tests/unit/capture_data/test_inspection_audit.py tests/unit/capture_data/test_fusion_calibration.py tests/unit/pipeline/test_fuse_inspection_results.py tests/unit/pipeline/test_pipeline_wrappers.py -v
-uv run ruff check capture_data/fusion_engine.py capture_data/inspection_audit.py capture_data/fusion_calibration.py pipeline/18_fuse_inspection_results.py pipeline/30_calibrate_zs32_fusion.py tests/unit/capture_data/test_fusion_engine.py tests/unit/capture_data/test_inspection_audit.py tests/unit/capture_data/test_fusion_calibration.py tests/unit/pipeline/test_fuse_inspection_results.py tests/unit/pipeline/test_pipeline_wrappers.py
-uv run ruff format --check capture_data/fusion_engine.py capture_data/inspection_audit.py capture_data/fusion_calibration.py pipeline/18_fuse_inspection_results.py pipeline/30_calibrate_zs32_fusion.py tests/unit/capture_data/test_fusion_engine.py tests/unit/capture_data/test_inspection_audit.py tests/unit/capture_data/test_fusion_calibration.py tests/unit/pipeline/test_fuse_inspection_results.py
-uv run python -m py_compile capture_data/fusion_engine.py capture_data/inspection_audit.py capture_data/fusion_calibration.py pipeline/18_fuse_inspection_results.py pipeline/30_calibrate_zs32_fusion.py
+uv run ruff check capture_data/fusion_engine.py capture_data/inspection_audit.py capture_data/fusion_calibration.py pipeline/18_fuse_inspection_results.py pipeline/31_calibrate_zs32_fusion.py tests/unit/capture_data/test_fusion_engine.py tests/unit/capture_data/test_inspection_audit.py tests/unit/capture_data/test_fusion_calibration.py tests/unit/pipeline/test_fuse_inspection_results.py tests/unit/pipeline/test_pipeline_wrappers.py
+uv run ruff format --check capture_data/fusion_engine.py capture_data/inspection_audit.py capture_data/fusion_calibration.py pipeline/18_fuse_inspection_results.py pipeline/31_calibrate_zs32_fusion.py tests/unit/capture_data/test_fusion_engine.py tests/unit/capture_data/test_inspection_audit.py tests/unit/capture_data/test_fusion_calibration.py tests/unit/pipeline/test_fuse_inspection_results.py
+uv run python -m py_compile capture_data/fusion_engine.py capture_data/inspection_audit.py capture_data/fusion_calibration.py pipeline/18_fuse_inspection_results.py pipeline/31_calibrate_zs32_fusion.py
 uv run python -m json.tool config/fusion/zs32_six_view.json
 git diff --check
 ```
@@ -593,7 +596,7 @@ Expected: all tests and static checks PASS. If full pytest cannot start because 
 ```bash
 git status --short
 git diff --stat
-git diff -- capture_data/fusion_engine.py capture_data/inspection_audit.py capture_data/fusion_calibration.py pipeline/18_fuse_inspection_results.py pipeline/30_calibrate_zs32_fusion.py config/fusion/zs32_six_view.json pipeline/README.md CHANGELOG.md AGENTS_MEMORY.md
+git diff -- capture_data/fusion_engine.py capture_data/inspection_audit.py capture_data/fusion_calibration.py pipeline/18_fuse_inspection_results.py pipeline/31_calibrate_zs32_fusion.py config/fusion/zs32_six_view.json pipeline/README.md CHANGELOG.md AGENTS_MEMORY.md
 ```
 
 Expected: only fusion, audit, calibration, tests, docs, changelog, and the appended memory entry are in scope; pre-existing stage-29 files remain untouched.

@@ -8,6 +8,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- 🚀 **pipeline**: Add a model-bundle and template-hash-verified ZS32 six-view template-first gate that short-circuits PatchCore, YOLO, and geometry on REVIEW or NG_TEMPLATE, exports same-source Stage 31 calibration rows, and retains continuous evidence for Stage 18.
+
+- 🚀 **pipeline**: Add strict ZS32 six-view dual-threshold fusion with staged front/back decisions, per-part audit JSON, fail-closed fault coverage, and an offline calibration CLI.
 - 🚀 **pipeline**: Add and document the custom C789/FX11 inspection workflow, including model comparison, custom training, hardened stress-normal validation, live demo archive/OCR output, and manual geometry templates.
 - 🚀 **pipeline**: Add CSV-based fail-closed inspection fusion and robustness benchmark summaries for the custom industrial workflow.
 - 🚀 **pipeline**: Add geometry threshold fallback diagnostics for slot/type/region, slot, defect-type, and global lookup levels.
@@ -25,6 +28,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Fixed
 
 - 🐞 **data**: Reject negative `--normal-test-ratio` values before normal/normal_test splitting.
+- 🐞 **pipeline**: Bind strict ZS32 product/hand/session/group/view/branch identities, explicit PASS gates, locked stage-31 thresholds and validated structured YOLO evidence to atomic, non-releasable audit generations while preserving unlabeled legacy C789 `SUSPECT` and immutable STRONG NG decisions.
 - 🐞 **pipeline**: Avoid ambiguous basename/stem fusion matches and keep invalid missing-prediction inputs out of invalid reject success counts.
 
 ## [v2.4.2] - 2026-05-15
