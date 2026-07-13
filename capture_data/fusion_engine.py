@@ -126,6 +126,21 @@ def classify_evidence(prediction: BranchPrediction) -> EvidenceLevel:
 
 
 @dataclass(frozen=True)
+class TriggerEvidence:
+    """One retained GRAY or STRONG branch trigger."""
+
+    evidence_id: str
+    branch: str
+    side: str
+    view: str | None
+    level: str
+    score: float | None
+    low_threshold: float | None
+    high_threshold: float | None
+    reason: str
+
+
+@dataclass(frozen=True)
 class FusedDecision:
     """Final fail-closed inspection decision for one part."""
 
@@ -138,6 +153,7 @@ class FusedDecision:
     defect_type: str | None
     triggered_branch: str | None
     reason: str
+    triggered_evidence: tuple[TriggerEvidence, ...] = ()
 
 
 def _clean_text(value: Any) -> str | None:
@@ -299,7 +315,11 @@ def _branch_reason(prediction: BranchPrediction) -> str:
     return f"{prediction.branch} positive{score}{threshold}".strip()
 
 
-def _gate_missing_decision(part_id: str, branch: str) -> FusedDecision:
+def _gate_missing_decision(
+    part_id: str,
+    branch: str,
+    triggered_evidence: tuple[TriggerEvidence, ...] = (),
+) -> FusedDecision:
     """Return a retake decision for a configured PASS prerequisite missing its branch row."""
     return FusedDecision(
         part_id=part_id,
@@ -311,10 +331,15 @@ def _gate_missing_decision(part_id: str, branch: str) -> FusedDecision:
         defect_type=None,
         triggered_branch=branch,
         reason=f"missing required {branch} PASS",
+        triggered_evidence=triggered_evidence,
     )
 
 
-def _gate_not_pass_decision(part_id: str, prediction: BranchPrediction) -> FusedDecision:
+def _gate_not_pass_decision(
+    part_id: str,
+    prediction: BranchPrediction,
+    triggered_evidence: tuple[TriggerEvidence, ...] = (),
+) -> FusedDecision:
     """Return a retake decision for a gate row that is present but not PASS."""
     return FusedDecision(
         part_id=part_id,
@@ -326,6 +351,7 @@ def _gate_not_pass_decision(part_id: str, prediction: BranchPrediction) -> Fused
         defect_type=prediction.defect_type,
         triggered_branch=prediction.branch,
         reason=f"required {prediction.branch} PASS but got {prediction.status}",
+        triggered_evidence=triggered_evidence,
     )
 
 
@@ -365,6 +391,7 @@ def required_view_keys(config: Mapping[str, Any], explicit_required_views: Seque
     required = {item for item in explicit_required_views if item}
     ok_requires = config.get("ok_requires", {})
     if isinstance(ok_requires, Mapping):
+        required.update(_string_sequence(ok_requires.get("required_view_keys")))
         sides = _string_sequence(ok_requires.get("required_sides"))
         views = _string_sequence(ok_requires.get("required_views"))
         required.update(f"{side}:{view}" for side in sides for view in views)
@@ -388,6 +415,22 @@ def missing_required_views(
     return sorted(required - observed)
 
 
+def missing_required_branch_keys(
+    predictions: Sequence[BranchPrediction],
+    config: Mapping[str, Any],
+) -> list[str]:
+    """Return required view:branch keys absent from normalized predictions."""
+    configured = config.get("required_branches_by_view", {})
+    if not isinstance(configured, Mapping):
+        return []
+    observed = {(prediction.view, prediction.branch) for prediction in predictions if prediction.view}
+    missing: list[str] = []
+    for view in sorted(str(item) for item in configured):
+        branches = _string_sequence(configured.get(view))
+        missing.extend(f"{view}:{branch}" for branch in branches if (view, branch) not in observed)
+    return missing
+
+
 def _is_near_threshold(prediction: BranchPrediction, ratio: float) -> bool:
     """Return whether a negative branch is close enough to its threshold for review."""
     if prediction.pred_label != 0 or prediction.score is None or prediction.threshold is None:
@@ -403,6 +446,7 @@ def _decision_from_prediction(
     final_label: int | None,
     prediction: BranchPrediction,
     reason: str,
+    triggered_evidence: tuple[TriggerEvidence, ...] = (),
 ) -> FusedDecision:
     """Create a fused decision from one triggering branch prediction."""
     return FusedDecision(
@@ -415,7 +459,83 @@ def _decision_from_prediction(
         defect_type=prediction.defect_type,
         triggered_branch=prediction.branch,
         reason=reason,
+        triggered_evidence=triggered_evidence,
     )
+
+
+def _evidence_reason(prediction: BranchPrediction, level: EvidenceLevel) -> str:
+    """Return a compact explanation for retained evidence."""
+    if prediction.reason:
+        return prediction.reason
+    score = "" if prediction.score is None else f" score={prediction.score:g}"
+    low = "" if prediction.low_threshold is None else f" low_threshold={prediction.low_threshold:g}"
+    high = "" if prediction.high_threshold is None else f" high_threshold={prediction.high_threshold:g}"
+    return f"{prediction.branch} {level.value.lower()} evidence{score}{low}{high}"
+
+
+def _trigger_evidence(
+    prediction: BranchPrediction,
+    level: EvidenceLevel,
+    reason: str | None = None,
+) -> TriggerEvidence:
+    """Convert one classified prediction into immutable trigger evidence."""
+    view = prediction.view or "unknown"
+    return TriggerEvidence(
+        evidence_id=f"{view}:{prediction.branch}",
+        branch=prediction.branch,
+        side=prediction.side,
+        view=prediction.view,
+        level=level.value,
+        score=prediction.score,
+        low_threshold=prediction.low_threshold,
+        high_threshold=prediction.high_threshold,
+        reason=reason or _evidence_reason(prediction, level),
+    )
+
+
+def _classified_triggers(
+    predictions: Sequence[BranchPrediction],
+    config: Mapping[str, Any],
+) -> tuple[tuple[TriggerEvidence, ...], dict[str, BranchPrediction]]:
+    """Classify non-gate rows once and retain all GRAY/STRONG evidence in policy order."""
+    branch_order = _string_sequence(config.get("branch_order")) or DEFAULT_BRANCH_ORDER
+    branch_rank = {branch: index for index, branch in enumerate(branch_order)}
+    classified: list[tuple[TriggerEvidence, BranchPrediction]] = []
+    suspect_policy = config.get("suspect_policy", {})
+    suspect_enabled = bool(suspect_policy.get("enable", False)) if isinstance(suspect_policy, Mapping) else False
+    near_threshold_ratio = (
+        float(suspect_policy.get("near_threshold_ratio", 0.9)) if isinstance(suspect_policy, Mapping) else 0.9
+    )
+    for prediction in predictions:
+        if prediction.branch in GATE_BRANCHES:
+            continue
+        reason = None
+        if prediction.status is not None and prediction.status.upper() == "SUSPECT":
+            level = EvidenceLevel.GRAY
+        else:
+            level = classify_evidence(prediction)
+            if (
+                level is EvidenceLevel.CLEAR
+                and suspect_enabled
+                and _is_near_threshold(prediction, near_threshold_ratio)
+            ):
+                level = EvidenceLevel.GRAY
+                reason = (
+                    f"{prediction.branch} near threshold"
+                    f" score={prediction.score:g} threshold={prediction.threshold:g}"
+                )
+        if level is not EvidenceLevel.CLEAR:
+            classified.append((_trigger_evidence(prediction, level, reason), prediction))
+    classified.sort(
+        key=lambda item: (
+            branch_rank.get(item[0].branch, len(branch_rank)),
+            item[0].view or "",
+            item[0].evidence_id,
+        ),
+    )
+    triggers = tuple(item[0] for item in classified)
+    predictions_by_evidence_id = {item[0].evidence_id: item[1] for item in classified}
+    return triggers, predictions_by_evidence_id
 
 
 def fuse_part_predictions(
@@ -425,8 +545,9 @@ def fuse_part_predictions(
     missing_required: Sequence[str] = (),
     config: Mapping[str, Any] | None = None,
 ) -> FusedDecision:
-    """Fuse branch predictions for one part into OK/NG/SUSPECT/RETAKE/INVALID_CAPTURE."""
+    """Fuse branch predictions into a fail-closed decision while retaining every trigger."""
     fusion_config = config or {}
+    triggers, trigger_predictions = _classified_triggers(predictions, fusion_config)
     missing = [item for item in missing_required if item]
     if missing:
         return FusedDecision(
@@ -439,62 +560,78 @@ def fuse_part_predictions(
             defect_type=None,
             triggered_branch=None,
             reason="missing required input: " + ", ".join(sorted(missing)),
+            triggered_evidence=triggers,
         )
 
     for branch in ("quality", "quality_gate", "registration"):
         for prediction in predictions:
             if prediction.branch == branch and prediction.pred_label == 1:
-                return _decision_from_prediction(part_id, "RETAKE", None, prediction, _branch_reason(prediction))
+                return _decision_from_prediction(
+                    part_id,
+                    "RETAKE",
+                    None,
+                    prediction,
+                    _branch_reason(prediction),
+                    triggers,
+                )
 
     if _requires_pass(fusion_config, "quality_gate") and not any(
         prediction.branch in {"quality", "quality_gate"} for prediction in predictions
     ):
-        return _gate_missing_decision(part_id, "quality_gate")
+        return _gate_missing_decision(part_id, "quality_gate", triggers)
     if _requires_pass(fusion_config, "quality_gate"):
         nonpass_quality = _first_nonpass_gate(predictions, {"quality", "quality_gate"})
         if nonpass_quality is not None:
-            return _gate_not_pass_decision(part_id, nonpass_quality)
+            return _gate_not_pass_decision(part_id, nonpass_quality, triggers)
         if not _gate_has_pass(predictions, {"quality", "quality_gate"}):
-            return _gate_missing_decision(part_id, "quality_gate")
+            return _gate_missing_decision(part_id, "quality_gate", triggers)
     if _requires_pass(fusion_config, "registration") and not any(
         prediction.branch == "registration" for prediction in predictions
     ):
-        return _gate_missing_decision(part_id, "registration")
+        return _gate_missing_decision(part_id, "registration", triggers)
     if _requires_pass(fusion_config, "registration"):
         nonpass_registration = _first_nonpass_gate(predictions, {"registration"})
         if nonpass_registration is not None:
-            return _gate_not_pass_decision(part_id, nonpass_registration)
+            return _gate_not_pass_decision(part_id, nonpass_registration, triggers)
         if not _gate_has_pass(predictions, {"registration"}):
-            return _gate_missing_decision(part_id, "registration")
+            return _gate_missing_decision(part_id, "registration", triggers)
 
-    branch_order = _string_sequence(fusion_config.get("branch_order")) or DEFAULT_BRANCH_ORDER
-    for branch in branch_order:
-        for prediction in predictions:
-            if prediction.branch == branch and prediction.pred_label == 1:
-                status = _status_from_branch(fusion_config, branch)
-                if prediction.status is not None and prediction.status.upper() == "SUSPECT":
-                    status = "SUSPECT"
-                return _decision_from_prediction(
-                    part_id,
-                    status,
-                    None if status == "SUSPECT" else 1,
-                    prediction,
-                    _branch_reason(prediction),
-                )
+    first_strong = next((trigger for trigger in triggers if trigger.level == EvidenceLevel.STRONG.value), None)
+    if first_strong is not None:
+        prediction = trigger_predictions[first_strong.evidence_id]
+        status = _status_from_branch(fusion_config, prediction.branch)
+        if status == "SUSPECT":
+            status = "REVIEW"
+        return _decision_from_prediction(
+            part_id,
+            status,
+            1,
+            prediction,
+            _branch_reason(prediction),
+            triggers,
+        )
 
-    suspect_policy = fusion_config.get("suspect_policy", {})
-    suspect_enabled = bool(suspect_policy.get("enable", False)) if isinstance(suspect_policy, Mapping) else False
-    near_threshold_ratio = (
-        float(suspect_policy.get("near_threshold_ratio", 0.9)) if isinstance(suspect_policy, Mapping) else 0.9
-    )
-    if suspect_enabled:
-        for prediction in predictions:
-            if prediction.branch not in GATE_BRANCHES and _is_near_threshold(prediction, near_threshold_ratio):
-                reason = (
-                    f"{prediction.branch} near threshold"
-                    f" score={prediction.score:g} threshold={prediction.threshold:g}"
-                )
-                return _decision_from_prediction(part_id, "SUSPECT", None, prediction, reason)
+    configured_missing_views = missing_required_views(predictions, fusion_config)
+    missing_branches = missing_required_branch_keys(predictions, fusion_config)
+    review_reasons = [*(f"missing required view: {item}" for item in configured_missing_views)]
+    review_reasons.extend(f"missing required branch: {item}" for item in missing_branches)
+    if triggers:
+        review_reasons.extend(trigger.reason for trigger in triggers)
+    if review_reasons:
+        primary = triggers[0] if triggers else None
+        prediction = trigger_predictions[primary.evidence_id] if primary is not None else None
+        return FusedDecision(
+            part_id=part_id,
+            final_status="REVIEW",
+            final_label=None,
+            defect_side=None if prediction is None else prediction.side,
+            defect_view=None if prediction is None else prediction.view,
+            defect_slot=None if prediction is None else prediction.slot_id,
+            defect_type=None if prediction is None else prediction.defect_type,
+            triggered_branch=None if prediction is None else prediction.branch,
+            reason="; ".join(review_reasons),
+            triggered_evidence=triggers,
+        )
 
     return FusedDecision(
         part_id=part_id,
@@ -506,6 +643,7 @@ def fuse_part_predictions(
         defect_type=None,
         triggered_branch=None,
         reason="all available reliable branches below threshold",
+        triggered_evidence=triggers,
     )
 
 
@@ -733,7 +871,8 @@ def write_fused_decisions_csv(decisions: Sequence[FusedDecision], output_csv: Pa
         writer = csv.DictWriter(file, fieldnames=FUSED_FIELDNAMES)
         writer.writeheader()
         for decision in decisions:
-            writer.writerow(asdict(decision))
+            row = asdict(decision)
+            writer.writerow({field: row.get(field) for field in FUSED_FIELDNAMES})
 
 
 def load_fusion_config(path: Path | None) -> dict[str, Any]:

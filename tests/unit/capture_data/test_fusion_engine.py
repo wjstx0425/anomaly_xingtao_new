@@ -26,6 +26,158 @@ def load_fusion_module() -> ModuleType:
     return module
 
 
+ZS32_VIEWS = ("front", "front_left", "front_right", "back", "back_left", "back_right")
+
+
+def _zs32_config() -> dict[str, object]:
+    """Return the strict six-view fusion shape used by production ZS32."""
+    return {
+        "ok_requires": {"required_view_keys": [f"zs32:{view}" for view in ZS32_VIEWS]},
+        "required_branches_by_view": {
+            view: ["quality_gate", "registration", f"anomaly_{view}", "yolo", "geometry"]
+            for view in ZS32_VIEWS
+        },
+        "branch_order": ["geometry", "yolo", *(f"anomaly_{view}" for view in ZS32_VIEWS)],
+        "rules": {
+            "geometry": {"status_on_positive": "NG_GEOMETRY"},
+            "yolo": {"status_on_positive": "NG_YOLO"},
+            **{
+                f"anomaly_{view}": {"status_on_positive": "NG_ANOMALY"}
+                for view in ZS32_VIEWS
+            },
+        },
+    }
+
+
+def _zs32_prediction(
+    fusion: ModuleType,
+    *,
+    part_id: str,
+    view: str,
+    branch: str,
+    score: float | None = None,
+    low_threshold: float | None = None,
+    high_threshold: float | None = None,
+    status: str | None = None,
+) -> object:
+    """Build one normalized ZS32 prediction for strict-fusion tests."""
+    return fusion.BranchPrediction(
+        part_id=part_id,
+        side="zs32",
+        view=view,
+        slot_id=None,
+        branch=branch,
+        pred_label=0,
+        score=score,
+        threshold=None,
+        defect_type=None,
+        reason=None,
+        source_path=f"{part_id}_{view}.png",
+        status=status,
+        low_threshold=low_threshold,
+        high_threshold=high_threshold,
+    )
+
+
+def _clear_zs32_rows(fusion: ModuleType, part_id: str) -> list[object]:
+    """Build all required six-view rows with CLEAR/PASS evidence."""
+    rows = []
+    for view in ZS32_VIEWS:
+        rows.extend(
+            [
+                _zs32_prediction(fusion, part_id=part_id, view=view, branch="quality_gate", status="PASS"),
+                _zs32_prediction(fusion, part_id=part_id, view=view, branch="registration", status="PASS"),
+                _zs32_prediction(
+                    fusion,
+                    part_id=part_id,
+                    view=view,
+                    branch=f"anomaly_{view}",
+                    score=0.2,
+                    low_threshold=0.3,
+                    high_threshold=0.5,
+                ),
+                _zs32_prediction(fusion, part_id=part_id, view=view, branch="yolo"),
+                _zs32_prediction(fusion, part_id=part_id, view=view, branch="geometry"),
+            ],
+        )
+    return rows
+
+
+def test_gray_evidence_returns_review_and_strong_wins() -> None:
+    """GRAY evidence requires review, while any STRONG evidence remains decisive."""
+    fusion = load_fusion_module()
+    config = _zs32_config()
+    p1_rows = _clear_zs32_rows(fusion, "p1")
+    p2_rows = _clear_zs32_rows(fusion, "p2")
+    p1_rows[2] = _zs32_prediction(
+        fusion,
+        part_id="p1",
+        view="front",
+        branch="anomaly_front",
+        score=0.4,
+        low_threshold=0.3,
+        high_threshold=0.5,
+    )
+    p2_rows[2] = _zs32_prediction(
+        fusion,
+        part_id="p2",
+        view="front",
+        branch="anomaly_front",
+        score=0.4,
+        low_threshold=0.3,
+        high_threshold=0.5,
+    )
+    p2_rows[4] = fusion.BranchPrediction(
+        **{
+            **p2_rows[4].__dict__,
+            "pred_label": 1,
+            "score": 0.8,
+            "low_threshold": 0.3,
+            "high_threshold": 0.5,
+        },
+    )
+
+    review = fusion.fuse_part_predictions("p1", p1_rows, config=config)
+    ng = fusion.fuse_part_predictions("p2", p2_rows, config=config)
+
+    assert review.final_status == "REVIEW"
+    assert [item.evidence_id for item in review.triggered_evidence] == ["front:anomaly_front"]
+    assert [item.level for item in review.triggered_evidence] == ["GRAY"]
+    assert ng.final_status == "NG_GEOMETRY"
+    assert ng.triggered_branch == "geometry"
+    assert [item.evidence_id for item in ng.triggered_evidence] == [
+        "front:geometry",
+        "front:anomaly_front",
+    ]
+    assert [item.level for item in ng.triggered_evidence] == ["STRONG", "GRAY"]
+
+
+def test_ok_requires_every_configured_branch_per_view() -> None:
+    """A present view remains incomplete when one of its required branches is absent."""
+    fusion = load_fusion_module()
+    rows = [
+        row
+        for row in _clear_zs32_rows(fusion, "p1")
+        if not (row.view == "back_right" and row.branch == "anomaly_back_right")
+    ]
+
+    decision = fusion.fuse_part_predictions("p1", rows, config=_zs32_config())
+
+    assert decision.final_status == "REVIEW"
+    assert "missing required branch: back_right:anomaly_back_right" in decision.reason
+
+
+def test_all_six_views_and_required_branches_clear_returns_ok() -> None:
+    """Only complete six-view CLEAR/PASS evidence may produce OK."""
+    fusion = load_fusion_module()
+
+    decision = fusion.fuse_part_predictions("p1", _clear_zs32_rows(fusion, "p1"), config=_zs32_config())
+
+    assert decision.final_status == "OK"
+    assert decision.final_label == 0
+    assert decision.triggered_evidence == ()
+
+
 def test_dual_thresholds_classify_clear_gray_and_strong(tmp_path: Path) -> None:
     """Raw scores should map to the three dual-threshold evidence bands."""
     fusion = load_fusion_module()
@@ -389,8 +541,8 @@ def test_no_positive_predictions_return_ok() -> None:
     assert decision.triggered_branch is None
 
 
-def test_near_threshold_prediction_returns_suspect_when_enabled() -> None:
-    """Near-threshold negatives should be reviewable SUSPECT cases."""
+def test_near_threshold_prediction_returns_review_when_enabled() -> None:
+    """Legacy near-threshold negatives should map to the unified REVIEW status."""
     fusion = load_fusion_module()
     predictions = [
         fusion.BranchPrediction(
@@ -414,14 +566,14 @@ def test_near_threshold_prediction_returns_suspect_when_enabled() -> None:
         config={"suspect_policy": {"enable": True, "near_threshold_ratio": 0.9}},
     )
 
-    assert decision.final_status == "SUSPECT"
+    assert decision.final_status == "REVIEW"
     assert decision.final_label is None
     assert decision.triggered_branch == "geometry"
     assert "near threshold" in decision.reason
 
 
-def test_surface_texture_positive_maps_to_suspect_not_ng() -> None:
-    """Surface texture positives should request review without counting as hard NG."""
+def test_surface_texture_suspect_input_maps_to_gray_review() -> None:
+    """Legacy SUSPECT inputs should become retained GRAY review evidence."""
     fusion = load_fusion_module()
     predictions = [
         fusion.BranchPrediction(
@@ -442,9 +594,10 @@ def test_surface_texture_positive_maps_to_suspect_not_ng() -> None:
 
     decision = fusion.fuse_part_predictions("part001", predictions)
 
-    assert decision.final_status == "SUSPECT"
+    assert decision.final_status == "REVIEW"
     assert decision.final_label is None
     assert decision.triggered_branch == "surface_texture"
+    assert [item.level for item in decision.triggered_evidence] == ["GRAY"]
 
 
 def test_load_branch_csvs_normalize_geometry_and_anomaly_predictions(tmp_path: Path) -> None:

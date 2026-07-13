@@ -1,0 +1,43 @@
+{
+  "profile": "zs32_six_view_v1",
+  "ok_requires": {
+    "quality_gate": "PASS",
+    "registration": "PASS",
+    "required_view_keys": [
+      "zs32:front",
+      "zs32:front_left",
+      "zs32:front_right",
+      "zs32:back",
+      "zs32:back_left",
+      "zs32:back_right"
+    ]
+  },
+  "required_branches_by_view": {
+    "front": ["quality_gate", "registration", "anomaly_front", "yolo", "geometry"],
+    "front_left": ["quality_gate", "registration", "anomaly_front_left", "yolo", "geometry"],
+    "front_right": ["quality_gate", "registration", "anomaly_front_right", "yolo", "geometry"],
+    "back": ["quality_gate", "registration", "anomaly_back", "yolo", "geometry"],
+    "back_left": ["quality_gate", "registration", "anomaly_back_left", "yolo", "geometry"],
+    "back_right": ["quality_gate", "registration", "anomaly_back_right", "yolo", "geometry"]
+  },
+  "branch_order": [
+    "geometry",
+    "yolo",
+    "anomaly_front",
+    "anomaly_front_left",
+    "anomaly_front_right",
+    "anomaly_back",
+    "anomaly_back_left",
+    "anomaly_back_right"
+  ],
+  "rules": {
+    "geometry": {"status_on_positive": "NG_GEOMETRY"},
+    "yolo": {"status_on_positive": "NG_YOLO"},
+    "anomaly_front": {"status_on_positive": "NG_ANOMALY"},
+    "anomaly_front_left": {"status_on_positive": "NG_ANOMALY"},
+    "anomaly_front_right": {"status_on_positive": "NG_ANOMALY"},
+    "anomaly_back": {"status_on_positive": "NG_ANOMALY"},
+    "anomaly_back_left": {"status_on_positive": "NG_ANOMALY"},
+    "anomaly_back_right": {"status_on_positive": "NG_ANOMALY"}
+  }
+}
