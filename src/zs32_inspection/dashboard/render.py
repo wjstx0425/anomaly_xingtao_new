@@ -216,7 +216,7 @@ def _render_header(
             _SURFACE_ACTIVE if active else _SURFACE,
             -1,
         )
-        _outline(canvas, rect, _TEXT if active else _BORDER, 2 if active else 1)
+        _outline(canvas, rect, _TEXT if active else _BORDER)
         texts.append(_Text(label, (rect.x + 12, rect.y + 13), 17, _TEXT if active else _MUTED, active))
         hits.append(HitRegion(rect, "select_layer", layer.value))
 
@@ -294,7 +294,7 @@ def _render_footer(
     rect = Rect(600, 816, 400, 72)
     fill = (42, 78, 55) if enabled else _DISABLED
     cv2.rectangle(canvas, (rect.x, rect.y), (rect.x + rect.width - 1, rect.y + rect.height - 1), fill, -1)
-    _outline(canvas, rect, _GREEN if enabled else _BORDER, 2)
+    _outline(canvas, rect, _GREEN if enabled else _BORDER)
     texts.append(_Text(label, (rect.x + 52, rect.y + 20), 22, _TEXT if enabled else _MUTED, True))
     hits.append(HitRegion(rect, "inspection_action", enabled=enabled))
     return ButtonVisual(rect, label, enabled)

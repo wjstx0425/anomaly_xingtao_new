@@ -73,6 +73,23 @@ def test_disabled_inspection_action_does_not_request_work(state: DashboardState)
     assert reduce_state(state, Action.INSPECTION).inspection_requested is False
 
 
+def test_disabled_keyboard_inspection_preserves_existing_request_and_matches_mouse(
+    state: DashboardState,
+) -> None:
+    state = replace(
+        state,
+        running=True,
+        inspection_requested=True,
+        progress=ProgressRecord("ZS32-0001", None, "inference", "running", "now"),
+    )
+    frame = render_dashboard(state)
+
+    assert mouse_to_action(frame.inspection_button.rect.center, frame.hit_regions) is None
+    action = key_to_action(ord("s"))
+    assert action is Action.INSPECTION
+    assert reduce_state(state, action) is state
+
+
 def test_no_gui_never_calls_highgui(
     state: DashboardState,
     tmp_path: Path,

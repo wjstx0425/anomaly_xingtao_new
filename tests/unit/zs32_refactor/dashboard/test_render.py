@@ -85,3 +85,31 @@ def test_running_non_waiting_button_has_clear_disabled_region(state: DashboardSt
     assert frame.inspection_button.enabled is False
     assert [hit.action for hit in frame.hit_regions].count("inspection_action") == 1
     assert frame.inspection_button.rect.height >= 48
+
+
+def test_active_layer_and_inspection_cta_use_exactly_one_pixel_borders(
+    state: DashboardState,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from zs32_inspection.dashboard import render as subject
+
+    thicknesses: list[int] = []
+    original_outline = subject._outline
+
+    def record_outline(
+        canvas: np.ndarray,
+        rect: object,
+        color: tuple[int, int, int],
+        thickness: int = 1,
+    ) -> None:
+        thicknesses.append(thickness)
+        original_outline(canvas, rect, color, thickness)
+
+    monkeypatch.setattr(subject, "_outline", record_outline)
+    frame = render_dashboard(state)
+    active_layer = next(hit for hit in frame.hit_regions if hit.action == "select_layer" and hit.value == "fusion").rect
+    cta = frame.inspection_button.rect
+
+    assert set(thicknesses) == {1}
+    assert frame.canvas[active_layer.y + 1, active_layer.x + 1].tolist() == [36, 37, 38]
+    assert frame.canvas[cta.y + 1, cta.x + 1].tolist() == [42, 78, 55]

@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
 from pathlib import Path
 
 import cv2
@@ -80,3 +82,31 @@ def test_offline_write_failure_is_nonzero(
 
     assert result != 0
     assert "screenshot" in capsys.readouterr().err
+
+
+def test_pipeline_36_wrapper_runs_valid_headless_cli(tmp_path: Path) -> None:
+    result_dir = _result_dir(tmp_path)
+    screenshot = tmp_path / "wrapper" / "dashboard.png"
+    repository_root = Path(__file__).resolve().parents[4]
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(repository_root / "pipeline/36_zs32_inspection_dashboard.py"),
+            "--result-dir",
+            str(result_dir),
+            "--no-gui",
+            "--save-screenshot",
+            str(screenshot),
+        ],
+        cwd=repository_root,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    decoded = cv2.imread(str(screenshot))
+    assert decoded is not None
+    assert decoded.shape == (920, 1600, 3)

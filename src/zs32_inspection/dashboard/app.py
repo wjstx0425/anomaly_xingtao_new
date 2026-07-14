@@ -99,7 +99,7 @@ def reduce_state(state: DashboardState, action: Action, *, value: str | None = N
         enabled = not state.running or (
             state.progress is not None and state.progress.state in {"waiting_front", "waiting_back"}
         )
-        return replace(state, inspection_requested=enabled)
+        return replace(state, inspection_requested=True) if enabled else state
     if action is Action.ESCAPE:
         return replace(state, selected_view=None) if state.selected_view else replace(state, exit_requested=True)
     if action is Action.QUIT:
