@@ -1,0 +1,45 @@
+{
+  "schema": "zs32.calibration_targets",
+  "schema_version": 1,
+  "product": "ZS32",
+  "dataset_release_id": "REPLACE_WITH_DATASET_RELEASE_ID",
+  "topology_id": "zs32-3cam-double-side-v1",
+  "roi_version": "zs32-roi-v2",
+  "approval": {
+    "reviewed_by": "REPLACE_WITH_QUALITY_REVIEWER_ID",
+    "reviewed_at": "2026-07-14T00:00:00+08:00",
+    "approved": true
+  },
+  "targets": [
+    {
+      "capture_set_id": "REPLACE_WITH_CAPTURE_SET_ID",
+      "part_instance_id": "REPLACE_WITH_PART_INSTANCE_ID",
+      "hand": "right",
+      "view": "front_left",
+      "branch": "anomaly",
+      "part_ground_truth": "defect",
+      "target": "defect",
+      "reason": null
+    },
+    {
+      "capture_set_id": "REPLACE_WITH_CAPTURE_SET_ID",
+      "part_instance_id": "REPLACE_WITH_PART_INSTANCE_ID",
+      "hand": "right",
+      "view": "front_left",
+      "branch": "template",
+      "part_ground_truth": "defect",
+      "target": "normal",
+      "reason": "this defect is not visible to template matching"
+    },
+    {
+      "capture_set_id": "REPLACE_WITH_CAPTURE_SET_ID",
+      "part_instance_id": "REPLACE_WITH_PART_INSTANCE_ID",
+      "hand": "right",
+      "view": "front_left",
+      "branch": "yolo",
+      "part_ground_truth": "defect",
+      "target": "exclude",
+      "reason": "annotation visibility is ambiguous and was excluded by review"
+    }
+  ]
+}

@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "recipe_id": "zs32-right-patchcore-v1",
+  "product": "ZS32",
+  "topology_id": "zs32-3cam-double-side-v1",
+  "roi_version": "zs32-roi-v2",
+  "allowed_hands": ["right"],
+  "anomaly_family": "patchcore",
+  "capture_gate_policy": {
+    "artifact_id": "unbound-zs32-capture-gate-policy",
+    "version": "training-profile",
+    "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "relative_path": "capture/gates/policy.json"
+  },
+  "template_assets": {
+    "right": {
+      "front": {"artifact_id": "unbound-template-right-front", "version": "training-profile", "sha256": "0000000000000000000000000000000000000000000000000000000000000000", "relative_path": "template/right/front/model.json"},
+      "front_left": {"artifact_id": "unbound-template-right-front-left", "version": "training-profile", "sha256": "0000000000000000000000000000000000000000000000000000000000000000", "relative_path": "template/right/front_left/model.json"},
+      "front_right": {"artifact_id": "unbound-template-right-front-right", "version": "training-profile", "sha256": "0000000000000000000000000000000000000000000000000000000000000000", "relative_path": "template/right/front_right/model.json"},
+      "back": {"artifact_id": "unbound-template-right-back", "version": "training-profile", "sha256": "0000000000000000000000000000000000000000000000000000000000000000", "relative_path": "template/right/back/model.json"},
+      "back_left": {"artifact_id": "unbound-template-right-back-left", "version": "training-profile", "sha256": "0000000000000000000000000000000000000000000000000000000000000000", "relative_path": "template/right/back_left/model.json"},
+      "back_right": {"artifact_id": "unbound-template-right-back-right", "version": "training-profile", "sha256": "0000000000000000000000000000000000000000000000000000000000000000", "relative_path": "template/right/back_right/model.json"}
+    }
+  },
+  "anomaly_models": {
+    "right": {
+      "front": {"family": "patchcore", "artifact": {"artifact_id": "unbound-patchcore-right-front", "version": "training-profile", "sha256": "0000000000000000000000000000000000000000000000000000000000000000", "relative_path": "models/anomaly/patchcore/right/front/model.ckpt"}},
+      "front_left": {"family": "patchcore", "artifact": {"artifact_id": "unbound-patchcore-right-front-left", "version": "training-profile", "sha256": "0000000000000000000000000000000000000000000000000000000000000000", "relative_path": "models/anomaly/patchcore/right/front_left/model.ckpt"}},
+      "front_right": {"family": "patchcore", "artifact": {"artifact_id": "unbound-patchcore-right-front-right", "version": "training-profile", "sha256": "0000000000000000000000000000000000000000000000000000000000000000", "relative_path": "models/anomaly/patchcore/right/front_right/model.ckpt"}},
+      "back": {"family": "patchcore", "artifact": {"artifact_id": "unbound-patchcore-right-back", "version": "training-profile", "sha256": "0000000000000000000000000000000000000000000000000000000000000000", "relative_path": "models/anomaly/patchcore/right/back/model.ckpt"}},
+      "back_left": {"family": "patchcore", "artifact": {"artifact_id": "unbound-patchcore-right-back-left", "version": "training-profile", "sha256": "0000000000000000000000000000000000000000000000000000000000000000", "relative_path": "models/anomaly/patchcore/right/back_left/model.ckpt"}},
+      "back_right": {"family": "patchcore", "artifact": {"artifact_id": "unbound-patchcore-right-back-right", "version": "training-profile", "sha256": "0000000000000000000000000000000000000000000000000000000000000000", "relative_path": "models/anomaly/patchcore/right/back_right/model.ckpt"}}
+    }
+  },
+  "yolo_model": {
+    "artifact_id": "unbound-yolo-global",
+    "version": "training-profile",
+    "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "relative_path": "models/yolo/best.pt"
+  },
+  "template_thresholds": [],
+  "model_thresholds": [],
+  "fusion_policy_sha256": "074c5c82a3c1374083cd52e05c6f8ae4961253d16930431ca9b6b3790f58964e"
+}

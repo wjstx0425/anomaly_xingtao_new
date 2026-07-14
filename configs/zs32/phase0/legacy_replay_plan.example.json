@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "product": "ZS32",
+  "entrypoint": "pipeline/32_run_zs32_multimodel_inference.py",
+  "accelerator": "gpu",
+  "devices": 1,
+  "yolo_device": "0",
+  "cases": [
+    {
+      "case_id": "right-normal-001",
+      "quality_asset_id": "right-normal-001-quality",
+      "registration_asset_id": "right-normal-001-registration",
+      "geometry_asset_id": "right-normal-001-geometry",
+      "gate_producer_receipt_asset_id": "right-normal-001-gate-producer-receipt"
+    }
+  ]
+}

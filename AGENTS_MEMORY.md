@@ -28,7 +28,7 @@
 
 ## ZS32 six-view fixed PatchCore training (2026-07-13, complete)
 
-- Requested `/home/ljl/anomaly_xingtao` and `/DATA/ljl/right` do not exist on this machine. The adjusted checkout is `/home/yunjing/anomalib` (remote `mygithub` points to `git@github.com:wjstx0425/anomaly_xingtao.git`) and the adjusted data root is `/home/yunjing/anomalib/dataset/right`.
+- Requested `/home/ljl/anomaly_xingtao` and `/DATA/ljl/right` do not exist on this machine. The adjusted checkout is `/home/yunjing/anomalib` (the historical `mygithub` remote pointed to `git@github.com:wjstx0425/anomaly_xingtao.git`) and the adjusted data root is `/home/yunjing/anomalib/dataset/right`.
 - Fixed output root: `/home/yunjing/anomalib/results/six_view_fixed_seed42`; GPU: `0`; suffix: `wrn_l2_s256_r001_k9_fp16_fpr005_seed42`.
 - Fixed PatchCore settings: `wide_resnet50_2`, `layer2`, `256,256`, ROI `full`, coreset `0.01`, neighbors `9`, feature precision `float16`, train/eval batch `4`, workers `2`, normal holdout `0.2`, deploy FPR `0.05`, seed `42`.
 - Views are `right_front`, `right_front_left`, `right_front_right`, `right_back`, `right_back_left`, and `right_back_right`, trained serially with independent output roots/checkpoints/thresholds.
@@ -110,7 +110,7 @@
 - On 2026-07-02, before uploading local code to GitHub, the checkout had large local artifacts under `results/` (~70G), `dataset/` (~79G), and `c789_bottom/` (~3G).
 - `.gitignore` already ignored `results`, `dataset/`, `datasets`, and training logs such as `wandb/`, `lightning_logs/`, and `mlruns`.
 - Added `c789_bottom/` and `*.ckpt` to `.gitignore` so local model checkpoints are not accidentally staged by `git add .`.
-- Push local code changes to the `mygithub` remote (`git@github.com:wjstx0425/anomaly_xingtao.git`) rather than the upstream `origin` remote unless the user explicitly wants to contribute to upstream anomalib.
+- Push current code changes to the new repository (`git@github.com:wjstx0425/anomaly_xingtao_new.git`); keep the historical repository untouched unless the user explicitly requests otherwise.
 - On 2026-07-02, a follow-up review found documentation ambiguity around stages 7-15, upload boundaries, EfficientAD asset defaults, C789 geometry template workflow, demo archive/OCR outputs, and threshold sources. `README.md`, `pipeline/README.md`, and `CHANGELOG.md` were updated to make these boundaries explicit.
 - The same review fixed a small data-split bug: negative `--normal-test-ratio` values now raise `ValueError` instead of silently disabling the split.
 

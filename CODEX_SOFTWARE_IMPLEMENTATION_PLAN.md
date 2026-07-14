@@ -1,6 +1,6 @@
 # Codex 软件改造任务书：正反面多视角工业缺陷检测融合框架
 
-适用仓库：`https://github.com/wjstx0425/anomaly_xingtao`
+适用仓库：`https://github.com/wjstx0425/anomaly_xingtao_new`
 
 目标：在现有 AnomalyDINO / PatchCore / EfficientAD / 几何模板 workflow 基础上，把项目升级为“质量门控 + 配准 + ROI 几何分支 + 外观异常分支 + 多视角/正反面融合 + 鲁棒性 benchmark”的工业检测软件框架。
 

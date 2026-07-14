@@ -1,5 +1,13 @@
 # 缺陷检测 Pipeline 快速指南
 
+> **Legacy / Phase 0 only**：本文件下方的 numbered pipeline 是冻结旧行为、
+> golden replay 和非 ZS32 历史实验说明，不是新的 ZS32 正式训练/推理/部署入口。
+> ZS32 主链必须使用 `pipeline/zs32_*.py` / `uv run zs32-*` 以及
+> `docs/ZS32_LINUX_REFACTOR_RUNBOOK.md`。所有正式测试、训练、相机验证、推理和
+> 部署只在 Linux + NVIDIA 主机执行；Mac 仅修改代码。旧脚本在 Phase 0/Linux
+> golden parity 完成前保留，不能据此绕过 gate、ROI、dataset v4、candidate、
+> promotion 或 immutable release 合同。
+
 所有命令都在仓库根目录执行：
 
 ```bash

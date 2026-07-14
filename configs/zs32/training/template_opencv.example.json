@@ -1,0 +1,7 @@
+{
+  "width": 640,
+  "max_shift": 12,
+  "templates_per_group": 5,
+  "max_train_samples": 200,
+  "template_version": "zs32-opencv-template-v1"
+}

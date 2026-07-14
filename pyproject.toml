@@ -31,6 +31,7 @@ classifiers = [
 dependencies = [
     # CLI requirements
     "omegaconf>=2.1.1",
+    "pyyaml>=6.0",
     "rich>=13.5.2",
     "jsonargparse[signatures]>=4.27.7,<4.47.0",
     "docstring_parser",     # CLI help-formatter
@@ -139,6 +140,24 @@ dev = ["anomalib[full,docs,test]"]
 [project.scripts]
 anomalib = "anomalib.cli.cli:main"
 
+# ZS32 workflows intentionally remain separate from the upstream anomalib CLI.
+zs32-capture = "zs32_inspection.cli.capture:main"
+zs32-publish-gate-policy = "zs32_inspection.cli.publish_gate_policy:main"
+zs32-build-dataset = "zs32_inspection.cli.build_dataset:main"
+zs32-train-anomaly = "zs32_inspection.cli.train_anomaly:main"
+zs32-train-template = "zs32_inspection.cli.train_template:main"
+zs32-import-yolo = "zs32_inspection.cli.import_yolo:main"
+zs32-build-candidate-registration = "zs32_inspection.cli.build_candidate_registration:main"
+zs32-register-candidate = "zs32_inspection.cli.register_candidate:main"
+zs32-score-calibration = "zs32_inspection.cli.score_calibration:main"
+zs32-calibrate = "zs32_inspection.cli.calibrate:main"
+zs32-finalize-recipe = "zs32_inspection.cli.finalize_recipe:main"
+zs32-compile-contract = "zs32_inspection.cli.compile_contract:main"
+zs32-validate-candidate = "zs32_inspection.cli.validate_candidate:main"
+zs32-snapshot-runtime-environment = "zs32_inspection.cli.snapshot_environment:main"
+zs32-assemble-release = "zs32_inspection.cli.assemble_release:main"
+zs32-inspect = "zs32_inspection.cli.inspect:main"
+
 [tool.hatch.version]
 path = "src/anomalib/__init__.py"
 
@@ -153,6 +172,9 @@ only-include = [
     "src/",
     "third-party-programs.txt",
 ]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/anomalib", "src/zs32_inspection"]
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 # UV CONFIGURATION                                                            #

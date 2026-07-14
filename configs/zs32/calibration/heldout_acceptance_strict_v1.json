@@ -1,0 +1,1 @@
+{"limits":{"max_defect_escape_rate":0.0,"max_normal_reject_rate":0.0,"max_review_rate":0.0,"min_defect_heldout_parts":10,"min_normal_heldout_parts":20},"policy_id":"zs32-production-heldout-strict","policy_version":"1.0.0","product":"ZS32","schema":"zs32.heldout_acceptance_policy","schema_version":1}

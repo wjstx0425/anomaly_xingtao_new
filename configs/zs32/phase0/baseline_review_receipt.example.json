@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "product": "ZS32",
+  "case_id": "REPLACE_WITH_GOLDEN_CASE_ID",
+  "reviewed_at": "REPLACE_WITH_RFC3339_TIMESTAMP",
+  "reviewer": "REPLACE_WITH_REVIEWER",
+  "decision": "APPROVED",
+  "replays": [
+    {
+      "run_id": "replay-01",
+      "replay_root_sha256": "REPLACE_WITH_REPLAY_01_ROOT_SHA256",
+      "semantic_signature": "REPLACE_WITH_REPLAY_01_SEMANTIC_SIGNATURE"
+    },
+    {
+      "run_id": "replay-02",
+      "replay_root_sha256": "REPLACE_WITH_REPLAY_02_ROOT_SHA256",
+      "semantic_signature": "REPLACE_WITH_REPLAY_02_SEMANTIC_SIGNATURE"
+    }
+  ],
+  "score_comparison": {
+    "decision": "WITHIN_TOLERANCE",
+    "basis": "REPLACE_WITH_PREDECLARED_METRIC_TOLERANCE_AND_REVIEW_CONCLUSION"
+  }
+}

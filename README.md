@@ -43,14 +43,38 @@
 
 # Custom Industrial Defect Pipeline
 
-This fork includes a local C789/FX11 inspection workflow under [pipeline/](pipeline/README.md). The workflow covers image capture, part cropping, model training, inference review, live two-sided inspection, stress-normal validation, manual C789 geometry templates, quality gate calibration, multi-view manifests, CSV-based fail-closed fusion, and robustness benchmark summaries.
+This fork is migrating to a ZS32-only, topology-driven inspection system. The
+legacy C789/FX11 workflow remains temporarily for Phase 0 golden parity and
+must not receive new features. It is deleted only after Linux + NVIDIA replay
+acceptance.
+
+Authoritative design and execution documents:
+
+- [ZS32 refactor blueprint](docs/ZS32_REFACTOR_BLUEPRINT.md)
+- [Phase 0 Linux freeze runbook](docs/PHASE0_LINUX_RUNBOOK.md)
+- [ZS32 Linux refactor runbook](docs/ZS32_LINUX_REFACTOR_RUNBOOK.md)
+
+Mac is edit-only. Camera work, tests, training, calibration, inference and
+deployment are accepted only on the Linux + NVIDIA host. The new business
+implementation lives under `src/zs32_inspection`; `pipeline/zs32_*.py` files
+are thin command wrappers.
+
+Run the following only after pulling the reviewed commit onto Linux + NVIDIA:
 
 ```bash
-uv sync
-.venv/bin/python pipeline/8_train_custom_models.py --help
+uv lock --check
+uv sync --frozen --extra cu126 --extra test
+uv run zs32-capture --help
 ```
 
-Large local artifacts are intentionally excluded from Git. Keep datasets, checkpoints, and training outputs under ignored paths such as `dataset/`, `datasets/`, `results/`, `c789_bottom/`, and `*.ckpt`; upload source code and documentation only.
+Large or station-specific artifacts are intentionally excluded from Git. Keep
+datasets, raw images, checkpoints, model/source bundles, generated
+publications and Linux evidence on the Linux asset volume. Git contains source,
+documentation, reviewed small configs, the tracked `uv.lock`, and lightweight
+`baselines/zs32/*.pointer.json` trust anchors only. Linux must pull an explicitly
+communicated commit, verify its tree and `uv.lock` SHA256, keep a clean worktree,
+and use `uv sync --frozen`; see the Linux runbook for the handoff record and
+evidence-return checklist.
 
 # 👋 Introduction
 

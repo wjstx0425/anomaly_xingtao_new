@@ -1,0 +1,22 @@
+{
+  "schema_version": 2,
+  "image_size": [252, 252],
+  "model": {
+    "num_neighbours": 1,
+    "encoder_name": "dinov2_vit_small_14",
+    "masking": false,
+    "coreset_subsampling": false,
+    "sampling_ratio": 0.1,
+    "precision": "float32"
+  },
+  "trainer": {
+    "max_epochs": 1,
+    "precision": "32-true",
+    "train_batch_size": 8,
+    "num_workers": 8,
+    "seed": 43
+  },
+  "auxiliary": {
+    "encoder_weights_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+  }
+}

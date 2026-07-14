@@ -184,3 +184,34 @@ mlruns
 # application data
 application/**/data/
 application/**/logs/
+
+# ZS32 local-only inputs and Linux runtime artifacts
+#
+# Git stores source, reviewed small configs, docs and lightweight
+# baselines/zs32/*.pointer.json trust anchors.  Real images, weights, model
+# bundles, generated publications, unreviewed station overrides and signed
+# evidence stay on the Linux asset volume. Reviewed topology serials may remain
+# in the tracked deployment configuration.
+/artifacts/
+/raw/
+/runs/
+/outputs/
+/exports/
+/registrations/
+/score_runs/
+/calibrations/
+/validations/
+/releases/
+/inspections/
+/linux_evidence/
+/weights/
+/evidence/
+*.local.json
+*.local.yaml
+*.local.yml
+*.pt
+*.pth
+*.onnx
+*.engine
+*.safetensors
+*.bundle

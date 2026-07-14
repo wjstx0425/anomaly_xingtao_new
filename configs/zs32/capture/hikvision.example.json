@@ -1,0 +1,19 @@
+{
+  "exposure": 4000.0,
+  "gain": 0.0,
+  "timeout_ms": 3000,
+  "capture_interval": 0.2,
+  "hdr": false,
+  "short_exposure": 4000.0,
+  "long_exposure": 35000.0,
+  "hdr_settle_frames": 8,
+  "align_hdr": true,
+  "short_dark_threshold": 80.0,
+  "long_clip_threshold": 245.0,
+  "blend_width": 50.0,
+  "blur_size": 101,
+  "hdr_max_retries": 2,
+  "hdr_max_clip_pct": 5.0,
+  "png_compression": 3,
+  "frame_buffer_size": 52428800
+}

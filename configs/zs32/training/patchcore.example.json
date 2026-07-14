@@ -1,0 +1,26 @@
+{
+  "schema_version": 2,
+  "image_size": [256, 256],
+  "model": {
+    "backbone": "wide_resnet50_2",
+    "layers": ["layer2", "layer3"],
+    "pre_trained": false,
+    "initialization": "explicit_state_dict",
+    "coreset_sampling_ratio": 0.1,
+    "num_neighbors": 9,
+    "precision": "float32"
+  },
+  "trainer": {
+    "max_epochs": 1,
+    "precision": "32-true",
+    "train_batch_size": 32,
+    "num_workers": 8,
+    "seed": 43
+  },
+  "auxiliary": {
+    "backbone_weights_asset_id": "imagenet1k-wide_resnet50_2-anomalib-timm-feature-extractor-v1",
+    "backbone_weights_path": "/ABSOLUTE/LINUX/PATH/wide_resnet50_2_feature_extractor_state_dict.pt",
+    "backbone_weights_sha256": "REPLACE_WITH_64_CHARACTER_LOWERCASE_SHA256",
+    "state_dict_scope": "anomalib_timm_feature_extractor"
+  }
+}
