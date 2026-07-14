@@ -142,6 +142,7 @@ anomalib = "anomalib.cli.cli:main"
 
 # ZS32 workflows intentionally remain separate from the upstream anomalib CLI.
 zs32-capture = "zs32_inspection.cli.capture:main"
+zs32-dashboard = "zs32_inspection.cli.dashboard:main"
 zs32-publish-gate-policy = "zs32_inspection.cli.publish_gate_policy:main"
 zs32-build-dataset = "zs32_inspection.cli.build_dataset:main"
 zs32-train-anomaly = "zs32_inspection.cli.train_anomaly:main"
