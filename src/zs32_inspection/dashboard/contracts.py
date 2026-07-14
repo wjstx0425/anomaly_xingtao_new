@@ -127,6 +127,9 @@ class InspectionResult:
         if actual_order != VIEW_ORDER:
             msg = f"views must match VIEW_ORDER exactly, got {actual_order!r}"
             raise ValueError(msg)
+        if self.mode not in ("offline", "live"):
+            msg = "mode must be 'offline' or 'live'"
+            raise ValueError(msg)
 
 
 @dataclass(frozen=True, slots=True)

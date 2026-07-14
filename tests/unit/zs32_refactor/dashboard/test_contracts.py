@@ -147,6 +147,20 @@ def test_inspection_result_requires_exactly_eight_ordered_views(tmp_path: Path, 
         )
 
 
+def test_inspection_result_rejects_unknown_mode(tmp_path: Path) -> None:
+    identity = InspectionIdentity("part-1", "session-1", "group-1", "right")
+    views = tuple(_make_view(tmp_path, view) for view in VIEW_ORDER)
+
+    with pytest.raises(ValueError, match="mode"):
+        InspectionResult(
+            identity=identity,
+            views=views,
+            machine_status="REVIEW",
+            reason="test",
+            mode="batch",  # type: ignore[arg-type]
+        )
+
+
 @pytest.mark.parametrize(
     ("part_id", "capture_session", "group_id", "hand"),
     [
