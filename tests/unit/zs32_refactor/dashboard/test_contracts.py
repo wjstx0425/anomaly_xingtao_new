@@ -93,3 +93,74 @@ def test_inspection_contract_preserves_eight_ordered_views_and_optional_scores(
     assert result.mode == "offline"
     with pytest.raises(FrozenInstanceError):
         result.reason = "changed"
+
+
+def _make_view(tmp_path: Path, view: str, *, model_supported: bool | None = None) -> ViewResult:
+    return ViewResult(
+        view=view,
+        source_path=tmp_path / f"{view}.png",
+        source_sha256="a" * 64,
+        source_shape=(1080, 1440),
+        model_supported=view in MODELED_VIEWS if model_supported is None else model_supported,
+        branches={},
+        capture={},
+    )
+
+
+@pytest.mark.parametrize("view", ["left", "", "FRONT"])
+def test_view_result_rejects_unknown_view(tmp_path: Path, view: str) -> None:
+    with pytest.raises(ValueError, match="view"):
+        _make_view(tmp_path, view)
+
+
+@pytest.mark.parametrize(
+    ("view", "model_supported"),
+    [("front", False), ("back_right", False), ("front_secondary", True), ("back_secondary", True)],
+)
+def test_view_result_requires_support_to_match_modeled_views(
+    tmp_path: Path,
+    view: str,
+    model_supported: bool,
+) -> None:
+    with pytest.raises(ValueError, match="model_supported"):
+        _make_view(tmp_path, view, model_supported=model_supported)
+
+
+@pytest.mark.parametrize(
+    "views",
+    [
+        VIEW_ORDER[:-1],
+        (*VIEW_ORDER[:-1], "back_right"),
+        (VIEW_ORDER[1], VIEW_ORDER[0], *VIEW_ORDER[2:]),
+    ],
+    ids=["missing", "duplicate", "wrong-order"],
+)
+def test_inspection_result_requires_exactly_eight_ordered_views(tmp_path: Path, views: tuple[str, ...]) -> None:
+    identity = InspectionIdentity("part-1", "session-1", "group-1", "right")
+
+    with pytest.raises(ValueError, match="VIEW_ORDER"):
+        InspectionResult(
+            identity=identity,
+            views=tuple(_make_view(tmp_path, view) for view in views),
+            machine_status="REVIEW",
+            reason="test",
+        )
+
+
+@pytest.mark.parametrize(
+    ("part_id", "capture_session", "group_id", "hand"),
+    [
+        ("part-1", "session-1", "group-1", "left"),
+        ("", "session-1", "group-1", "right"),
+        ("part-1", "", "group-1", "right"),
+        ("part-1", "session-1", "", "right"),
+    ],
+)
+def test_inspection_identity_rejects_invalid_runtime_values(
+    part_id: str,
+    capture_session: str,
+    group_id: str,
+    hand: str,
+) -> None:
+    with pytest.raises(ValueError):
+        InspectionIdentity(part_id, capture_session, group_id, hand)  # type: ignore[arg-type]

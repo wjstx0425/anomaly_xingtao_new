@@ -28,6 +28,13 @@ MODELED_VIEWS = (
 )
 
 
+def _require_non_empty(field_name: str, value: object) -> None:
+    """Reject missing or blank identity fields at runtime."""
+    if not isinstance(value, str) or not value.strip():
+        msg = f"{field_name} must be a non-empty string"
+        raise ValueError(msg)
+
+
 class EvidenceLayer(StrEnum):
     """Dashboard evidence layers in their stable presentation order."""
 
@@ -55,6 +62,14 @@ class InspectionIdentity:
     capture_session: str
     group_id: str
     hand: Literal["right"]
+
+    def __post_init__(self) -> None:
+        """Validate the stable right-hand identity contract at runtime."""
+        for field_name in ("part_id", "capture_session", "group_id"):
+            _require_non_empty(field_name, getattr(self, field_name))
+        if self.hand != "right":
+            msg = "hand must be 'right'"
+            raise ValueError(msg)
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +100,16 @@ class ViewResult:
     branches: Mapping[str, BranchEvidence]
     capture: Mapping[str, str]
 
+    def __post_init__(self) -> None:
+        """Validate view membership and its fixed model-support policy."""
+        if self.view not in VIEW_ORDER:
+            msg = f"view must be one of VIEW_ORDER, got {self.view!r}"
+            raise ValueError(msg)
+        expected_support = self.view in MODELED_VIEWS
+        if self.model_supported is not expected_support:
+            msg = f"model_supported must be {expected_support} for view {self.view!r}"
+            raise ValueError(msg)
+
 
 @dataclass(frozen=True, slots=True)
 class InspectionResult:
@@ -95,6 +120,13 @@ class InspectionResult:
     machine_status: str
     reason: str
     mode: Literal["offline", "live"] = "offline"
+
+    def __post_init__(self) -> None:
+        """Require the exact closed, ordered eight-view result set."""
+        actual_order = tuple(view.view for view in self.views)
+        if actual_order != VIEW_ORDER:
+            msg = f"views must match VIEW_ORDER exactly, got {actual_order!r}"
+            raise ValueError(msg)
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,3 +150,14 @@ class ConfirmationCommand:
     round: Literal["front", "back"]
     confirmation_id: str
     part_id: str
+
+    def __post_init__(self) -> None:
+        """Validate the single supported command shape at runtime."""
+        if self.action != "confirm_round":
+            msg = "action must be 'confirm_round'"
+            raise ValueError(msg)
+        if self.round not in ("front", "back"):
+            msg = "round must be 'front' or 'back'"
+            raise ValueError(msg)
+        _require_non_empty("confirmation_id", self.confirmation_id)
+        _require_non_empty("part_id", self.part_id)

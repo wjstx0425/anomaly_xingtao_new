@@ -41,7 +41,10 @@ def consume_confirmation(path: Path, expected: ConfirmationCommand) -> bool:
     if not path.is_file():
         return False
     try:
-        actual = ConfirmationCommand(**json.loads(path.read_text(encoding="utf-8")))
+        try:
+            actual = ConfirmationCommand(**json.loads(path.read_text(encoding="utf-8")))
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return False
     finally:
         path.unlink(missing_ok=True)
     return actual == expected
