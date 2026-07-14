@@ -148,6 +148,79 @@ def test_invalid_yolo_detection_fails_closed(detection: dict[str, object]) -> No
     assert np.array_equal(rendered, image)
 
 
+def test_huge_yolo_coordinates_fail_closed_without_changing_input() -> None:
+    image = np.zeros((12, 16, 3), dtype=np.uint8)
+    original = image.copy()
+    detection = {"xyxy": [10**10000, 1, 10**10001, 5]}
+
+    rendered = draw_yolo_detections(image, (detection,), (3, 1, 11, 9))
+
+    assert np.array_equal(rendered, original)
+    assert np.array_equal(image, original)
+
+
+def _with_yolo_detections(
+    source_view: ViewResult,
+    detections: tuple[dict[str, object], ...],
+) -> ViewResult:
+    yolo = replace(source_view.branches["yolo"], roi_xyxy=(5, 5, 25, 15), detections=detections)
+    return replace(source_view, branches={**source_view.branches, "yolo": yolo})
+
+
+@pytest.mark.parametrize("layer", [EvidenceLayer.YOLO, EvidenceLayer.FUSION])
+@pytest.mark.parametrize(
+    "detection",
+    [
+        {"xyxy": [10**10000, 1, 10**10001, 5]},
+        {"xyxy": [1, 2, 3]},
+    ],
+    ids=["huge-integer", "malformed"],
+)
+def test_compose_available_yolo_reports_all_invalid_detections(
+    source_view: ViewResult,
+    layer: EvidenceLayer,
+    detection: dict[str, object],
+) -> None:
+    view = _with_yolo_detections(source_view, (detection,))
+    original = cv2.imread(str(source_view.source_path))
+
+    composed = compose_view(view, layer)
+
+    assert "检测框数据无效" in composed.notice
+    assert np.array_equal(composed.image, original)
+
+
+@pytest.mark.parametrize("layer", [EvidenceLayer.YOLO, EvidenceLayer.FUSION])
+def test_compose_available_yolo_draws_valid_and_reports_partial_invalid(
+    source_view: ViewResult,
+    layer: EvidenceLayer,
+) -> None:
+    valid = {"xyxy": [1, 2, 8, 9], "class_name": "scratch", "confidence": 0.25}
+    invalid = {"xyxy": [10**10000, 1, 10**10001, 5]}
+    view = _with_yolo_detections(source_view, (valid, invalid))
+    original = cv2.imread(str(source_view.source_path))
+
+    composed = compose_view(view, layer)
+
+    assert "部分检测框无效" in composed.notice
+    assert not np.array_equal(composed.image, original)
+    assert np.array_equal(cv2.imread(str(source_view.source_path)), original)
+
+
+@pytest.mark.parametrize("layer", [EvidenceLayer.YOLO, EvidenceLayer.FUSION])
+def test_compose_empty_available_yolo_is_not_an_evidence_error(
+    source_view: ViewResult,
+    layer: EvidenceLayer,
+) -> None:
+    view = _with_yolo_detections(source_view, ())
+    original = cv2.imread(str(source_view.source_path))
+
+    composed = compose_view(view, layer)
+
+    assert "检测框" not in composed.notice
+    assert np.array_equal(composed.image, original)
+
+
 def test_secondary_non_original_layer_is_unsupported(secondary_view: ViewResult) -> None:
     composed = compose_view(secondary_view, EvidenceLayer.FUSION)
 

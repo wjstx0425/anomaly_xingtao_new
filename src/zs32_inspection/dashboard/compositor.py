@@ -154,7 +154,7 @@ def _valid_roi(roi_xyxy: tuple[int, int, int, int] | None, image_shape: tuple[in
     return 0 <= x1 < x2 <= width and 0 <= y1 < y2 <= height
 
 
-def _clipped_detection_box(
+def _coerce_box(
     detection: Mapping[str, object],
     roi_xyxy: tuple[int, int, int, int],
 ) -> tuple[int, int, int, int] | None:
@@ -166,7 +166,10 @@ def _clipped_detection_box(
         or any(isinstance(value, bool) or not isinstance(value, Real) for value in coordinates)
     ):
         return None
-    values = tuple(float(value) for value in coordinates)
+    try:
+        values = tuple(float(value) for value in coordinates)
+    except (TypeError, ValueError, OverflowError):
+        return None
     if not all(math.isfinite(value) for value in values):
         return None
     x1, y1, x2, y2 = values
@@ -202,23 +205,20 @@ def _detection_label(detection: Mapping[str, object]) -> str:
     return f"{class_name.strip()} {value:.2f}"
 
 
-def draw_yolo_detections(
+def _draw_yolo_detections(
     image: np.ndarray,
     detections: Sequence[Mapping[str, object]],
-    roi_xyxy: tuple[int, int, int, int] | None,
-) -> np.ndarray:
-    """Draw genuine crop-coordinate YOLO boxes mapped into the source image."""
+    roi_xyxy: tuple[int, int, int, int],
+) -> tuple[np.ndarray, int]:
     output = _as_bgr(image)
-    if not detections:
-        return output
-    if not _valid_roi(roi_xyxy, output.shape[:2]):
-        return output
-    assert roi_xyxy is not None
+    invalid_count = 0
     for detection in detections:
         if not isinstance(detection, Mapping):
+            invalid_count += 1
             continue
-        box = _clipped_detection_box(detection, roi_xyxy)
+        box = _coerce_box(detection, roi_xyxy)
         if box is None:
+            invalid_count += 1
             continue
         x1, y1, x2, y2 = box
         region = output[y1:y2, x1:x2]
@@ -241,7 +241,21 @@ def draw_yolo_detections(
                 1,
                 lineType=cv2.LINE_AA,
             )
-    return output
+    return output, invalid_count
+
+
+def draw_yolo_detections(
+    image: np.ndarray,
+    detections: Sequence[Mapping[str, object]],
+    roi_xyxy: tuple[int, int, int, int] | None,
+) -> np.ndarray:
+    """Draw genuine crop-coordinate YOLO boxes mapped into the source image."""
+    output = _as_bgr(image)
+    if not detections or not _valid_roi(roi_xyxy, output.shape[:2]):
+        return output
+    assert roi_xyxy is not None
+    rendered, _ = _draw_yolo_detections(output, detections, roi_xyxy)
+    return rendered
 
 
 def _branch_notice(branch: BranchEvidence, label: str) -> str:
@@ -288,9 +302,17 @@ def _apply_yolo(image: np.ndarray, branch: BranchEvidence) -> tuple[np.ndarray, 
     unavailable = _branch_notice(branch, "YOLO")
     if unavailable:
         return image.copy(), unavailable
-    if branch.detections and not _valid_roi(branch.roi_xyxy, image.shape[:2]):
+    if not branch.detections:
+        return image.copy(), ""
+    if not _valid_roi(branch.roi_xyxy, image.shape[:2]):
         return image.copy(), "YOLO: 证据错误：缺少或非法 ROI"
-    return draw_yolo_detections(image, branch.detections, branch.roi_xyxy), ""
+    assert branch.roi_xyxy is not None
+    rendered, invalid_count = _draw_yolo_detections(image, branch.detections, branch.roi_xyxy)
+    if invalid_count == len(branch.detections):
+        return rendered, "YOLO: 检测框数据无效"
+    if invalid_count:
+        return rendered, "YOLO: 部分检测框无效"
+    return rendered, ""
 
 
 def _required_branch(view: ViewResult, name: str) -> BranchEvidence:
