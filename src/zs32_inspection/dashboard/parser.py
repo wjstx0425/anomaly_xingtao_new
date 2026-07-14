@@ -293,7 +293,11 @@ def _parse_view(
 
     source_path = _require_file(result_dir, value.get("source_path"), field=f"{context}.source_path")
     source_sha256 = _required_text(value, "source_sha256", context=context)
-    actual_sha256 = hashlib.sha256(source_path.read_bytes()).hexdigest()
+    try:
+        source_bytes = source_path.read_bytes()
+    except OSError as error:
+        raise DashboardResultError(f"{context}.source_path could not be read: {error}") from error
+    actual_sha256 = hashlib.sha256(source_bytes).hexdigest()
     if source_sha256 != actual_sha256:
         raise DashboardResultError(f"{context}.source_sha256 does not match source_path")
     source_shape = _source_shape(value.get("source_shape"), view=expected_view)

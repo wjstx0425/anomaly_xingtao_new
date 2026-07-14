@@ -200,6 +200,23 @@ def test_parser_wraps_source_path_resolve_failure(
         load_inspection_result(eight_view_result_dir)
 
 
+def test_parser_wraps_source_read_failure(
+    eight_view_result_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_read_bytes = Path.read_bytes
+
+    def fail_source_read(path: Path) -> bytes:
+        if path.name == "front.png" and path.parent.name == "sources":
+            raise PermissionError("source became unreadable")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", fail_source_read)
+
+    with pytest.raises(DashboardResultError, match="source_path.*read.*source became unreadable"):
+        load_inspection_result(eight_view_result_dir)
+
+
 def test_parser_rejects_source_hash_mismatch(eight_view_result_dir: Path) -> None:
     rewrite_view(eight_view_result_dir, "front", source_sha256="0" * 64)
 
