@@ -22,6 +22,8 @@ from .contracts import (
 )
 
 _BRANCH_NAMES = ("template", "patchcore", "yolo", "fusion")
+_ERROR_STATUSES = {"error", "failed", "execution_error"}
+_SKIPPED_STATUSES = {"skipped", "not_run", "not_executed"}
 
 
 class DashboardResultError(ValueError):
@@ -32,9 +34,22 @@ def _reject_json_constant(value: str) -> NoReturn:
     raise ValueError(f"non-finite JSON constant is forbidden: {value}")
 
 
+def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in payload:
+            raise ValueError(f"duplicate JSON object key: {key!r}")
+        payload[key] = value
+    return payload
+
+
 def _load_json(path: Path) -> Mapping[str, Any]:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"), parse_constant=_reject_json_constant)
+        payload = json.loads(
+            path.read_text(encoding="utf-8"),
+            parse_constant=_reject_json_constant,
+            object_pairs_hook=_unique_object,
+        )
     except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as error:
         raise DashboardResultError(f"could not load strict JSON manifest {path}: {error}") from error
     if not isinstance(payload, dict):
@@ -78,20 +93,23 @@ def _require_exact_views(value: Any) -> Mapping[str, Any]:
     return value
 
 
-def _resolve_artifact(result_dir: Path, value: Any, *, field: str) -> Path:
+def _resolve_result_path(result_dir: Path, value: Any, *, field: str) -> Path:
     if not isinstance(value, str) or not value.strip():
         raise DashboardResultError(f"{field} must be a non-empty path string")
     candidate = Path(value).expanduser()
     if not candidate.is_absolute():
         candidate = result_dir / candidate
-    resolved = candidate.resolve()
+    try:
+        resolved = candidate.resolve()
+    except (OSError, RuntimeError) as error:
+        raise DashboardResultError(f"{field} could not be resolved: {error}") from error
     if not resolved.is_relative_to(result_dir):
         raise DashboardResultError(f"{field} escapes result_dir: {value!r}")
     return resolved
 
 
 def _require_file(result_dir: Path, value: Any, *, field: str) -> Path:
-    path = _resolve_artifact(result_dir, value, field=field)
+    path = _resolve_result_path(result_dir, value, field=field)
     if not path.is_file():
         raise DashboardResultError(f"{field} does not identify a file: {path}")
     return path
@@ -140,6 +158,32 @@ def _parse_detections(value: Any, *, field: str) -> tuple[dict[str, Any], ...]:
     return tuple(dict(item) for item in value)
 
 
+def _branch_state(value: Mapping[str, Any], *, context: str) -> BranchState:
+    raw_state = value.get("state")
+    if raw_state is not None:
+        if not isinstance(raw_state, str):
+            raise DashboardResultError(f"{context}.state must be a string")
+        try:
+            return BranchState(raw_state.lower())
+        except ValueError as error:
+            raise DashboardResultError(f"{context}.state is invalid: {raw_state!r}") from error
+
+    status = value.get("status")
+    if not isinstance(status, str) or not status.strip():
+        raise DashboardResultError(f"{context}.status is required when state is absent")
+    executed = value.get("executed")
+    if executed is not None and not isinstance(executed, bool):
+        raise DashboardResultError(f"{context}.executed must be a boolean")
+    normalized = status.strip().lower().replace(" ", "_")
+    if normalized in _ERROR_STATUSES:
+        return BranchState.ERROR
+    if normalized == BranchState.UNSUPPORTED:
+        return BranchState.UNSUPPORTED
+    if executed is False or normalized in _SKIPPED_STATUSES:
+        return BranchState.SKIPPED
+    return BranchState.AVAILABLE
+
+
 def _parse_branch(
     branch: str,
     value: Any,
@@ -155,14 +199,8 @@ def _parse_branch(
     score: float | None = None
     try:
         score = _finite_score(value.get("score"), field=f"{context}.score")
-        raw_state = value.get("state", value.get("status", "error"))
-        if not isinstance(raw_state, str):
-            raise DashboardResultError(f"{context}.state must be a string")
-        try:
-            state = BranchState(raw_state.lower())
-        except ValueError as error:
-            raise DashboardResultError(f"{context}.state is invalid: {raw_state!r}") from error
-        status = value.get("status", raw_state.upper())
+        state = _branch_state(value, context=context)
+        status = value.get("status", state.value.upper())
         reason = value.get("reason", "")
         if not isinstance(status, str) or not isinstance(reason, str):
             raise DashboardResultError(f"{context}.status and reason must be strings")
@@ -270,8 +308,8 @@ def _parse_view(
     branch_values = value.get("branches")
     if branch_values is None:
         branch_values = {branch: value[branch] for branch in _BRANCH_NAMES if branch in value}
-    if not isinstance(branch_values, dict) or not branch_values:
-        raise DashboardResultError(f"{context}.branches must explicitly define branch records")
+    if not isinstance(branch_values, dict) or set(branch_values) != set(_BRANCH_NAMES):
+        raise DashboardResultError(f"{context}.branches must contain exactly {_BRANCH_NAMES!r}")
     branches = {
         branch: _parse_branch(
             branch,
@@ -306,7 +344,10 @@ def _parse_view(
 
 def load_inspection_result(result_dir: Path) -> InspectionResult:
     """Load and validate one explicit eight-view ``runtime_manifest.json`` result."""
-    resolved_result_dir = Path(result_dir).expanduser().resolve()
+    try:
+        resolved_result_dir = Path(result_dir).expanduser().resolve()
+    except (OSError, RuntimeError) as error:
+        raise DashboardResultError(f"result_dir could not be resolved: {error}") from error
     if not resolved_result_dir.is_dir():
         raise DashboardResultError(f"result_dir is not a directory: {resolved_result_dir}")
     manifest = _load_json(resolved_result_dir / "runtime_manifest.json")

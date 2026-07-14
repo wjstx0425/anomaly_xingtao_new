@@ -50,17 +50,33 @@ def test_parser_uses_topology_order_not_manifest_mapping_order(eight_view_result
     assert tuple(view.view for view in result.views) == VIEW_ORDER
 
 
-def test_parser_accepts_task2_direct_view_branch_fields(eight_view_result_dir: Path) -> None:
+def test_parser_maps_task2_direct_view_branch_fields(task2_direct_result_dir: Path) -> None:
+    result = load_inspection_result(task2_direct_result_dir)
+
+    assert set(result.views[0].branches) == {"template", "patchcore", "yolo", "fusion"}
+    assert result.views[0].branches["template"].state is BranchState.AVAILABLE
+    assert result.views[0].branches["template"].status == "NG_TEMPLATE"
+    assert result.views[1].branches["template"].state is BranchState.AVAILABLE
+    assert result.views[1].branches["template"].status == "REVIEW"
+    assert result.views[4].branches["patchcore"].state is BranchState.ERROR
+    assert result.views[0].branches["fusion"].state is BranchState.SKIPPED
+    assert result.views[0].branches["fusion"].score == pytest.approx(0.42)
+    assert all(branch.state is BranchState.UNSUPPORTED for branch in result.views[3].branches.values())
+
+
+@pytest.mark.parametrize("view", ["front", "front_secondary"])
+@pytest.mark.parametrize("mutation", ["missing", "extra"])
+def test_parser_requires_exact_core_branches(eight_view_result_dir: Path, view: str, mutation: str) -> None:
     manifest = load_manifest(eight_view_result_dir)
-    front = manifest["views"]["front"]  # type: ignore[index]
-    branches = front.pop("branches")
-    front.update(branches)
+    branches = manifest["views"][view]["branches"]
+    if mutation == "missing":
+        branches.pop("fusion")
+    else:
+        branches["geometry"] = branches["template"].copy()
     write_manifest(eight_view_result_dir, manifest)
 
-    result = load_inspection_result(eight_view_result_dir)
-
-    assert result.views[0].branches["patchcore"].state is BranchState.AVAILABLE
-    assert result.views[0].branches["yolo"].score == pytest.approx(0.25)
+    with pytest.raises(DashboardResultError, match="branches"):
+        load_inspection_result(eight_view_result_dir)
 
 
 def test_parser_preserves_nonzero_skipped_score_after_template_stop(eight_view_result_dir: Path) -> None:
@@ -167,6 +183,23 @@ def test_parser_rejects_source_symlink_escape(eight_view_result_dir: Path, tmp_p
         load_inspection_result(eight_view_result_dir)
 
 
+def test_parser_wraps_source_path_resolve_failure(
+    eight_view_result_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_resolve = Path.resolve
+
+    def fail_source(path: Path, *args: object, **kwargs: object) -> Path:
+        if path.name == "front.png" and path.parent.name == "sources":
+            raise OSError("source resolve failed")
+        return original_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", fail_source)
+
+    with pytest.raises(DashboardResultError, match="source_path.*resolve failed"):
+        load_inspection_result(eight_view_result_dir)
+
+
 def test_parser_rejects_source_hash_mismatch(eight_view_result_dir: Path) -> None:
     rewrite_view(eight_view_result_dir, "front", source_sha256="0" * 64)
 
@@ -229,6 +262,52 @@ def test_parser_turns_mask_artifact_failure_into_branch_error(
     assert view.branches["patchcore"].state is BranchState.ERROR
     assert view.branches["patchcore"].score == pytest.approx(0.25)
     assert view.branches["patchcore"].reason
+
+
+@pytest.mark.parametrize("path_field", ["evidence_path", "mask_path", "raw_anomaly_map_path"])
+def test_parser_turns_branch_path_resolve_failure_into_branch_error(
+    eight_view_result_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    path_field: str,
+) -> None:
+    manifest = load_manifest(eight_view_result_dir)
+    branch = manifest["views"]["front"]["branches"]["patchcore"]
+    if path_field == "raw_anomaly_map_path":
+        raw_path = eight_view_result_dir / "evidence" / "patchcore" / "raw_maps" / "front.npy"
+        raw_path.parent.mkdir(parents=True)
+        raw_path.write_bytes(b"raw")
+        branch[path_field] = str(raw_path.relative_to(eight_view_result_dir))
+    target = eight_view_result_dir / branch[path_field]
+    write_manifest(eight_view_result_dir, manifest)
+    original_resolve = Path.resolve
+
+    def fail_branch(path: Path, *args: object, **kwargs: object) -> Path:
+        if path == target:
+            raise RuntimeError("symlink loop")
+        return original_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", fail_branch)
+
+    result = load_inspection_result(eight_view_result_dir)
+
+    assert result.views[0].branches["patchcore"].state is BranchState.ERROR
+    assert "symlink loop" in result.views[0].branches["patchcore"].reason
+
+
+@pytest.mark.parametrize("duplicate", ["top", "view", "branch"])
+def test_parser_rejects_duplicate_json_object_keys(eight_view_result_dir: Path, duplicate: str) -> None:
+    path = eight_view_result_dir / "runtime_manifest.json"
+    text = path.read_text(encoding="utf-8")
+    if duplicate == "top":
+        text = text.replace("{", '{\n  "product": "ZS32",', 1)
+    elif duplicate == "view":
+        text = text.replace('"view": "front",', '"view": "front",\n      "view": "front",', 1)
+    else:
+        text = text.replace('"score": 0.25,', '"score": 0.25,\n          "score": 0.25,', 1)
+    path.write_text(text, encoding="utf-8")
+
+    with pytest.raises(DashboardResultError, match="duplicate.*key"):
+        load_inspection_result(eight_view_result_dir)
 
 
 @pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])

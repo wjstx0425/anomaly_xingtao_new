@@ -119,3 +119,24 @@ def eight_view_result_dir(tmp_path: Path) -> Path:
     }
     write_manifest(result_dir, manifest)
     return result_dir
+
+
+@pytest.fixture
+def task2_direct_result_dir(eight_view_result_dir: Path) -> Path:
+    """Publish four direct branch fields shaped like Task 2 view records."""
+    manifest = load_manifest(eight_view_result_dir)
+    for view in VIEW_ORDER:
+        record = manifest["views"][view]
+        branches = record.pop("branches")
+        for branch, payload in branches.items():
+            payload.pop("state", None)
+            payload["display_only"] = branch == "patchcore"
+            record[branch] = payload
+
+    front = manifest["views"]["front"]
+    front["template"].update(status="NG_TEMPLATE", executed=True, score=0.91)
+    front["fusion"].update(status="SKIPPED", executed=False, score=0.42)
+    manifest["views"]["front_left"]["template"].update(status="REVIEW", executed=True)
+    manifest["views"]["back"]["patchcore"].update(status="ERROR", reason="backend failed")
+    write_manifest(eight_view_result_dir, manifest)
+    return eight_view_result_dir
