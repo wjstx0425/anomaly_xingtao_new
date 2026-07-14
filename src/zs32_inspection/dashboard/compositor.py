@@ -192,16 +192,19 @@ def _coerce_box(
     return source_x1, source_y1, source_x2, source_y2
 
 
-def _detection_label(detection: Mapping[str, object]) -> str:
+def _detection_label(detection: Mapping[str, object]) -> str | None:
     class_name = detection.get("class_name")
     confidence = detection.get("confidence")
     if not isinstance(class_name, str) or not class_name.strip():
-        return ""
+        return None
     if isinstance(confidence, bool) or not isinstance(confidence, Real):
-        return ""
-    value = float(confidence)
+        return None
+    try:
+        value = float(confidence)
+    except (TypeError, ValueError, OverflowError):
+        return None
     if not math.isfinite(value) or not 0 <= value <= 1:
-        return ""
+        return None
     return f"{class_name.strip()} {value:.2f}"
 
 
@@ -209,16 +212,17 @@ def _draw_yolo_detections(
     image: np.ndarray,
     detections: Sequence[Mapping[str, object]],
     roi_xyxy: tuple[int, int, int, int],
-) -> tuple[np.ndarray, int]:
+) -> tuple[np.ndarray, int, int]:
     output = _as_bgr(image)
-    invalid_count = 0
+    invalid_box_count = 0
+    invalid_label_count = 0
     for detection in detections:
         if not isinstance(detection, Mapping):
-            invalid_count += 1
+            invalid_box_count += 1
             continue
         box = _coerce_box(detection, roi_xyxy)
         if box is None:
-            invalid_count += 1
+            invalid_box_count += 1
             continue
         x1, y1, x2, y2 = box
         region = output[y1:y2, x1:x2]
@@ -227,7 +231,9 @@ def _draw_yolo_detections(
         output[y1:y2, x1:x2] = cv2.addWeighted(region, 1.0 - _BOX_ALPHA, red, _BOX_ALPHA, 0)
         cv2.rectangle(output, (x1, y1), (x2 - 1, y2 - 1), _RED, 1, lineType=cv2.LINE_8)
         label = _detection_label(detection)
-        if label:
+        if label is None:
+            invalid_label_count += 1
+        else:
             label_region = output[y1:y2, x1:x2]
             label_x = 1 if label_region.shape[1] > 1 else 0
             label_y = max(1, min(label_region.shape[0] - 1, 12))
@@ -241,7 +247,7 @@ def _draw_yolo_detections(
                 1,
                 lineType=cv2.LINE_AA,
             )
-    return output, invalid_count
+    return output, invalid_box_count, invalid_label_count
 
 
 def draw_yolo_detections(
@@ -254,7 +260,7 @@ def draw_yolo_detections(
     if not detections or not _valid_roi(roi_xyxy, output.shape[:2]):
         return output
     assert roi_xyxy is not None
-    rendered, _ = _draw_yolo_detections(output, detections, roi_xyxy)
+    rendered, _, _ = _draw_yolo_detections(output, detections, roi_xyxy)
     return rendered
 
 
@@ -307,12 +313,22 @@ def _apply_yolo(image: np.ndarray, branch: BranchEvidence) -> tuple[np.ndarray, 
     if not _valid_roi(branch.roi_xyxy, image.shape[:2]):
         return image.copy(), "YOLO: 证据错误：缺少或非法 ROI"
     assert branch.roi_xyxy is not None
-    rendered, invalid_count = _draw_yolo_detections(image, branch.detections, branch.roi_xyxy)
-    if invalid_count == len(branch.detections):
-        return rendered, "YOLO: 检测框数据无效"
-    if invalid_count:
-        return rendered, "YOLO: 部分检测框无效"
-    return rendered, ""
+    rendered, invalid_box_count, invalid_label_count = _draw_yolo_detections(
+        image,
+        branch.detections,
+        branch.roi_xyxy,
+    )
+    notices: list[str] = []
+    if invalid_box_count == len(branch.detections):
+        notices.append("YOLO: 检测框数据无效")
+    elif invalid_box_count:
+        notices.append("YOLO: 部分检测框无效")
+    valid_box_count = len(branch.detections) - invalid_box_count
+    if valid_box_count and invalid_label_count == valid_box_count:
+        notices.append("YOLO: 检测标签数据无效")
+    elif invalid_label_count:
+        notices.append("YOLO: 部分检测标签无效")
+    return rendered, "; ".join(notices)
 
 
 def _required_branch(view: ViewResult, name: str) -> BranchEvidence:

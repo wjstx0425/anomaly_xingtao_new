@@ -221,6 +221,44 @@ def test_compose_empty_available_yolo_is_not_an_evidence_error(
     assert np.array_equal(composed.image, original)
 
 
+@pytest.mark.parametrize("layer", [EvidenceLayer.YOLO, EvidenceLayer.FUSION])
+@pytest.mark.parametrize(
+    "confidence",
+    [10**10000, float("nan"), float("inf"), "not-a-number"],
+    ids=["huge-integer", "nan", "infinity", "non-numeric"],
+)
+def test_compose_available_yolo_draws_box_and_reports_invalid_label_metadata(
+    source_view: ViewResult,
+    layer: EvidenceLayer,
+    confidence: object,
+) -> None:
+    detection = {"xyxy": [1, 2, 8, 9], "class_name": "scratch", "confidence": confidence}
+    view = _with_yolo_detections(source_view, (detection,))
+    original = cv2.imread(str(source_view.source_path))
+
+    composed = compose_view(view, layer)
+
+    assert "检测标签数据无效" in composed.notice
+    assert not np.array_equal(composed.image, original)
+    assert np.array_equal(cv2.imread(str(source_view.source_path)), original)
+
+
+@pytest.mark.parametrize("layer", [EvidenceLayer.YOLO, EvidenceLayer.FUSION])
+def test_compose_available_yolo_reports_partial_invalid_label_metadata(
+    source_view: ViewResult,
+    layer: EvidenceLayer,
+) -> None:
+    valid = {"xyxy": [1, 2, 8, 9], "class_name": "scratch", "confidence": 0.25}
+    invalid_label = {"xyxy": [10, 1, 15, 6], "class_name": "dent", "confidence": 10**10000}
+    view = _with_yolo_detections(source_view, (valid, invalid_label))
+    original = cv2.imread(str(source_view.source_path))
+
+    composed = compose_view(view, layer)
+
+    assert "部分检测标签无效" in composed.notice
+    assert not np.array_equal(composed.image, original)
+
+
 def test_secondary_non_original_layer_is_unsupported(secondary_view: ViewResult) -> None:
     composed = compose_view(secondary_view, EvidenceLayer.FUSION)
 
