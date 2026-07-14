@@ -20,7 +20,7 @@
   8. `back_secondary`
 - 使用纯 OpenCV 窗口，不引入 Tkinter、Qt、浏览器界面或 Web 服务。
 - 同时支持鼠标按钮和对应键盘快捷键。
-- 只保留“开始检测”、证据层切换和“退出”，不提供历史结果浏览或打开结果目录功能。
+- 只保留一个上下文相关的检测按钮、证据层切换和“退出”，不提供历史结果浏览或打开结果目录功能。该按钮依次承担“开始检测”“确认正面并拍摄”“确认背面并拍摄”，不增加其他采集按钮。
 - 离线模式仅通过 `--result-dir` 接收一个结果目录，不在窗口内实现文件选择器。
 - 真机模式通过 `--live --part-id <id>` 启动，Stage35 在后台子进程中运行。
 - 该界面用于 commissioning 和调试展示，不承担生产放行职责。
@@ -61,7 +61,7 @@ OpenCV 看板
 1. **结果解析器**：校验身份，将 JSON、CSV 和图像产物转换为一个八视角结果对象。
 2. **证据合成器**：把 crop 坐标中的 mask 和 detection 映射回源图，生成 Original、PatchCore、YOLO、Template 与 Fusion 层。
 3. **OpenCV 看板**：绘制顶部信息、八张卡片、控制区、单卡放大和错误状态，并负责鼠标命中与快捷键。
-4. **真机控制器**：只管理自己启动的 Stage35 子进程，通过结构化进度文件获取状态，不解析终端文本。
+4. **真机控制器**：只管理自己启动的 Stage35 进程组，通过结构化 progress/control 文件获取状态并发送正背面确认，不解析终端文本，也不依赖 TTY。
 
 ## 四相机 Stage35 合同
 
@@ -85,7 +85,7 @@ back, back_left, back_right
 
 以后 secondary 权重准备好时，只需新增这两个 view 的模型证据，不改变 GUI 合同。
 
-## 结构化进度
+## 结构化进度与采集确认
 
 Stage35 接收 progress 输出路径，并在状态变化时原子替换 JSON sidecar。至少支持：
 
@@ -100,6 +100,19 @@ Stage35 接收 progress 输出路径，并在状态变化时原子替换 JSON si
 - `failed`
 
 每条记录至少包含 part ID、已知时的 capture session、时间戳、state、message 和 error details。看板轮询该文件，不能根据 stdout 或 stderr 推断状态。
+
+四相机采集不得继续依赖终端 `Enter`。当 state 为 `waiting_front` 或 `waiting_back` 时，progress JSON 同时发布本次等待唯一的 `confirmation_id`。看板把同一个检测按钮分别显示为“确认正面并拍摄”或“确认背面并拍摄”；操作员点击按钮或按 `S` 后，看板原子写入 control JSON：
+
+```json
+{
+  "action": "confirm_round",
+  "round": "front",
+  "confirmation_id": "本次 waiting 状态提供的唯一值",
+  "part_id": "当前 part ID"
+}
+```
+
+采集进程只接受 round、part ID 和 `confirmation_id` 均与当前等待状态一致的确认。旧文件、重复点击、错误 round 或其他检测的确认全部拒绝。收到有效确认后才进入对应 `capturing_*` 状态。control 文件与 progress 文件使用同目录临时文件加 `Path.replace()` 原子发布，不通过 stdin/stdout 传递控制指令。
 
 ## PatchCore mask 产物
 
@@ -143,7 +156,7 @@ Fusion 只合并同一 view 中实际可用的证据层，并保留证据来源�
 │ 分数和状态   │ 分数和状态   │ 分数和状态   │ 采集状态               │
 ├─────────────────────────────────────────────────────────────────────┤
 │ Fusion | Original | PatchCore | YOLO | Template                    │
-│ 开始检测[S] | 退出[Q] | 当前阶段、进度或错误信息                   │
+│ 检测操作[S] | 退出[Q] | 当前阶段、进度或错误信息                   │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -152,7 +165,7 @@ Fusion 只合并同一 view 中实际可用的证据层，并保留证据来源�
 - secondary 在模型接入前显示原图和“暂未接入模型”。
 - 点击卡片进入单卡放大；再次点击或按 Escape 返回八图。
 - 鼠标按钮与键盘快捷键调用同一动作。
-- 子进程运行期间禁用重复“开始检测”。
+- 按钮标签随状态变化：idle 为“开始检测”，`waiting_front` 为“确认正面并拍摄”，`waiting_back` 为“确认背面并拍摄”，其他运行状态禁用。重复点击和过期确认不得触发采集。
 - `--part-id` 提供真机 part ID；第一版不在 OpenCV 画布中实现文本输入。
 
 状态颜色：OK 为绿色，NG 为红色，REVIEW 为橙色，运行中为蓝灰色，执行错误为紫红色。
@@ -165,7 +178,7 @@ Fusion 只合并同一 view 中实际可用的证据层，并保留证据来源�
 - 文件缺失、图片无效、采集不完整、身份冲突或 mask 几何错误属于执行错误，不是 NG。
 - mask 错误不应隐藏仍可读取的原图和有效分数，受影响卡片显示证据错误。
 - Stage35 非零退出时显示退出码和结构化失败原因，保留已经落盘的文件。
-- 关闭看板时终止并等待仍在运行且由看板启动的子进程，不删除 capture 或 runtime 产物。
+- 看板使用独立 process group 启动 Stage35。关闭时终止并等待仍在运行且由看板拥有的整个进程组，确保 Stage35、采集器或 Stage32 孙进程都被回收；不删除 capture 或 runtime 产物。
 
 ## 身份校验
 
@@ -194,6 +207,7 @@ Fusion 只合并同一 view 中实际可用的证据层，并保留证据来源�
 - template short circuit、REVIEW、NG、执行错误和 unsupported secondary 绘制；
 - OpenCV 卡片绘制、鼠标热区、快捷键、证据层切换与单卡放大；
 - 子进程启动、重复启动拦截、进度轮询、非零退出和关闭清理；
+- front/back `confirmation_id` 绑定、过期或重复 control 拒绝、按钮状态切换，以及无 TTY 采集；
 - CLI `--help` 和基于本地真实产物的离线 smoke test。
 
 离线验收后执行最小真机四相机 smoke test：一个右手件、八张源图、六个模型视角、两个 unsupported secondary 卡片和一个界面结果。该测试仅证明 commissioning 链路可运行，不是生产放行证据。
