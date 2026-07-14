@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import math
 import shutil
 import sys
 import tempfile
@@ -27,6 +28,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from capture_data.zs32_18_group_commissioning import validate_18_group_source_assets  # noqa: E402
 from capture_data.zs32_inspection_orchestrator import (  # noqa: E402
     CANONICAL_VIEWS,
     InspectionRequest,
@@ -36,6 +38,8 @@ from capture_data.zs32_model_runtime import ZS32ModelRuntime, load_runtime_confi
 from capture_data.zs32_template_gate import TemplateGate  # noqa: E402
 
 DEFAULT_RUNTIME_CONFIG = REPO_ROOT / "config/fusion/zs32_runtime_models.json"
+PRODUCTION_FUSION_PROFILE = "zs32-right"
+COMMISSIONING_FUSION_PROFILE = "zs32-right-18-commissioning"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -51,15 +55,32 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--runtime-config", type=Path, default=DEFAULT_RUNTIME_CONFIG)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--template-model-dir", type=Path, help="Optional first-stage template gate model.")
+    parser.add_argument(
+        "--diagnostic-skip-template",
+        action="store_true",
+        help="Run infer-only diagnostics without template or Stage18 evidence.",
+    )
     parser.add_argument("--quality-csv", type=Path, help="Strict six-view quality-gate evidence CSV.")
     parser.add_argument("--registration-csv", type=Path, help="Strict six-view registration evidence CSV.")
     parser.add_argument("--geometry-csv", type=Path, help="Strict six-view geometry evidence CSV.")
     parser.add_argument("--threshold-artifact", type=Path, help="Locked Stage-31 right-hand dual thresholds.")
+    parser.add_argument(
+        "--fusion-profile",
+        choices=(PRODUCTION_FUSION_PROFILE, COMMISSIONING_FUSION_PROFILE),
+        default=PRODUCTION_FUSION_PROFILE,
+        help="Explicit Stage-18 right-hand fusion contract.",
+    )
     parser.add_argument("--gt-label", type=int, choices=(0, 1), help="Optional label for calibration-row export.")
     parser.add_argument("--split", help="Optional physical-part split paired with --gt-label.")
     parser.add_argument("--accelerator", default="auto", help="Anomalib accelerator.")
     parser.add_argument("--devices", type=int, default=1, help="Anomalib device count.")
     parser.add_argument("--yolo-device", help="Optional Ultralytics device, e.g. 0 or cpu.")
+    parser.add_argument(
+        "--diagnostic-mask-threshold",
+        type=float,
+        default=0.65,
+        help="Display-only normalized anomaly-map fallback threshold.",
+    )
     return parser
 
 
@@ -68,11 +89,45 @@ def _request_from_args(args: argparse.Namespace) -> InspectionRequest:
     return InspectionRequest(args.part_id, args.capture_session, args.group_id, args.hand, images)
 
 
+def _template_status_allows_downstream(status: str, fusion_profile: str) -> bool:
+    """Allow template GRAY evidence to be covered only in complementary commissioning."""
+    normalized = status.strip().upper()
+    return normalized == "PASS" or (fusion_profile == COMMISSIONING_FUSION_PROFILE and normalized == "REVIEW")
+
+
+def _template_result_allows_downstream(result: dict[str, Any], fusion_profile: str) -> bool:
+    """Accept only complete PASS evidence or a genuine commissioning gray-band result."""
+    status = str(result.get("status", "")).strip().upper()
+    if not _template_status_allows_downstream(status, fusion_profile):
+        return False
+    try:
+        score = float(result["score"])
+        risk = float(result["risk_score"])
+        low = float(result["low_threshold"])
+        high = float(result["high_threshold"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    numbers_valid = all(math.isfinite(value) for value in (score, risk, low, high)) and score == risk and low <= high
+    decision_valid = (status == "PASS" and risk < low) or (status == "REVIEW" and low <= risk < high)
+    versions_valid = all(
+        isinstance(result.get(field), str) and bool(str(result[field]).strip())
+        for field in ("model_version", "threshold_version", "roi_version", "template_version")
+    )
+    evidence_sha256 = result.get("best_template_sha256")
+    evidence_valid = (
+        isinstance(evidence_sha256, str)
+        and len(evidence_sha256) == 64
+        and all(character in "0123456789abcdef" for character in evidence_sha256)
+    )
+    return numbers_valid and decision_valid and versions_valid and evidence_valid
+
+
 def _template_gate(
     request: InspectionRequest,
     runtime: ZS32ModelRuntime,
     model_dir: Path,
     workspace_parent: Path,
+    fusion_profile: str,
 ) -> tuple[tuple[dict[str, Any], ...], Path]:
     """Crop template inputs, then stop at the first non-PASS result."""
     workspace_parent.mkdir(parents=True, exist_ok=True)
@@ -106,7 +161,7 @@ def _template_gate(
                     "reason": f"template gate exception: {type(error).__name__}: {error}",
                 }
             results.append(result)
-            if str(result.get("status", "")).upper() != "PASS":
+            if not _template_result_allows_downstream(result, fusion_profile):
                 break
         return tuple(results), workspace
     except Exception:
@@ -119,6 +174,7 @@ def _publish_template_stop(
     output_dir: Path,
     results: tuple[dict[str, Any], ...],
     workspace: Path,
+    fusion_profile: str,
 ) -> None:
     """Publish a template short-circuit without starting PatchCore or YOLO."""
     if output_dir.exists():
@@ -131,14 +187,31 @@ def _publish_template_stop(
         "short_circuited": True,
         "stopped_after": "template_match",
         "part_id": request.part_id,
+        "capture_session": request.capture_session,
+        "group_id": request.group_id,
+        "hand": request.hand,
         "evaluated_views": [item.get("view") for item in results],
         "template_results": list(results),
         "reason": result.get("reason"),
+        "strict_fusion": False,
+        "fusion_profile": fusion_profile,
+        "commissioning_only": fusion_profile == COMMISSIONING_FUSION_PROFILE,
+        "production_release_allowed": False,
     }
-    (workspace / "runtime_summary.json").write_text(
-        json.dumps(summary, indent=2, sort_keys=True, default=str) + "\n",
-        encoding="utf-8",
-    )
+    for name in ("runtime_summary.json", "runtime_manifest.json"):
+        payload = dict(summary)
+        if name == "runtime_manifest.json":
+            payload.update(
+                capture_session=request.capture_session,
+                group_id=request.group_id,
+                hand=request.hand,
+                missing_required_evidence=["template_gate"],
+                note="Template-first short circuit; strict fusion and downstream models were not run.",
+            )
+        (workspace / name).write_text(
+            json.dumps(payload, indent=2, sort_keys=True, default=str) + "\n",
+            encoding="utf-8",
+        )
     workspace.replace(output_dir)
 
 
@@ -158,17 +231,11 @@ def _run_strict_fusion(args: argparse.Namespace, output_dir: Path, template_csv:
     stage18 = _load_stage18()
     values = [
         "--profile",
-        "zs32-right",
+        args.fusion_profile,
         "--threshold-artifact",
         str(args.threshold_artifact),
         "--template-match-csv",
         str(template_csv),
-        "--quality-csv",
-        str(args.quality_csv),
-        "--registration-csv",
-        str(args.registration_csv),
-        "--geometry-csv",
-        str(args.geometry_csv),
         "--branch-csv",
         f"patchcore={output_dir / 'patchcore.csv'}",
         "--branch-csv",
@@ -176,6 +243,17 @@ def _run_strict_fusion(args: argparse.Namespace, output_dir: Path, template_csv:
         "--output-dir",
         str(output_dir / "fusion"),
     ]
+    if args.fusion_profile == PRODUCTION_FUSION_PROFILE:
+        values.extend(
+            (
+                "--quality-csv",
+                str(args.quality_csv),
+                "--registration-csv",
+                str(args.registration_csv),
+                "--geometry-csv",
+                str(args.geometry_csv),
+            ),
+        )
     fusion_args = stage18.build_parser().parse_args(values)
     decisions = stage18.run_fusion(fusion_args)
     if len(decisions) != 1 or decisions[0].part_id != args.part_id:
@@ -184,34 +262,134 @@ def _run_strict_fusion(args: argparse.Namespace, output_dir: Path, template_csv:
     audit_path = output_dir / "fusion" / "audit" / f"{args.part_id}.json"
     audit = json.loads(audit_path.read_text(encoding="utf-8")) if audit_path.is_file() else {}
     return {
+        "part_id": args.part_id,
+        "capture_session": args.capture_session,
+        "group_id": args.group_id,
+        "hand": args.hand,
         "machine_status": decision.final_status,
         "inspection_complete": bool(audit.get("inspection_complete", False)),
         "strict_fusion": True,
         "fusion_output": str(output_dir / "fusion"),
         "reason": decision.reason,
+        "fusion_profile": args.fusion_profile,
+        "commissioning_only": args.fusion_profile == COMMISSIONING_FUSION_PROFILE,
+        "production_release_allowed": args.fusion_profile == PRODUCTION_FUSION_PROFILE,
     }
 
 
 def _validate_mode(args: argparse.Namespace) -> None:
+    if not math.isfinite(args.diagnostic_mask_threshold) or not 0 <= args.diagnostic_mask_threshold <= 1:
+        raise ValueError("--diagnostic-mask-threshold must be finite and within [0, 1]")
     if (args.gt_label is None) != (args.split is None):
         raise ValueError("--gt-label and --split must be provided together")
+    if args.diagnostic_skip_template and (
+        args.mode != "infer" or args.template_model_dir is not None or args.threshold_artifact is not None
+    ):
+        raise ValueError(
+            "--diagnostic-skip-template requires infer mode without --template-model-dir or --threshold-artifact",
+        )
     if args.mode == "fuse":
         required = {
             "--threshold-artifact": args.threshold_artifact,
             "--template-model-dir": args.template_model_dir,
-            "--quality-csv": args.quality_csv,
-            "--registration-csv": args.registration_csv,
-            "--geometry-csv": args.geometry_csv,
         }
+        if args.fusion_profile == PRODUCTION_FUSION_PROFILE:
+            required.update(
+                {
+                    "--quality-csv": args.quality_csv,
+                    "--registration-csv": args.registration_csv,
+                    "--geometry-csv": args.geometry_csv,
+                },
+            )
         missing = [name for name, value in required.items() if value is None]
         if missing:
             raise ValueError(f"fuse mode requires: {', '.join(missing)}")
+
+
+def _validate_commissioning_source_assets(args: argparse.Namespace) -> None:
+    """Fail before model loading when commissioning assets drift from locked thresholds."""
+    if args.mode != "fuse" or args.fusion_profile != COMMISSIONING_FUSION_PROFILE:
+        return
+    validate_18_group_source_assets(
+        args.threshold_artifact,
+        args.runtime_config,
+        args.template_model_dir / "model.json",
+    )
+
+
+def _update_runtime_manifest_after_fusion(output_dir: Path, summary: dict[str, Any]) -> None:
+    """Promote the Stage18 result while retaining the pre-fusion runtime state."""
+    path = output_dir / "runtime_manifest.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["pre_fusion_result"] = {
+        field: payload.get(field)
+        for field in ("machine_status", "inspection_complete", "missing_required_evidence", "note")
+    }
+    for field in (
+        "machine_status",
+        "inspection_complete",
+        "strict_fusion",
+        "fusion_profile",
+        "commissioning_only",
+        "production_release_allowed",
+        "fusion_output",
+    ):
+        payload[field] = summary.get(field)
+    payload["missing_required_evidence"] = (
+        []
+        if summary.get("inspection_complete") is True
+        else payload.get(
+            "missing_required_evidence",
+            [],
+        )
+    )
+    payload["note"] = (
+        "Stage18 fusion completed for the named profile; production release remains governed by "
+        "production_release_allowed."
+    )
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temporary.replace(path)
+
+
+def _publish_diagnostic_contract(
+    request: InspectionRequest,
+    output_dir: Path,
+    summary: dict[str, Any],
+    patchcore_csv: Path,
+    yolo_csv: Path,
+) -> None:
+    """Publish an explicit non-production contract for template-skipping diagnostics."""
+    fields = {
+        "part_id": request.part_id,
+        "capture_session": request.capture_session,
+        "group_id": request.group_id,
+        "hand": request.hand,
+        "diagnostic_skip_template": True,
+        "inspection_complete": False,
+        "strict_fusion": False,
+        "commissioning_only": True,
+        "production_release_allowed": False,
+    }
+    summary.update(
+        fields,
+        patchcore_csv=str(patchcore_csv.expanduser().resolve()),
+        yolo_csv=str(yolo_csv.expanduser().resolve()),
+    )
+    path = output_dir / "runtime_manifest.json"
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    manifest.update(fields)
+    manifest["note"] = "Template and Stage18 were intentionally skipped for diagnostic inference."
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temporary.replace(path)
 
 
 def main() -> None:
     """Run the unified template-first inference and optional strict fusion workflow."""
     args = build_parser().parse_args()
     _validate_mode(args)
+    _validate_commissioning_source_assets(args)
     config = load_runtime_config(args.runtime_config)
     request = _request_from_args(args)
     output_dir = args.output_dir.expanduser().resolve()
@@ -236,11 +414,12 @@ def main() -> None:
             runtime,
             args.template_model_dir,
             output_dir.parent,
+            args.fusion_profile,
         )
         if len(template_results) != len(CANONICAL_VIEWS) or any(
-            str(result.get("status", "")).upper() != "PASS" for result in template_results
+            not _template_result_allows_downstream(result, args.fusion_profile) for result in template_results
         ):
-            _publish_template_stop(request, output_dir, template_results, template_workspace)
+            _publish_template_stop(request, output_dir, template_results, template_workspace, args.fusion_profile)
             print(f"machine_status: {json.loads((output_dir / 'runtime_summary.json').read_text())['machine_status']}")
             print("inspection_complete: false")
             print(f"output_dir: {output_dir}")
@@ -252,6 +431,7 @@ def main() -> None:
         threshold_artifact=args.threshold_artifact,
         gt_label=args.gt_label,
         split=args.split,
+        diagnostic_mask_threshold=args.diagnostic_mask_threshold,
     )
     template_csv: Path | None = None
     if template_results is not None and template_workspace is not None:
@@ -280,10 +460,19 @@ def main() -> None:
         "missing_required_evidence": list(result.missing_required_evidence),
         "errors": list(result.errors),
     }
+    if args.diagnostic_skip_template:
+        _publish_diagnostic_contract(
+            request,
+            output_dir,
+            summary,
+            result.patchcore_csv,
+            result.yolo_csv,
+        )
     if args.mode == "fuse":
         if template_csv is None:
             raise RuntimeError("template evidence unexpectedly missing")
         summary = _run_strict_fusion(args, output_dir, template_csv)
+        _update_runtime_manifest_after_fusion(output_dir, summary)
     (output_dir / "runtime_summary.json").write_text(
         json.dumps(summary, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",

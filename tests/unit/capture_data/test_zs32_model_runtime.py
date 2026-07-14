@@ -9,12 +9,20 @@ import csv
 import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import cv2
 import numpy as np
 import pytest
 from capture_data.zs32_inspection_orchestrator import InspectionRequest
-from capture_data.zs32_model_runtime import ModelEvidence, ZS32ModelRuntime, load_runtime_config
+from capture_data.zs32_model_runtime import (
+    AnomalibPatchcoreBackend,
+    ModelEvidence,
+    PatchcoreArtifacts,
+    ZS32ModelRuntime,
+    _build_patchcore_mask,
+    load_runtime_config,
+)
 
 VIEWS = ("front", "front_left", "front_right", "back", "back_left", "back_right")
 
@@ -100,14 +108,39 @@ class _PatchcoreBackend:
     def __init__(self) -> None:
         self.calls: list[tuple[str, tuple[int, int]]] = []
 
-    def predict(self, view: str, crop_path: Path, evidence_path: Path) -> ModelEvidence:
+    def predict(
+        self,
+        view: str,
+        crop_path: Path,
+        evidence_path: Path,
+        *,
+        diagnostic_mask_threshold: float = 0.65,
+    ) -> ModelEvidence:
         """Write a deterministic fake PatchCore overlay."""
         image = cv2.imread(str(crop_path))
         assert image is not None
         self.calls.append((view, image.shape[:2]))
         evidence_path.parent.mkdir(parents=True, exist_ok=True)
         assert cv2.imwrite(str(evidence_path), image)
-        return ModelEvidence(score=0.1 + len(self.calls) / 100, evidence_path=evidence_path)
+        raw_path = evidence_path.parent / "raw_maps" / f"{view}.npy"
+        mask_path = evidence_path.parent / "masks" / f"{view}.png"
+        raw_path.parent.mkdir(parents=True, exist_ok=True)
+        mask_path.parent.mkdir(parents=True, exist_ok=True)
+        raw = np.arange(4, dtype=np.float32).reshape(2, 2)
+        np.save(raw_path, raw, allow_pickle=False)
+        assert cv2.imwrite(str(mask_path), np.full(image.shape[:2], 255, dtype=np.uint8))
+        return ModelEvidence(
+            score=0.1 + len(self.calls) / 100,
+            evidence_path=evidence_path,
+            patchcore_artifacts=PatchcoreArtifacts(
+                raw_anomaly_map_path=raw_path,
+                mask_path=mask_path,
+                mask_source="diagnostic_anomaly_map",
+                diagnostic_mask_threshold=diagnostic_mask_threshold,
+                raw_anomaly_map_shape=raw.shape,
+                mask_shape=image.shape[:2],
+            ),
+        )
 
 
 class _YoloBackend:
@@ -137,6 +170,118 @@ def test_load_runtime_config_requires_exactly_six_patchcore_models(tmp_path: Pat
 
     with pytest.raises(ValueError, match="exactly"):
         load_runtime_config(config_path)
+
+
+def test_patchcore_mask_prefers_pred_mask() -> None:
+    """Anomalib's explicit prediction mask must take precedence over fallback thresholding."""
+    anomaly = np.array([[0.0, 1.0], [1.0, 0.0]], dtype=np.float32)
+    pred_mask = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
+
+    mask, source, threshold = _build_patchcore_mask(
+        anomaly,
+        pred_mask,
+        output_shape=(4, 4),
+        diagnostic_mask_threshold=0.65,
+    )
+
+    assert source == "pred_mask"
+    assert threshold is None
+    assert mask.dtype == np.uint8
+    assert mask.shape == (4, 4)
+    assert set(np.unique(mask)) <= {0, 255}
+
+
+def test_patchcore_mask_uses_normalized_diagnostic_fallback() -> None:
+    """Missing pred_mask must use the normalized display-only diagnostic fallback."""
+    anomaly = np.array([[10.0, 16.4], [16.5, 20.0]], dtype=np.float32)
+
+    mask, source, threshold = _build_patchcore_mask(
+        anomaly,
+        None,
+        output_shape=(2, 2),
+        diagnostic_mask_threshold=0.65,
+    )
+
+    assert source == "diagnostic_anomaly_map"
+    assert threshold == pytest.approx(0.65)
+    assert mask.tolist() == [[0, 0], [255, 255]]
+
+
+@pytest.mark.parametrize("invalid_value", [float("nan"), float("inf"), float("-inf")])
+def test_patchcore_mask_rejects_nonfinite_raw_map(invalid_value: float) -> None:
+    """Lossless raw maps must never silently repair NaN or infinity values."""
+    anomaly = np.array([[0.0, invalid_value]], dtype=np.float32)
+
+    with pytest.raises(ValueError, match=r"anomaly_map.*finite"):
+        _build_patchcore_mask(
+            anomaly,
+            None,
+            output_shape=(1, 2),
+            diagnostic_mask_threshold=0.65,
+        )
+
+
+@pytest.mark.parametrize(
+    "pred_mask",
+    [np.array([0.0, 1.0]), np.zeros((2, 2, 2)), np.array([[0.0, float("nan")]])],
+)
+def test_patchcore_mask_rejects_malformed_present_pred_mask(pred_mask: np.ndarray) -> None:
+    """A present but malformed pred_mask must fail instead of selecting the fallback."""
+    with pytest.raises(ValueError, match="pred_mask"):
+        _build_patchcore_mask(
+            np.zeros((2, 2), dtype=np.float32),
+            pred_mask,
+            output_shape=(2, 2),
+            diagnostic_mask_threshold=0.65,
+        )
+
+
+@pytest.mark.parametrize("threshold", [float("nan"), float("inf"), -0.01, 1.01])
+def test_patchcore_mask_rejects_invalid_diagnostic_threshold(threshold: float) -> None:
+    """Display thresholds must be finite probabilities."""
+    with pytest.raises(ValueError, match="diagnostic_mask_threshold"):
+        _build_patchcore_mask(
+            np.zeros((2, 2), dtype=np.float32),
+            None,
+            output_shape=(2, 2),
+            diagnostic_mask_threshold=threshold,
+        )
+
+
+def test_anomalib_backend_persists_unscaled_raw_map_and_binary_mask(tmp_path: Path) -> None:
+    """The backend must save float32 model output before display resizing or normalization."""
+    crop = tmp_path / "crop.png"
+    assert cv2.imwrite(str(crop), np.zeros((5, 6, 3), dtype=np.uint8))
+    raw = np.array([[10.0, 16.4], [16.5, 20.0]], dtype=np.float64)
+
+    class _Engine:
+        @staticmethod
+        def predict(**_kwargs: object) -> list[SimpleNamespace]:
+            return [SimpleNamespace(image_path=crop, pred_score=0.4, anomaly_map=raw, pred_mask=None)]
+
+    backend = AnomalibPatchcoreBackend.__new__(AnomalibPatchcoreBackend)
+    backend.engines = {"front": _Engine()}
+    backend.models = {"front": object()}
+    evidence_path = tmp_path / "evidence" / "patchcore" / "front.png"
+
+    evidence = backend.predict(
+        "front",
+        crop,
+        evidence_path,
+        diagnostic_mask_threshold=0.65,
+    )
+
+    assert evidence.patchcore_artifacts is not None
+    artifacts = evidence.patchcore_artifacts
+    saved_raw = np.load(artifacts.raw_anomaly_map_path, allow_pickle=False)
+    saved_mask = cv2.imread(str(artifacts.mask_path), cv2.IMREAD_GRAYSCALE)
+    assert saved_raw.dtype == np.float32
+    np.testing.assert_array_equal(saved_raw, raw.astype(np.float32))
+    assert artifacts.raw_anomaly_map_shape == (2, 2)
+    assert artifacts.mask_shape == (5, 6)
+    assert saved_mask is not None
+    assert saved_mask.shape == (5, 6)
+    assert set(np.unique(saved_mask)) <= {0, 255}
 
 
 def test_load_runtime_config_rejects_checkpoint_hash_mismatch(tmp_path: Path) -> None:
@@ -182,6 +327,16 @@ def test_runtime_writes_continuous_evidence_and_never_returns_ok_without_thresho
         assert Path(row["evidence_path"]).is_file()
         assert _sha256(Path(row["source_path"])) == row["source_hash"]
         assert _sha256(Path(row["evidence_path"])) == row["evidence_hash"]
+    manifest = json.loads((output_dir / "runtime_manifest.json").read_text(encoding="utf-8"))
+    assert set(manifest["views"]) == set(VIEWS)
+    assert manifest["views"]["front"]["model_supported"] is True
+    assert manifest["views"]["front"]["patchcore"]["mask_source"] == "diagnostic_anomaly_map"
+    assert manifest["views"]["front"]["patchcore"]["display_only"] is True
+    assert manifest["views"]["front"]["patchcore"]["roi_xyxy"] == [0, 0, 6, 5]
+    assert manifest["views"]["front"]["patchcore"]["raw_anomaly_map_shape"] == [2, 2]
+    assert manifest["views"]["front"]["patchcore"]["mask_shape"] == [5, 6]
+    assert Path(manifest["views"]["front"]["patchcore"]["raw_anomaly_map_path"]).is_file()
+    assert Path(manifest["views"]["front"]["patchcore"]["mask_path"]).is_file()
 
 
 def test_runtime_rejects_left_and_existing_output_before_backend_calls(tmp_path: Path) -> None:
@@ -200,6 +355,53 @@ def test_runtime_rejects_left_and_existing_output_before_backend_calls(tmp_path:
 
     assert patchcore.calls == []
     assert yolo.calls == []
+
+
+def test_runtime_fails_closed_on_malformed_patchcore_artifact_but_retains_diagnostic_score(tmp_path: Path) -> None:
+    """Invalid mask evidence must not reach Stage18 even when its model score is finite."""
+    config_path, _ = _write_fixture(tmp_path)
+    images = _write_images(tmp_path)
+
+    class _MalformedMaskBackend(_PatchcoreBackend):
+        def predict(
+            self,
+            view: str,
+            crop_path: Path,
+            evidence_path: Path,
+            *,
+            diagnostic_mask_threshold: float = 0.65,
+        ) -> ModelEvidence:
+            evidence = super().predict(
+                view,
+                crop_path,
+                evidence_path,
+                diagnostic_mask_threshold=diagnostic_mask_threshold,
+            )
+            if view == "front":
+                assert evidence.patchcore_artifacts is not None
+                assert cv2.imwrite(
+                    str(evidence.patchcore_artifacts.mask_path),
+                    np.full((5, 6), 127, dtype=np.uint8),
+                )
+            return evidence
+
+    runtime = ZS32ModelRuntime(
+        load_runtime_config(config_path),
+        patchcore_backend=_MalformedMaskBackend(),
+        yolo_backend=_YoloBackend(),
+    )
+    output_dir = tmp_path / "malformed-mask"
+
+    runtime.run(InspectionRequest("p", "s", "g", "right", images), output_dir)
+
+    with (output_dir / "patchcore.csv").open(encoding="utf-8", newline="") as file:
+        front_row = next(row for row in csv.DictReader(file) if row["view"] == "front")
+    manifest = json.loads((output_dir / "runtime_manifest.json").read_text(encoding="utf-8"))
+    assert front_row["score"] == ""
+    assert front_row["status"] == "ERROR"
+    assert manifest["views"]["front"]["patchcore"]["score"] == pytest.approx(0.11)
+    assert manifest["views"]["front"]["patchcore"]["status"] == "error"
+    assert "binary" in manifest["views"]["front"]["patchcore"]["reason"]
 
 
 def test_runtime_rejects_duplicate_source_images_and_wrong_dimensions(tmp_path: Path) -> None:

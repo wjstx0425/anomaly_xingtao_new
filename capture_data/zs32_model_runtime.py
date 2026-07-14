@@ -18,7 +18,7 @@ import tempfile
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Protocol, cast
+from typing import Any, Literal, Protocol, cast
 from uuid import uuid4
 
 import cv2
@@ -27,6 +27,8 @@ from capture_data.fusion_engine import BranchPrediction, write_branch_prediction
 from capture_data.zs32_inspection_orchestrator import CANONICAL_VIEWS, InspectionRequest
 from capture_data.zs32_patchcore_roi_dataset import load_patchcore_roi_config
 from capture_data.zs32_view_roi_dataset import load_roi_config
+
+from zs32_inspection.dashboard.contracts import MODELED_VIEWS
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SHA256_LENGTH = 64
@@ -95,12 +97,25 @@ class RuntimeConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class PatchcoreArtifacts:
+    """Lossless PatchCore map and display-only binary-mask artifacts."""
+
+    raw_anomaly_map_path: Path
+    mask_path: Path
+    mask_source: Literal["pred_mask", "diagnostic_anomaly_map"]
+    diagnostic_mask_threshold: float | None
+    raw_anomaly_map_shape: tuple[int, int]
+    mask_shape: tuple[int, int]
+
+
+@dataclass(frozen=True, slots=True)
 class ModelEvidence:
     """Continuous model output plus a human-readable evidence artifact."""
 
     score: float
     evidence_path: Path
     detections: tuple[dict[str, Any], ...] | None = None
+    patchcore_artifacts: PatchcoreArtifacts | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,7 +135,14 @@ class RuntimeResult:
 class PatchcoreBackend(Protocol):
     """Interface used by the runtime for per-view PatchCore inference."""
 
-    def predict(self, view: str, crop_path: Path, evidence_path: Path) -> ModelEvidence:
+    def predict(
+        self,
+        view: str,
+        crop_path: Path,
+        evidence_path: Path,
+        *,
+        diagnostic_mask_threshold: float = 0.65,
+    ) -> ModelEvidence:
         """Predict one already-cropped view."""
 
 
@@ -298,10 +320,67 @@ def _array2d(value: object) -> np.ndarray | None:
         return None
     if hasattr(value, "detach"):
         value = value.detach().cpu().numpy()  # type: ignore[union-attr]
-    array = np.asarray(value).squeeze()
+    array = np.asarray(value)
+    while array.ndim > 2 and array.shape[0] == 1:
+        array = array[0]
     if array.ndim != 2:
         return None
     return np.nan_to_num(array.astype(np.float32), copy=False)
+
+
+def _finite_array2d(value: object, *, field: str) -> np.ndarray:
+    """Convert a tensor-like value to a finite float32 two-dimensional array."""
+    if hasattr(value, "detach"):
+        value = value.detach().cpu().numpy()  # type: ignore[union-attr]
+    array = np.asarray(value)
+    while array.ndim > 2 and array.shape[0] == 1:
+        array = array[0]
+    if array.ndim != 2:
+        msg = f"PatchCore {field} must be a 2D array"
+        raise ValueError(msg)
+    array = array.astype(np.float32, copy=False)
+    if not np.isfinite(array).all():
+        msg = f"PatchCore {field} must contain only finite values"
+        raise ValueError(msg)
+    return array
+
+
+def _build_patchcore_mask(
+    anomaly_map: object,
+    pred_mask: object | None,
+    *,
+    output_shape: tuple[int, int],
+    diagnostic_mask_threshold: float,
+) -> tuple[np.ndarray, Literal["pred_mask", "diagnostic_anomaly_map"], float | None]:
+    """Build a display-only binary mask, preferring Anomalib's real prediction mask."""
+    threshold = float(diagnostic_mask_threshold)
+    if not math.isfinite(threshold) or not 0 <= threshold <= 1:
+        msg = "diagnostic_mask_threshold must be finite and within [0, 1]"
+        raise ValueError(msg)
+    if len(output_shape) != 2 or any(not isinstance(value, int) or value <= 0 for value in output_shape):
+        msg = "output_shape must contain two positive integers"
+        raise ValueError(msg)
+
+    raw = _finite_array2d(anomaly_map, field="anomaly_map")
+    if pred_mask is not None:
+        source: Literal["pred_mask", "diagnostic_anomaly_map"] = "pred_mask"
+        source_mask = _finite_array2d(pred_mask, field="pred_mask")
+        mask_threshold = None
+    else:
+        source = "diagnostic_anomaly_map"
+        minimum, maximum = float(raw.min()), float(raw.max())
+        source_mask = np.zeros_like(raw, dtype=np.float32)
+        if maximum > minimum:
+            source_mask = (raw - minimum) / (maximum - minimum)
+        mask_threshold = threshold
+
+    resized = cv2.resize(
+        source_mask,
+        (output_shape[1], output_shape[0]),
+        interpolation=cv2.INTER_NEAREST,
+    )
+    cutoff = 0.5 if source == "pred_mask" else threshold
+    return (resized >= cutoff).astype(np.uint8) * 255, source, mask_threshold
 
 
 def _write_patchcore_overlay(crop_path: Path, anomaly_map: object, output_path: Path, score: float) -> None:
@@ -348,8 +427,15 @@ class AnomalibPatchcoreBackend:
                 logger=False,
             )
 
-    def predict(self, view: str, crop_path: Path, evidence_path: Path) -> ModelEvidence:
-        """Run one restored PatchCore model and write its heatmap overlay."""
+    def predict(
+        self,
+        view: str,
+        crop_path: Path,
+        evidence_path: Path,
+        *,
+        diagnostic_mask_threshold: float = 0.65,
+    ) -> ModelEvidence:
+        """Run PatchCore and persist its raw map, display mask, and overlay."""
         predictions = self.engines[view].predict(  # type: ignore[union-attr]
             model=self.models[view],
             data_path=crop_path,
@@ -360,9 +446,40 @@ class AnomalibPatchcoreBackend:
         if len(items) != 1:
             msg = f"PatchCore {view} returned {len(items)} prediction items, expected 1"
             raise RuntimeError(msg)
-        score = _scalar(getattr(items[0], "pred_score", None))
-        _write_patchcore_overlay(crop_path, getattr(items[0], "anomaly_map", None), evidence_path, score)
-        return ModelEvidence(score=score, evidence_path=evidence_path)
+        item = items[0]
+        score = _scalar(getattr(item, "pred_score", None))
+        raw = _finite_array2d(getattr(item, "anomaly_map", None), field="anomaly_map")
+        crop = cv2.imread(str(crop_path), cv2.IMREAD_COLOR)
+        if crop is None:
+            msg = f"could not read PatchCore crop: {crop_path}"
+            raise ValueError(msg)
+        mask, mask_source, applied_threshold = _build_patchcore_mask(
+            raw,
+            getattr(item, "pred_mask", None),
+            output_shape=crop.shape[:2],
+            diagnostic_mask_threshold=diagnostic_mask_threshold,
+        )
+        raw_path = evidence_path.parent / "raw_maps" / f"{view}.npy"
+        mask_path = evidence_path.parent / "masks" / f"{view}.png"
+        raw_path.parent.mkdir(parents=True, exist_ok=True)
+        mask_path.parent.mkdir(parents=True, exist_ok=True)
+        np.save(raw_path, raw.astype(np.float32, copy=False), allow_pickle=False)
+        if not cv2.imwrite(str(mask_path), mask):
+            msg = f"failed to write PatchCore mask: {mask_path}"
+            raise OSError(msg)
+        _write_patchcore_overlay(crop_path, raw, evidence_path, score)
+        return ModelEvidence(
+            score=score,
+            evidence_path=evidence_path,
+            patchcore_artifacts=PatchcoreArtifacts(
+                raw_anomaly_map_path=raw_path,
+                mask_path=mask_path,
+                mask_source=mask_source,
+                diagnostic_mask_threshold=applied_threshold,
+                raw_anomaly_map_shape=cast("tuple[int, int]", raw.shape),
+                mask_shape=cast("tuple[int, int]", mask.shape),
+            ),
+        )
 
 
 class UltralyticsYoloBackend:
@@ -622,6 +739,7 @@ class ZS32ModelRuntime:
         threshold_artifact: Path | None = None,
         gt_label: int | None = None,
         split: str | None = None,
+        diagnostic_mask_threshold: float = 0.65,
     ) -> RuntimeResult:
         """Run all models, publish immutable evidence, and remain REVIEW until strict fusion."""
         output_dir = output_dir.expanduser().resolve()
@@ -632,6 +750,9 @@ class ZS32ModelRuntime:
         if gt_label not in {None, 0, 1}:
             msg = "gt_label must be 0, 1, or omitted"
             raise ValueError(msg)
+        if not math.isfinite(diagnostic_mask_threshold) or not 0 <= diagnostic_mask_threshold <= 1:
+            msg = "diagnostic_mask_threshold must be finite and within [0, 1]"
+            raise ValueError(msg)
         threshold_map = load_threshold_map(threshold_artifact)
         staging = output_dir.parent / f".{output_dir.name}.tmp-{uuid4().hex}"
         staging.mkdir(parents=True)
@@ -641,10 +762,11 @@ class ZS32ModelRuntime:
         patchcore_rows: list[BranchPrediction] = []
         yolo_rows: list[BranchPrediction] = []
         calibration_rows: list[dict[str, Any]] = []
+        view_manifest: dict[str, dict[str, Any]] = {}
         try:
             patchcore_crops: dict[str, Path] = {}
             yolo_crops: dict[str, Path] = {}
-            for view in CANONICAL_VIEWS:
+            for view in MODELED_VIEWS:
                 image = images[view]
                 pc_x1, pc_y1, pc_x2, pc_y2 = self.config.patchcore_rois[request.hand][view]
                 yo_x1, yo_y1, yo_x2, yo_y2 = self.config.yolo_rois[view]
@@ -668,7 +790,7 @@ class ZS32ModelRuntime:
                 patchcore_backend = self._patchcore_backend
                 yolo_backend = self._yolo_backend
 
-            for view in CANONICAL_VIEWS:
+            for view in MODELED_VIEWS:
                 temp_evidence = staging / "evidence" / "patchcore" / f"{view}.png"
                 final_evidence = final_patchcore_dir / f"{view}.png"
                 evidence: ModelEvidence | None = None
@@ -676,18 +798,89 @@ class ZS32ModelRuntime:
                 try:
                     if patchcore_backend is None:
                         raise backend_load_error or RuntimeError("PatchCore backend initialization failed")
-                    evidence = patchcore_backend.predict(view, patchcore_crops[view], temp_evidence)
+                    evidence = patchcore_backend.predict(
+                        view,
+                        patchcore_crops[view],
+                        temp_evidence,
+                        diagnostic_mask_threshold=diagnostic_mask_threshold,
+                    )
                     if evidence.evidence_path.resolve() != temp_evidence.resolve() or not temp_evidence.is_file():
                         msg = f"PatchCore backend did not publish the requested evidence for {view}"
                         raise RuntimeError(msg)
                     if not math.isfinite(float(evidence.score)):
                         raise ValueError(f"PatchCore emitted a non-finite score for {view}")
+                    artifacts = evidence.patchcore_artifacts
+                    if artifacts is None:
+                        raise ValueError(f"PatchCore artifacts missing for {view}")
+                    expected_raw = temp_evidence.parent / "raw_maps" / f"{view}.npy"
+                    expected_mask = temp_evidence.parent / "masks" / f"{view}.png"
+                    if artifacts.raw_anomaly_map_path.resolve() != expected_raw.resolve():
+                        raise ValueError(f"PatchCore raw anomaly map path is invalid for {view}")
+                    if artifacts.mask_path.resolve() != expected_mask.resolve():
+                        raise ValueError(f"PatchCore mask path is invalid for {view}")
+                    saved_raw = np.load(expected_raw, allow_pickle=False)
+                    if saved_raw.dtype != np.float32 or saved_raw.ndim != 2 or not np.isfinite(saved_raw).all():
+                        raise ValueError(f"PatchCore raw anomaly map is invalid for {view}")
+                    if tuple(saved_raw.shape) != artifacts.raw_anomaly_map_shape:
+                        raise ValueError(f"PatchCore raw anomaly map shape is invalid for {view}")
+                    saved_mask = cv2.imread(str(expected_mask), cv2.IMREAD_GRAYSCALE)
+                    if saved_mask is None or tuple(saved_mask.shape) != artifacts.mask_shape:
+                        raise ValueError(f"PatchCore mask shape is invalid for {view}")
+                    roi_x1, roi_y1, roi_x2, roi_y2 = self.config.patchcore_rois[request.hand][view]
+                    expected_mask_shape = (roi_y2 - roi_y1, roi_x2 - roi_x1)
+                    if artifacts.mask_shape != expected_mask_shape:
+                        raise ValueError(f"PatchCore mask does not match the crop geometry for {view}")
+                    if not set(np.unique(saved_mask)) <= {0, 255}:
+                        raise ValueError(f"PatchCore mask must be binary for {view}")
+                    if artifacts.mask_source == "pred_mask":
+                        if artifacts.diagnostic_mask_threshold is not None:
+                            raise ValueError(f"PatchCore pred_mask must not record a diagnostic threshold for {view}")
+                    elif artifacts.mask_source == "diagnostic_anomaly_map":
+                        if artifacts.diagnostic_mask_threshold != diagnostic_mask_threshold:
+                            raise ValueError(f"PatchCore diagnostic mask threshold is invalid for {view}")
+                    else:
+                        raise ValueError(f"PatchCore mask source is invalid for {view}")
+                    final_raw = final_patchcore_dir / "raw_maps" / f"{view}.npy"
+                    final_mask = final_patchcore_dir / "masks" / f"{view}.png"
+                    view_manifest[view] = {
+                        "view": view,
+                        "source_path": str(Path(request.images[view]).resolve()),
+                        "model_supported": True,
+                        "patchcore": {
+                            "score": float(evidence.score),
+                            "status": "available",
+                            "evidence_path": str(final_evidence.resolve()),
+                            "raw_anomaly_map_path": str(final_raw.resolve()),
+                            "mask_path": str(final_mask.resolve()),
+                            "mask_source": artifacts.mask_source,
+                            "diagnostic_mask_threshold": artifacts.diagnostic_mask_threshold,
+                            "display_only": True,
+                            "roi_xyxy": list(self.config.patchcore_rois[request.hand][view]),
+                            "raw_anomaly_map_shape": list(artifacts.raw_anomaly_map_shape),
+                            "mask_shape": list(artifacts.mask_shape),
+                        },
+                    }
                 except Exception as error:  # noqa: BLE001 - retain other view evidence
                     errors.append(f"anomaly_{view}: {type(error).__name__}: {error}")
                     error_reason = errors[-1]
+                    diagnostic_score = None if evidence is None else float(evidence.score)
+                    evidence = None
                     temp_evidence = temp_evidence.with_suffix(".error.json")
                     final_evidence = final_evidence.with_suffix(".error.json")
                     self._write_error_evidence(temp_evidence, branch=f"anomaly_{view}", view=view, error=error)
+                    view_manifest[view] = {
+                        "view": view,
+                        "source_path": str(Path(request.images[view]).resolve()),
+                        "model_supported": True,
+                        "patchcore": {
+                            "score": diagnostic_score,
+                            "status": "error",
+                            "reason": error_reason,
+                            "evidence_path": str(final_evidence.resolve()),
+                            "display_only": True,
+                            "roi_xyxy": list(self.config.patchcore_rois[request.hand][view]),
+                        },
+                    }
                 row = self._prediction(
                     request,
                     view=view,
@@ -804,6 +997,7 @@ class ZS32ModelRuntime:
                 "machine_status": "REVIEW",
                 "inspection_complete": False,
                 "source_images": {view: str(Path(request.images[view]).resolve()) for view in CANONICAL_VIEWS},
+                "views": view_manifest,
                 "runtime_config": str(self.config.path),
                 "runtime_config_sha256": sha256_file(self.config.path),
                 "patchcore_roi_config": str(self.config.patchcore_roi_config),
