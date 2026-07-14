@@ -315,6 +315,15 @@ def _scalar(value: object) -> float:
     return score
 
 
+def _finite_float_or_none(value: object) -> float | None:
+    """Return a finite float for diagnostic serialization, otherwise ``None``."""
+    try:
+        score = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return score if math.isfinite(score) else None
+
+
 def _array2d(value: object) -> np.ndarray | None:
     if value is None:
         return None
@@ -863,7 +872,7 @@ class ZS32ModelRuntime:
                 except Exception as error:  # noqa: BLE001 - retain other view evidence
                     errors.append(f"anomaly_{view}: {type(error).__name__}: {error}")
                     error_reason = errors[-1]
-                    diagnostic_score = None if evidence is None else float(evidence.score)
+                    diagnostic_score = None if evidence is None else _finite_float_or_none(evidence.score)
                     evidence = None
                     temp_evidence = temp_evidence.with_suffix(".error.json")
                     final_evidence = final_evidence.with_suffix(".error.json")

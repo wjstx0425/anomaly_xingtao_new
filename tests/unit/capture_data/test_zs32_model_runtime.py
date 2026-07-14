@@ -10,6 +10,7 @@ import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import cv2
 import numpy as np
@@ -402,6 +403,60 @@ def test_runtime_fails_closed_on_malformed_patchcore_artifact_but_retains_diagno
     assert manifest["views"]["front"]["patchcore"]["score"] == pytest.approx(0.11)
     assert manifest["views"]["front"]["patchcore"]["status"] == "error"
     assert "binary" in manifest["views"]["front"]["patchcore"]["reason"]
+
+
+@pytest.mark.parametrize("invalid_score", [float("nan"), float("inf"), float("-inf"), "not-a-score"])
+def test_runtime_omits_invalid_diagnostic_score_from_strict_manifest(
+    tmp_path: Path,
+    invalid_score: object,
+) -> None:
+    """Invalid model scores must fail closed without leaking non-standard JSON constants."""
+    config_path, _ = _write_fixture(tmp_path)
+    images = _write_images(tmp_path)
+
+    class _InvalidScoreBackend(_PatchcoreBackend):
+        def predict(
+            self,
+            view: str,
+            crop_path: Path,
+            evidence_path: Path,
+            *,
+            diagnostic_mask_threshold: float = 0.65,
+        ) -> ModelEvidence:
+            evidence = super().predict(
+                view,
+                crop_path,
+                evidence_path,
+                diagnostic_mask_threshold=diagnostic_mask_threshold,
+            )
+            if view != "front":
+                return evidence
+            return ModelEvidence(
+                score=cast("float", invalid_score),
+                evidence_path=evidence.evidence_path,
+                patchcore_artifacts=evidence.patchcore_artifacts,
+            )
+
+    runtime = ZS32ModelRuntime(
+        load_runtime_config(config_path),
+        patchcore_backend=_InvalidScoreBackend(),
+        yolo_backend=_YoloBackend(),
+    )
+    output_dir = tmp_path / "invalid-score"
+
+    runtime.run(InspectionRequest("p", "s", "g", "right", images), output_dir)
+
+    manifest_text = (output_dir / "runtime_manifest.json").read_text(encoding="utf-8")
+    manifest = json.loads(
+        manifest_text,
+        parse_constant=lambda value: pytest.fail(f"non-standard JSON constant: {value}"),
+    )
+    with (output_dir / "patchcore.csv").open(encoding="utf-8", newline="") as file:
+        front_row = next(row for row in csv.DictReader(file) if row["view"] == "front")
+    assert manifest["views"]["front"]["patchcore"]["score"] is None
+    assert manifest["views"]["front"]["patchcore"]["status"] == "error"
+    assert front_row["score"] == ""
+    assert front_row["status"] == "ERROR"
 
 
 def test_runtime_rejects_duplicate_source_images_and_wrong_dimensions(tmp_path: Path) -> None:
