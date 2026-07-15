@@ -423,6 +423,16 @@ def test_incomplete_or_nonsemantic_template_review_stops_commissioning(field: st
     assert not stage32._template_result_allows_downstream(result, "zs32-right-24-commissioning")
 
 
+@pytest.mark.parametrize("invalid_score", ["0.15", True, float("nan"), float("inf")])
+def test_template_review_rejects_non_strict_numeric_scores(invalid_score: object) -> None:
+    """Type coercion and non-finite scores must never launch downstream inference."""
+    stage32 = _load_module("pipeline_zs32_runtime_strict_score", "pipeline/32_run_zs32_multimodel_inference.py")
+    result = _valid_template_review()
+    result["score"] = invalid_score
+
+    assert not stage32._template_result_allows_downstream(result, "zs32-right-24-commissioning")
+
+
 def test_template_exception_review_stops_commissioning() -> None:
     """The REVIEW wrapper emitted for TemplateGate exceptions must not launch GPU inference."""
     stage32 = _load_module("pipeline_zs32_runtime_exception_review", "pipeline/32_run_zs32_multimodel_inference.py")
@@ -528,6 +538,69 @@ def test_template_stop_normalizes_invalid_scores_and_remains_parseable(
     manifest = json.loads((output / "runtime_manifest.json").read_text(encoding="utf-8"))
     assert len(manifest["views"]) == len(VIEWS)
     assert all(manifest["views"][view]["branches"]["template"]["score"] is None for view in VIEWS)
+    parsed = load_inspection_result(output)
+    assert len(parsed.views) == len(VIEWS)
+
+
+def test_template_stop_normalizes_complete_result_payload_to_strict_json(tmp_path: Path) -> None:
+    """Real-shaped Template payloads must not retain invalid continuous values anywhere."""
+    stage32 = _load_module("pipeline_zs32_template_stop_payload", "pipeline/32_run_zs32_multimodel_inference.py")
+    images = _write_images(tmp_path)
+    request = stage32.InspectionRequest("part-001", "session-001", "group-001", "right", images)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    output = tmp_path / "output"
+
+    stage32._publish_template_stop(
+        request,
+        output,
+        tuple(
+            {
+                "view": view,
+                "status": "NG_TEMPLATE" if view == "front" else "PASS",
+                "reason": "stopped",
+                "score": float("nan"),
+                "risk_score": float("inf"),
+                "raw_score": float("-inf"),
+                "threshold": 0.5,
+                "image_path": str(images[view]),
+                "hand": "right",
+                "similarity": 0.9,
+                "low_threshold": 0.1,
+                "high_threshold": 0.5,
+                "best_template": images[view].name,
+                "best_template_path": str(images[view]),
+                "best_template_sha256": sha256(images[view].read_bytes()).hexdigest(),
+                "offset": (0, 0),
+                "versions": {
+                    "model": "model-v1",
+                    "threshold": "threshold-v1",
+                    "roi": "roi-v1",
+                    "template": "template-v1",
+                },
+                "model_version": "model-v1",
+                "threshold_version": "threshold-v1",
+                "roi_version": "roi-v1",
+                "template_version": "template-v1",
+            }
+            for view in VIEWS
+        ),
+        workspace,
+        "zs32-right-24-commissioning",
+    )
+
+    summary_text = (output / "runtime_summary.json").read_text(encoding="utf-8")
+    manifest_text = (output / "runtime_manifest.json").read_text(encoding="utf-8")
+    assert "NaN" not in summary_text + manifest_text
+    assert "Infinity" not in summary_text + manifest_text
+    summary = json.loads(summary_text)
+    for result in summary["template_results"]:
+        assert result["score"] is None
+        assert result["risk_score"] is None
+        assert result["raw_score"] is None
+        assert result["view"] in VIEWS
+        assert result["status"] in {"PASS", "NG_TEMPLATE"}
+        assert result["best_template_path"] == str(images[result["view"]])
     parsed = load_inspection_result(output)
     assert len(parsed.views) == len(VIEWS)
 
@@ -658,7 +731,7 @@ def test_strict_fusion_updates_runtime_manifest_without_losing_provenance(tmp_pa
     assert updated["pre_fusion_result"]["machine_status"] == "REVIEW"
 
 
-@pytest.mark.parametrize("fault", ["missing", "not_file", "outside"])
+@pytest.mark.parametrize("fault", ["missing", "not_file", "outside", "symlink_escape"])
 def test_strict_fusion_evidence_fault_fails_closed_and_remains_parseable(
     tmp_path: Path,
     fault: str,
@@ -695,6 +768,10 @@ def test_strict_fusion_evidence_fault_fails_closed_and_remains_parseable(
         fusion_evidence.mkdir()
     elif fault == "outside":
         fusion_evidence.write_text("part_id,final_status\npart-001,OK\n", encoding="utf-8")
+    elif fault == "symlink_escape":
+        outside_evidence = tmp_path / "outside-fused_predictions.csv"
+        outside_evidence.write_text("part_id,final_status\npart-001,OK\n", encoding="utf-8")
+        fusion_evidence.symlink_to(outside_evidence)
     summary = {
         "machine_status": "OK",
         "inspection_complete": True,

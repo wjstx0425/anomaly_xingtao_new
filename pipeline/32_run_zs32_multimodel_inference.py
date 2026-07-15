@@ -17,6 +17,7 @@ import math
 import shutil
 import sys
 import tempfile
+from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -106,14 +107,13 @@ def _template_result_allows_downstream(result: dict[str, Any], fusion_profile: s
     status = str(result.get("status", "")).strip().upper()
     if not _template_status_allows_downstream(status, fusion_profile):
         return False
-    try:
-        score = float(result["score"])
-        risk = float(result["risk_score"])
-        low = float(result["low_threshold"])
-        high = float(result["high_threshold"])
-    except (KeyError, TypeError, ValueError):
+    score = _finite_template_score(result.get("score"))
+    risk = _finite_template_score(result.get("risk_score"))
+    low = _finite_template_score(result.get("low_threshold"))
+    high = _finite_template_score(result.get("high_threshold"))
+    if any(value is None for value in (score, risk, low, high)):
         return False
-    numbers_valid = all(math.isfinite(value) for value in (score, risk, low, high)) and score == risk and low <= high
+    numbers_valid = score == risk and low <= high
     decision_valid = (status == "PASS" and risk < low) or (status == "REVIEW" and low <= risk < high)
     versions_valid = all(
         isinstance(result.get(field), str) and bool(str(result[field]).strip())
@@ -134,6 +134,45 @@ def _finite_template_score(value: object) -> float | None:
         return None
     score = float(value)
     return score if math.isfinite(score) else None
+
+
+_TEMPLATE_NUMERIC_FIELDS = frozenset(
+    {
+        "score",
+        "risk_score",
+        "raw_score",
+        "similarity",
+        "threshold",
+        "low_threshold",
+        "high_threshold",
+    },
+)
+
+
+def _json_safe_template_value(value: object, *, field: str | None = None) -> Any:
+    """Recursively normalize Template evidence to strict JSON values."""
+    if field in _TEMPLATE_NUMERIC_FIELDS:
+        return _finite_template_score(value)
+    if value is None or isinstance(value, str | bool):
+        return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, Mapping):
+        if any(not isinstance(key, str) for key in value):
+            raise TypeError("template result JSON object keys must be strings")
+        return {key: _json_safe_template_value(item, field=key) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe_template_value(item) for item in value]
+    raise TypeError(f"unsupported template result JSON value: {type(value).__name__}")
+
+
+def _normalize_template_result_payload(result: Mapping[str, Any]) -> dict[str, Any]:
+    """Return one complete Template result with invalid numeric evidence nulled."""
+    return {key: _json_safe_template_value(value, field=key) for key, value in result.items()}
 
 
 def _template_gate(
@@ -203,15 +242,13 @@ def _publish_template_stop(
     ]
     if not blocked:
         raise ValueError("template stop publication requires at least one blocked template result")
-    normalized_results = tuple(
-        {**results_by_view[view], "score": _finite_template_score(results_by_view[view].get("score"))}
-        for view in CANONICAL_VIEWS
-    )
+    normalized_results = tuple(_normalize_template_result_payload(results_by_view[view]) for view in CANONICAL_VIEWS)
     normalized_by_view = {str(result["view"]): result for result in normalized_results}
-    decisive = next(
+    decisive_raw = next(
         (result for result in blocked if str(result.get("status", "")).upper() == "NG_TEMPLATE"),
         blocked[0],
     )
+    decisive = normalized_by_view[str(decisive_raw["view"])]
     status = str(decisive.get("status", "REVIEW")).upper()
     summary = {
         "machine_status": status if status in {"NG_TEMPLATE", "INVALID_CAPTURE"} else "REVIEW",
@@ -231,7 +268,7 @@ def _publish_template_stop(
         "production_release_allowed": False,
     }
     (workspace / "runtime_summary.json").write_text(
-        json.dumps(summary, indent=2, sort_keys=True, default=str, allow_nan=False) + "\n",
+        json.dumps(summary, indent=2, sort_keys=True, allow_nan=False) + "\n",
         encoding="utf-8",
     )
     source_dir = workspace / "sources"
@@ -295,7 +332,7 @@ def _publish_template_stop(
         "note": "Template-first aggregate stop; all model and fusion branches were skipped.",
     }
     (workspace / "runtime_manifest.json").write_text(
-        json.dumps(manifest, indent=2, sort_keys=True, default=str, allow_nan=False) + "\n",
+        json.dumps(manifest, indent=2, sort_keys=True, allow_nan=False) + "\n",
         encoding="utf-8",
     )
     workspace.replace(output_dir)
@@ -422,9 +459,18 @@ def _update_runtime_manifest_after_fusion(output_dir: Path, summary: dict[str, A
     ):
         payload[field] = summary.get(field)
     payload["reason"] = str(summary.get("reason") or "Stage18 fusion completed.")
+    output_root = output_dir.resolve(strict=True)
     fusion_output = Path(str(summary.get("fusion_output", ""))).expanduser().resolve()
     fusion_evidence = fusion_output / "fused_predictions.csv"
-    evidence_is_local = fusion_evidence.is_file() and fusion_evidence.is_relative_to(output_dir.resolve())
+    try:
+        resolved_fusion_evidence = fusion_evidence.resolve(strict=True)
+    except OSError:
+        resolved_fusion_evidence = None
+    evidence_is_local = (
+        resolved_fusion_evidence is not None
+        and resolved_fusion_evidence.is_file()
+        and resolved_fusion_evidence.is_relative_to(output_root)
+    )
     if not evidence_is_local:
         summary["machine_status"] = "REVIEW"
         summary["inspection_complete"] = False
@@ -442,7 +488,7 @@ def _update_runtime_manifest_after_fusion(output_dir: Path, summary: dict[str, A
         "reason": str(summary.get("reason") or "") if evidence_is_local else "Stage18 fusion evidence is missing",
     }
     if evidence_is_local:
-        fusion_branch["evidence_path"] = str(fusion_evidence)
+        fusion_branch["evidence_path"] = str(resolved_fusion_evidence)
     for view in CANONICAL_VIEWS:
         payload["views"][view]["branches"]["fusion"] = dict(fusion_branch)
     if evidence_is_local and summary.get("inspection_complete") is True:
