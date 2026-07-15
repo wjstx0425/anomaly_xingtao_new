@@ -656,3 +656,63 @@ def test_strict_fusion_updates_runtime_manifest_without_losing_provenance(tmp_pa
     assert updated["missing_required_evidence"] == []
     assert updated["production_release_allowed"] is False
     assert updated["pre_fusion_result"]["machine_status"] == "REVIEW"
+
+
+@pytest.mark.parametrize("fault", ["missing", "not_file", "outside"])
+def test_strict_fusion_evidence_fault_fails_closed_and_remains_parseable(
+    tmp_path: Path,
+    fault: str,
+) -> None:
+    """Missing, non-file, or escaped fusion evidence must fail the whole generation closed."""
+    stage32 = _load_module(f"pipeline_zs32_runtime_manifest_{fault}", "pipeline/32_run_zs32_multimodel_inference.py")
+    images = _write_images(tmp_path)
+    request = stage32.InspectionRequest("part-001", "session-001", "group-001", "right", images)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    output = tmp_path / "output"
+    stage32._publish_template_stop(
+        request,
+        output,
+        tuple(
+            {
+                "view": view,
+                "status": "NG_TEMPLATE" if view == "front" else "PASS",
+                "reason": "stopped",
+                "score": 0.9,
+                "best_template_path": str(images[view]),
+            }
+            for view in VIEWS
+        ),
+        workspace,
+        "zs32-right-24-commissioning",
+    )
+    fusion_dir = output / "fusion"
+    if fault == "outside":
+        fusion_dir = tmp_path / "outside-fusion"
+    fusion_dir.mkdir()
+    fusion_evidence = fusion_dir / "fused_predictions.csv"
+    if fault == "not_file":
+        fusion_evidence.mkdir()
+    elif fault == "outside":
+        fusion_evidence.write_text("part_id,final_status\npart-001,OK\n", encoding="utf-8")
+    summary = {
+        "machine_status": "OK",
+        "inspection_complete": True,
+        "strict_fusion": True,
+        "fusion_profile": "zs32-right-24-commissioning",
+        "commissioning_only": True,
+        "production_release_allowed": False,
+        "fusion_output": str(fusion_dir),
+        "reason": "all strict branches passed",
+    }
+
+    stage32._update_runtime_manifest_after_fusion(output, summary)
+
+    manifest = json.loads((output / "runtime_manifest.json").read_text(encoding="utf-8"))
+    assert summary["machine_status"] == manifest["machine_status"] == "REVIEW"
+    assert summary["inspection_complete"] is manifest["inspection_complete"] is False
+    assert "fusion_evidence" in manifest["missing_required_evidence"]
+    parsed = load_inspection_result(output)
+    assert parsed.machine_status == "REVIEW"
+    assert all(view.branches["fusion"].state is BranchState.ERROR for view in parsed.views)
+    assert all(view.branches["fusion"].evidence_path is None for view in parsed.views)
