@@ -325,6 +325,9 @@ def _parse_view(
     }
     if len(branches) != len(branch_values):
         raise DashboardResultError(f"{context}.branches keys must be non-empty strings")
+    unsupported = [branch for branch, evidence in branches.items() if evidence.state is BranchState.UNSUPPORTED]
+    if unsupported:
+        raise DashboardResultError(f"{context}.branches must not contain UNSUPPORTED core branches: {unsupported}")
     capture = {
         field: value[field]
         for field in ("part_id", "capture_session", "group_id", "hand", "manifest_identity", "camera")

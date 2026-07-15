@@ -42,7 +42,7 @@ def _request(tmp_path: Path, **overrides: object) -> InspectionRequest:
         "part_id": "part-001",
         "capture_session": "session-001",
         "group_id": "group-001",
-        "hand": "left",
+        "hand": "right",
         "images": images,
     }
     values.update(overrides)
@@ -129,18 +129,19 @@ def test_non_pass_template_stops_all_downstream_work(
     gate_status: str,
     machine_status: str,
 ) -> None:
-    """A non-pass result skips the remaining views and all expensive branches."""
+    """A non-pass result still evaluates every template view before skipping expensive branches."""
     gate = SequenceGate({"front_left": gate_status})
     downstream = Mock()
 
     audit = ZS32InspectionOrchestrator(gate, downstream).run(_request(tmp_path))
 
     downstream.assert_not_called()
-    assert [call[2] for call in gate.calls] == ["front", "front_left"]
+    assert [call[2] for call in gate.calls] == list(VIEWS)
     assert audit["machine_status"] == machine_status
     assert audit["stopped_after"] == "template_match"
-    assert audit["evaluated_views"] == ["front", "front_left"]
-    assert audit["skipped_views"] == list(VIEWS[2:])
+    assert audit["evaluated_views"] == list(VIEWS)
+    assert audit["skipped_views"] == []
+    assert len(audit["template_results"]) == len(VIEWS)
     assert audit["skipped_branches"] == ["PatchCore", "YOLO", "geometry"]
     assert audit["inspection_complete"] is False
     assert audit["short_circuited"] is True
@@ -161,8 +162,9 @@ def test_gate_exception_becomes_review_and_stops_downstream(tmp_path: Path) -> N
 
     downstream.assert_not_called()
     assert audit["machine_status"] == "REVIEW"
-    assert audit["evaluated_views"] == ["front"]
-    assert audit["skipped_views"] == list(VIEWS[1:])
+    assert audit["evaluated_views"] == list(VIEWS)
+    assert audit["skipped_views"] == []
+    assert len(audit["template_results"]) == len(VIEWS)
     assert "template asset missing" in audit["early_stop_reason"]
     assert audit["template_results"][0]["status"] == "REVIEW"
 
@@ -173,6 +175,7 @@ def test_gate_exception_becomes_review_and_stops_downstream(tmp_path: Path) -> N
         {"part_id": ""},
         {"capture_session": ""},
         {"group_id": ""},
+        {"hand": "left"},
         {"hand": "unknown"},
     ],
 )
@@ -257,7 +260,7 @@ def test_pass_without_continuous_threshold_evidence_still_stops_downstream(tmp_p
 def test_pass_without_complete_deployment_evidence_stops_downstream(tmp_path: Path, missing: str) -> None:
     """A numeric PASS cannot start downstream without versions and verified template identity."""
     gate = SequenceGate()
-    result = gate.evaluate(next(iter(_request(tmp_path).images.values())), "left", "front")
+    result = gate.evaluate(next(iter(_request(tmp_path).images.values())), "right", "front")
     result.pop(missing)
     gate.evaluate = Mock(return_value=result)
     downstream = Mock()

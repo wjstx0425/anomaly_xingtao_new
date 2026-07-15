@@ -201,6 +201,9 @@ def load_runtime_config(path: Path) -> RuntimeConfig:
     if payload.get("schema_version") != 1:
         msg = "runtime config schema_version must be 1"
         raise ValueError(msg)
+    if payload.get("product") != "ZS32":
+        msg = "runtime config product must be exactly 'ZS32'"
+        raise ValueError(msg)
     supported_hands = tuple(str(item).strip() for item in payload.get("supported_hands", []))
     if supported_hands != ("right",):
         msg = "the checked-in ZS32 weights currently support exactly the right hand"
@@ -536,10 +539,8 @@ class UltralyticsYoloBackend:
                         raise ValueError(msg)
                     x1, y1, x2, y2 = xyxy
                     if x2 <= x1 or y2 <= y1:
-                        # Ultralytics may retain a very low-confidence candidate that collapses to the
-                        # image boundary after clipping. It has no usable area and therefore carries no
-                        # detection evidence; discard it without invalidating other boxes or views.
-                        continue
+                        msg = f"YOLO emitted a non-positive box for {view}: {xyxy}"
+                        raise ValueError(msg)
                     names = getattr(result, "names", {})
                     checkpoint_class_name = (
                         str(names.get(class_id, class_id)) if isinstance(names, Mapping) else str(class_id)

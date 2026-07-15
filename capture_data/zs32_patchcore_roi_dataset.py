@@ -17,9 +17,10 @@ from uuid import uuid4
 import cv2
 from capture_data.select_roi import save_overlay, select_roi
 from rich.progress import track
+from zs32_inspection.domain.views import CANONICAL_VIEWS
 
 HANDS = ("right", "left")
-VIEWS = ("front", "front_left", "front_right", "back", "back_left", "back_right")
+VIEWS = CANONICAL_VIEWS
 IMAGE_EXTENSIONS = (".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff")
 ROI = tuple[int, int, int, int]
 
@@ -78,8 +79,20 @@ def _require_positive_integer(value: object, *, field: str) -> int:
     return value
 
 
-def load_patchcore_roi_config(path: Path) -> tuple[int, int, dict[str, dict[str, ROI]], dict[str, object]]:
-    """Load and strictly validate a two-hand, six-view PatchCore ROI configuration.
+def _normalize_hands(hands: tuple[str, ...]) -> tuple[str, ...]:
+    """Validate and return a non-empty ordered hand selection."""
+    if not hands or len(set(hands)) != len(hands) or any(hand not in HANDS for hand in hands):
+        msg = f"Hands must be a non-empty unique subset of {HANDS}: {hands!r}"
+        raise ValueError(msg)
+    return hands
+
+
+def load_patchcore_roi_config(
+    path: Path,
+    *,
+    hands: tuple[str, ...] = HANDS,
+) -> tuple[int, int, dict[str, dict[str, ROI]], dict[str, object]]:
+    """Load and strictly validate the selected-hand, eight-view ROI configuration.
 
     Args:
         path (Path): Path to the ROI JSON configuration.
@@ -102,13 +115,20 @@ def load_patchcore_roi_config(path: Path) -> tuple[int, int, dict[str, dict[str,
     image_size = _require_mapping(payload.get("image_size"), field="image_size")
     width = _require_positive_integer(image_size.get("width"), field="image_size.width")
     height = _require_positive_integer(image_size.get("height"), field="image_size.height")
-    configured_hands = _require_mapping(payload.get("hands"), field="hands")
-    if set(configured_hands) != set(HANDS):
-        msg = f"ROI config hands must be exactly {HANDS}."
-        raise ValueError(msg)
+    hands = _normalize_hands(hands)
+    if "views" in payload:
+        if hands != ("right",):
+            msg = "A top-level views ROI config can only be used with hands=('right',)."
+            raise ValueError(msg)
+        configured_hands: dict[str, object] = {"right": {"views": payload["views"]}}
+    else:
+        configured_hands = _require_mapping(payload.get("hands"), field="hands")
+        if set(configured_hands) != set(hands):
+            msg = f"ROI config hands must be exactly {hands}."
+            raise ValueError(msg)
 
     rois: dict[str, dict[str, ROI]] = {}
-    for hand in HANDS:
+    for hand in hands:
         hand_payload = _require_mapping(configured_hands[hand], field=f"hands.{hand}")
         configured_views = _require_mapping(hand_payload.get("views"), field=f"hands.{hand}.views")
         if set(configured_views) != set(VIEWS):
@@ -186,8 +206,13 @@ def _source_identity(path: Path, hand_root: Path, hand: str) -> SourceImage:
     )
 
 
-def discover_patchcore_images(dataset_root: Path) -> list[SourceImage]:
-    """Discover and validate ZS32 PatchCore images under both hand roots.
+def discover_patchcore_images(
+    dataset_root: Path,
+    *,
+    hands: tuple[str, ...] = HANDS,
+    excluded_session_ids: tuple[str, ...] = (),
+) -> list[SourceImage]:
+    """Discover and validate ZS32 PatchCore images for selected hands.
 
     The source directory is the authoritative view. Filenames are validated but never change ROI selection,
     output routing, or statistics. Returned records are sorted by source path and have unique destinations.
@@ -202,10 +227,12 @@ def discover_patchcore_images(dataset_root: Path) -> list[SourceImage]:
         FileNotFoundError: If a required hand or view directory is missing.
         ValueError: If required normal data is absent or an image identity or destination is invalid.
     """
+    hands = _normalize_hands(hands)
+    excluded_sessions = set(excluded_session_ids)
     records: list[SourceImage] = []
     normal_views: set[tuple[str, str]] = set()
     destinations: dict[tuple[str, str, Path], Path] = {}
-    for hand in HANDS:
+    for hand in hands:
         hand_root = dataset_root / hand
         if not hand_root.is_dir():
             msg = f"Missing hand directory: {hand_root}"
@@ -221,6 +248,8 @@ def discover_patchcore_images(dataset_root: Path) -> list[SourceImage]:
             )
             for image_path in image_paths:
                 record = _source_identity(image_path, hand_root, hand)
+                if record.session_id in excluded_sessions:
+                    continue
                 destination = (record.hand, record.resolved_view, record.relative_tail)
                 if destination in destinations:
                     msg = f"PatchCore target collision: {destinations[destination]} and {record.source_path}"
@@ -230,7 +259,7 @@ def discover_patchcore_images(dataset_root: Path) -> list[SourceImage]:
                 if record.label == "normal":
                     normal_views.add((record.hand, record.resolved_view))
 
-    missing_normal = [(hand, view) for hand in HANDS for view in VIEWS if (hand, view) not in normal_views]
+    missing_normal = [(hand, view) for hand in hands for view in VIEWS if (hand, view) not in normal_views]
     if missing_normal:
         msg = f"Missing normal image data for hand/view pairs: {missing_normal}"
         raise ValueError(msg)
@@ -244,8 +273,10 @@ def select_patchcore_rois(
     preview_dir: Path,
     max_window_width: int = 1600,
     max_window_height: int = 1000,
+    hands: tuple[str, ...] = HANDS,
+    excluded_session_ids: tuple[str, ...] = (),
 ) -> dict[str, object]:
-    """Interactively select and atomically publish all 12 hand/view ROIs.
+    """Interactively select and atomically publish selected hand/view ROIs.
 
     Args:
         repo_root (Path): Repository root used to store relative reference paths.
@@ -262,10 +293,15 @@ def select_patchcore_rois(
         FileNotFoundError: If no readable normal reference exists for a hand/view.
         ValueError: If references have different sizes, lie outside the repository, or a selected ROI is invalid.
     """
-    records = discover_patchcore_images(dataset_root)
+    hands = _normalize_hands(hands)
+    records = discover_patchcore_images(
+        dataset_root,
+        hands=hands,
+        excluded_session_ids=excluded_session_ids,
+    )
     references: dict[tuple[str, str], tuple[SourceImage, object]] = {}
     common_size: tuple[int, int] | None = None
-    for hand in HANDS:
+    for hand in hands:
         for view in VIEWS:
             candidates = (
                 record
@@ -296,7 +332,7 @@ def select_patchcore_rois(
     width, height = common_size
     existing_rois: dict[str, dict[str, ROI]] | None = None
     if config_path.exists():
-        configured_width, configured_height, existing_rois, _ = load_patchcore_roi_config(config_path)
+        configured_width, configured_height, existing_rois, _ = load_patchcore_roi_config(config_path, hands=hands)
         if (configured_width, configured_height) != common_size:
             msg = (
                 "Existing ROI config dimensions do not match normal references: "
@@ -305,7 +341,7 @@ def select_patchcore_rois(
             raise ValueError(msg)
 
     hands_payload: dict[str, object] = {}
-    for hand in HANDS:
+    for hand in hands:
         views_payload: dict[str, object] = {}
         for view in VIEWS:
             record, image = references[(hand, view)]
@@ -342,12 +378,19 @@ def _paths_overlap(first: Path, second: Path) -> bool:
     return first == second or first in second.parents or second in first.parents
 
 
-def _validate_conversion_paths(repo_root: Path, dataset_root: Path, output_root: Path) -> None:
+def _validate_conversion_paths(
+    repo_root: Path,
+    dataset_root: Path,
+    output_root: Path,
+    hands: tuple[str, ...],
+) -> None:
     """Validate the output boundary without changing any filesystem state."""
     safe_dataset_root = (repo_root / "dataset").resolve()
-    if dataset_root != safe_dataset_root:
-        msg = f"Input dataset root must be the repository dataset directory: {safe_dataset_root}"
-        raise ValueError(msg)
+    try:
+        dataset_relative = dataset_root.relative_to(safe_dataset_root)
+    except ValueError as error:
+        msg = f"Input dataset root must be under the repository dataset directory: {safe_dataset_root}"
+        raise ValueError(msg) from error
     try:
         output_relative = output_root.relative_to(safe_dataset_root)
     except ValueError as error:
@@ -357,7 +400,10 @@ def _validate_conversion_paths(repo_root: Path, dataset_root: Path, output_root:
         msg = f"Output must be a safe child directory under {safe_dataset_root}: {output_root}"
         raise ValueError(msg)
 
-    input_roots = ((dataset_root / hand).resolve() for hand in HANDS)
+    if dataset_relative.parts and _paths_overlap(output_root, dataset_root):
+        msg = f"Output must be separate from the input dataset tree: {output_root}"
+        raise ValueError(msg)
+    input_roots = ((dataset_root / hand).resolve() for hand in hands)
     if any(_paths_overlap(output_root, input_root) for input_root in input_roots):
         msg = f"Output must be separate from the right/left input trees: {output_root}"
         raise ValueError(msg)
@@ -423,6 +469,8 @@ def crop_patchcore_dataset(
     output_root: Path,
     roi_config: Path,
     overwrite: bool = False,
+    hands: tuple[str, ...] = HANDS,
+    excluded_session_ids: tuple[str, ...] = (),
 ) -> dict[str, object]:
     """Preflight and crop a PatchCore dataset into a separate transactional output tree.
 
@@ -430,7 +478,7 @@ def crop_patchcore_dataset(
         repo_root (Path): Repository root containing the safe ``dataset`` boundary.
         dataset_root (Path): Root containing the ``right`` and ``left`` source trees.
         output_root (Path): Separate output directory below ``repo_root/dataset``.
-        roi_config (Path): Strict 12-ROI JSON configuration.
+        roi_config (Path): Strict selected-hand, eight-view JSON configuration.
         overwrite (bool): Whether an existing output may be transactionally replaced.
 
     Returns:
@@ -445,13 +493,18 @@ def crop_patchcore_dataset(
     dataset_root = dataset_root.resolve()
     output_root = output_root.resolve()
     roi_config = roi_config.resolve()
-    _validate_conversion_paths(repo_root, dataset_root, output_root)
+    hands = _normalize_hands(hands)
+    _validate_conversion_paths(repo_root, dataset_root, output_root, hands)
     if output_root.exists() and not overwrite:
         msg = f"Output already exists; pass overwrite=True to replace it: {output_root}"
         raise FileExistsError(msg)
 
-    width, height, rois, config_payload = load_patchcore_roi_config(roi_config)
-    records = discover_patchcore_images(dataset_root)
+    width, height, rois, config_payload = load_patchcore_roi_config(roi_config, hands=hands)
+    records = discover_patchcore_images(
+        dataset_root,
+        hands=hands,
+        excluded_session_ids=excluded_session_ids,
+    )
     prepared = _preflight_conversion(records, dataset_root, width, height, rois)
 
     temporary_root = Path(
@@ -527,7 +580,7 @@ def crop_patchcore_dataset(
                 }
                 for view in VIEWS
             }
-            for hand in HANDS
+            for hand in hands
         }
         for item in prepared:
             source = item.source

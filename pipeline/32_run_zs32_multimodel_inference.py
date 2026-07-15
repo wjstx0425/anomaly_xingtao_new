@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import math
@@ -28,7 +29,6 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from capture_data.zs32_18_group_commissioning import validate_commissioning_source_assets  # noqa: E402
 from capture_data.zs32_inspection_orchestrator import (  # noqa: E402
     InspectionRequest,
     write_template_match_csv,
@@ -37,11 +37,8 @@ from capture_data.zs32_model_runtime import ZS32ModelRuntime, load_runtime_confi
 from capture_data.zs32_template_gate import TemplateGate  # noqa: E402
 from zs32_inspection.domain.views import CANONICAL_VIEWS  # noqa: E402
 
-DEFAULT_RUNTIME_CONFIG = REPO_ROOT / "config/fusion/zs32_runtime_models.json"
-PRODUCTION_FUSION_PROFILE = "zs32-right"
-COMMISSIONING_FUSION_PROFILE = "zs32-right-18-commissioning"
+DEFAULT_RUNTIME_CONFIG = REPO_ROOT / "config/fusion/zs32_runtime_models_eight_view.json"
 EIGHT_VIEW_COMMISSIONING_FUSION_PROFILE = "zs32-right-24-commissioning"
-COMMISSIONING_FUSION_PROFILES = (COMMISSIONING_FUSION_PROFILE, EIGHT_VIEW_COMMISSIONING_FUSION_PROFILE)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -51,7 +48,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--part-id", required=True)
     parser.add_argument("--capture-session", required=True)
     parser.add_argument("--group-id", required=True)
-    parser.add_argument("--hand", choices=("right", "left"), default="right")
+    parser.add_argument(
+        "--hand",
+        choices=("right",),
+        default="right",
+        help="Strict eight-view commissioning supports the right hand only.",
+    )
     for view in CANONICAL_VIEWS:
         parser.add_argument(f"--{view.replace('_', '-')}-image", type=Path, required=True)
     parser.add_argument("--runtime-config", type=Path, default=DEFAULT_RUNTIME_CONFIG)
@@ -68,8 +70,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--threshold-artifact", type=Path, help="Locked Stage-31 right-hand dual thresholds.")
     parser.add_argument(
         "--fusion-profile",
-        choices=(PRODUCTION_FUSION_PROFILE, *COMMISSIONING_FUSION_PROFILES),
-        default=PRODUCTION_FUSION_PROFILE,
+        choices=(EIGHT_VIEW_COMMISSIONING_FUSION_PROFILE,),
+        default=EIGHT_VIEW_COMMISSIONING_FUSION_PROFILE,
         help="Explicit Stage-18 right-hand fusion contract.",
     )
     parser.add_argument("--gt-label", type=int, choices=(0, 1), help="Optional label for calibration-row export.")
@@ -94,7 +96,9 @@ def _request_from_args(args: argparse.Namespace) -> InspectionRequest:
 def _template_status_allows_downstream(status: str, fusion_profile: str) -> bool:
     """Allow template GRAY evidence to be covered only in complementary commissioning."""
     normalized = status.strip().upper()
-    return normalized == "PASS" or (fusion_profile in COMMISSIONING_FUSION_PROFILES and normalized == "REVIEW")
+    return normalized == "PASS" or (
+        fusion_profile == EIGHT_VIEW_COMMISSIONING_FUSION_PROFILE and normalized == "REVIEW"
+    )
 
 
 def _template_result_allows_downstream(result: dict[str, Any], fusion_profile: str) -> bool:
@@ -131,7 +135,9 @@ def _template_gate(
     workspace_parent: Path,
     fusion_profile: str,
 ) -> tuple[tuple[dict[str, Any], ...], Path]:
-    """Crop template inputs, then stop at the first non-PASS result."""
+    """Crop and evaluate all eight template inputs before aggregate gating."""
+    if fusion_profile != EIGHT_VIEW_COMMISSIONING_FUSION_PROFILE:
+        raise ValueError("template gate requires the 24-group commissioning profile")
     workspace_parent.mkdir(parents=True, exist_ok=True)
     workspace = Path(tempfile.mkdtemp(prefix=".zs32-template-first-", dir=workspace_parent))
     gate = TemplateGate(model_dir.resolve())
@@ -163,8 +169,6 @@ def _template_gate(
                     "reason": f"template gate exception: {type(error).__name__}: {error}",
                 }
             results.append(result)
-            if not _template_result_allows_downstream(result, fusion_profile):
-                break
         return tuple(results), workspace
     except Exception:
         shutil.rmtree(workspace)
@@ -178,11 +182,24 @@ def _publish_template_stop(
     workspace: Path,
     fusion_profile: str,
 ) -> None:
-    """Publish a template short-circuit without starting PatchCore or YOLO."""
+    """Publish an eight-view template result with every downstream branch skipped."""
     if output_dir.exists():
         raise FileExistsError(f"output directory already exists: {output_dir}")
-    result = results[-1]
-    status = str(result.get("status", "REVIEW")).upper()
+    results_by_view = {str(result.get("view", "")): result for result in results}
+    if len(results) != len(CANONICAL_VIEWS) or set(results_by_view) != set(CANONICAL_VIEWS):
+        raise ValueError("template stop publication requires exactly one result for all eight views")
+    blocked = [
+        results_by_view[view]
+        for view in CANONICAL_VIEWS
+        if not _template_result_allows_downstream(results_by_view[view], fusion_profile)
+    ]
+    if not blocked:
+        raise ValueError("template stop publication requires at least one blocked template result")
+    decisive = next(
+        (result for result in blocked if str(result.get("status", "")).upper() == "NG_TEMPLATE"),
+        blocked[0],
+    )
+    status = str(decisive.get("status", "REVIEW")).upper()
     summary = {
         "machine_status": status if status in {"NG_TEMPLATE", "INVALID_CAPTURE"} else "REVIEW",
         "inspection_complete": False,
@@ -194,26 +211,80 @@ def _publish_template_stop(
         "hand": request.hand,
         "evaluated_views": [item.get("view") for item in results],
         "template_results": list(results),
-        "reason": result.get("reason"),
+        "reason": decisive.get("reason") or "template gate did not allow downstream inference",
         "strict_fusion": False,
         "fusion_profile": fusion_profile,
-        "commissioning_only": fusion_profile in COMMISSIONING_FUSION_PROFILES,
+        "commissioning_only": True,
         "production_release_allowed": False,
     }
-    for name in ("runtime_summary.json", "runtime_manifest.json"):
-        payload = dict(summary)
-        if name == "runtime_manifest.json":
-            payload.update(
-                capture_session=request.capture_session,
-                group_id=request.group_id,
-                hand=request.hand,
-                missing_required_evidence=["template_gate"],
-                note="Template-first short circuit; strict fusion and downstream models were not run.",
+    (workspace / "runtime_summary.json").write_text(
+        json.dumps(summary, indent=2, sort_keys=True, default=str) + "\n",
+        encoding="utf-8",
+    )
+    source_dir = workspace / "sources"
+    template_evidence_dir = workspace / "evidence" / "template"
+    source_dir.mkdir(parents=True, exist_ok=True)
+    template_evidence_dir.mkdir(parents=True, exist_ok=True)
+    views: dict[str, dict[str, Any]] = {}
+    for view in CANONICAL_VIEWS:
+        result = results_by_view[view]
+        source = Path(request.images[view]).resolve()
+        source_copy = source_dir / f"{view}{source.suffix or '.png'}"
+        shutil.copy2(source, source_copy)
+        image = cv2.imread(str(source_copy), cv2.IMREAD_COLOR)
+        if image is None:
+            raise ValueError(f"could not decode template-stop source image: {source}")
+        template_source = Path(str(result.get("best_template_path", ""))).expanduser()
+        template_branch: dict[str, Any] = {
+            "state": "error",
+            "status": str(result.get("status", "REVIEW")).upper(),
+            "score": result.get("score"),
+            "reason": str(result.get("reason") or "template evidence is incomplete"),
+        }
+        if template_source.is_file():
+            evidence_copy = template_evidence_dir / f"{view}{template_source.suffix or '.bin'}"
+            shutil.copy2(template_source, evidence_copy)
+            template_branch.update(
+                state="available",
+                evidence_path=str(evidence_copy.relative_to(workspace)),
             )
-        (workspace / name).write_text(
-            json.dumps(payload, indent=2, sort_keys=True, default=str) + "\n",
-            encoding="utf-8",
-        )
+        skipped = {
+            "state": "skipped",
+            "status": "SKIPPED",
+            "score": None,
+            "reason": "template gate did not allow downstream inference",
+        }
+        views[view] = {
+            "view": view,
+            "part_id": request.part_id,
+            "capture_session": request.capture_session,
+            "group_id": request.group_id,
+            "hand": request.hand,
+            "manifest_identity": f"{request.part_id}:{request.hand}:{view}",
+            "source_path": str(source_copy.relative_to(workspace)),
+            "source_sha256": hashlib.sha256(source_copy.read_bytes()).hexdigest(),
+            "source_shape": list(image.shape[:2]),
+            "model_supported": True,
+            "branches": {
+                "template": template_branch,
+                "patchcore": dict(skipped),
+                "yolo": dict(skipped),
+                "fusion": dict(skipped),
+            },
+        }
+    manifest = {
+        **summary,
+        "schema_version": "1.0",
+        "product": "ZS32",
+        "manifest_identity": "ZS32/right",
+        "views": views,
+        "missing_required_evidence": ["PatchCore", "YOLO", "fusion"],
+        "note": "Template-first aggregate stop; all model and fusion branches were skipped.",
+    }
+    (workspace / "runtime_manifest.json").write_text(
+        json.dumps(manifest, indent=2, sort_keys=True, default=str) + "\n",
+        encoding="utf-8",
+    )
     workspace.replace(output_dir)
 
 
@@ -245,17 +316,6 @@ def _run_strict_fusion(args: argparse.Namespace, output_dir: Path, template_csv:
         "--output-dir",
         str(output_dir / "fusion"),
     ]
-    if args.fusion_profile == PRODUCTION_FUSION_PROFILE:
-        values.extend(
-            (
-                "--quality-csv",
-                str(args.quality_csv),
-                "--registration-csv",
-                str(args.registration_csv),
-                "--geometry-csv",
-                str(args.geometry_csv),
-            ),
-        )
     fusion_args = stage18.build_parser().parse_args(values)
     decisions = stage18.run_fusion(fusion_args)
     if len(decisions) != 1 or decisions[0].part_id != args.part_id:
@@ -274,12 +334,16 @@ def _run_strict_fusion(args: argparse.Namespace, output_dir: Path, template_csv:
         "fusion_output": str(output_dir / "fusion"),
         "reason": decision.reason,
         "fusion_profile": args.fusion_profile,
-        "commissioning_only": args.fusion_profile in COMMISSIONING_FUSION_PROFILES,
-        "production_release_allowed": args.fusion_profile == PRODUCTION_FUSION_PROFILE,
+        "commissioning_only": True,
+        "production_release_allowed": False,
     }
 
 
 def _validate_mode(args: argparse.Namespace) -> None:
+    if args.hand != "right":
+        raise ValueError("strict eight-view Stage32 supports only hand='right'")
+    if args.fusion_profile != EIGHT_VIEW_COMMISSIONING_FUSION_PROFILE:
+        raise ValueError("strict eight-view Stage32 requires the 24-group commissioning profile")
     if not math.isfinite(args.diagnostic_mask_threshold) or not 0 <= args.diagnostic_mask_threshold <= 1:
         raise ValueError("--diagnostic-mask-threshold must be finite and within [0, 1]")
     if (args.gt_label is None) != (args.split is None):
@@ -295,14 +359,6 @@ def _validate_mode(args: argparse.Namespace) -> None:
             "--threshold-artifact": args.threshold_artifact,
             "--template-model-dir": args.template_model_dir,
         }
-        if args.fusion_profile == PRODUCTION_FUSION_PROFILE:
-            required.update(
-                {
-                    "--quality-csv": args.quality_csv,
-                    "--registration-csv": args.registration_csv,
-                    "--geometry-csv": args.geometry_csv,
-                },
-            )
         missing = [name for name, value in required.items() if value is None]
         if missing:
             raise ValueError(f"fuse mode requires: {', '.join(missing)}")
@@ -310,13 +366,28 @@ def _validate_mode(args: argparse.Namespace) -> None:
 
 def _validate_commissioning_source_assets(args: argparse.Namespace) -> None:
     """Fail before model loading when commissioning assets drift from locked thresholds."""
-    if args.mode != "fuse" or args.fusion_profile not in COMMISSIONING_FUSION_PROFILES:
+    if args.mode != "fuse":
         return
-    validate_commissioning_source_assets(
-        args.threshold_artifact,
-        args.runtime_config,
-        args.template_model_dir / "model.json",
-    )
+    payload = json.loads(args.threshold_artifact.read_text(encoding="utf-8"))
+    unsigned = dict(payload)
+    artifact_sha256 = unsigned.pop("artifact_sha256", None)
+    canonical = hashlib.sha256(json.dumps(unsigned, separators=(",", ":"), sort_keys=True).encode()).hexdigest()
+    if artifact_sha256 != canonical:
+        raise ValueError("commissioning threshold artifact immutable SHA256 mismatch")
+    if payload.get("commissioning_only") is not True or payload.get("production_release_allowed") is not False:
+        raise ValueError("strict eight-view thresholds must be commissioning-only and non-production")
+    sources = payload.get("source_artifacts")
+    if not isinstance(sources, dict):
+        raise TypeError("commissioning artifact source_artifacts must be an object")
+    for name, path in (
+        ("runtime_config", args.runtime_config),
+        ("template_model", args.template_model_dir / "model.json"),
+    ):
+        binding = sources.get(name)
+        expected = binding.get("sha256") if isinstance(binding, dict) else None
+        actual = hashlib.sha256(path.read_bytes()).hexdigest()
+        if expected != actual:
+            raise ValueError(f"{name} SHA256 differs from the locked commissioning threshold artifact")
 
 
 def _update_runtime_manifest_after_fusion(output_dir: Path, summary: dict[str, Any]) -> None:

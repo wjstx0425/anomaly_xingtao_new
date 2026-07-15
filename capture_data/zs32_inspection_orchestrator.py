@@ -19,7 +19,7 @@ from zs32_inspection.domain.views import CANONICAL_VIEWS
 
 DOWNSTREAM_BRANCHES = ("PatchCore", "YOLO", "geometry")
 TEMPLATE_BRANCH = "template_match"
-VALID_HANDS = {"left", "right"}
+VALID_HANDS = {"right"}
 _PASS_STATUSES = {"PASS"}
 _REVIEW_STATUSES = {"REVIEW", "WARN", "WARNING", "SUSPECT", "GRAY", "ERROR"}
 _NG_STATUSES = {"NG", "FAIL", "FAILED", "DEFECT", "STRONG", "NG_TEMPLATE"}
@@ -34,7 +34,7 @@ class InspectionRequest:
         part_id (str): Stable physical-part identity.
         capture_session (str): Acquisition-session identity.
         group_id (str): Front/back capture-group identity.
-        hand (str): Product hand, ``left`` or ``right``.
+        hand (str): Product hand; strict eight-view inspection requires ``right``.
         images (Mapping[str, str | Path]): Image path for every canonical view.
     """
 
@@ -357,10 +357,10 @@ class ZS32InspectionOrchestrator:
             )
             return audit
 
-        for index, view in enumerate(CANONICAL_VIEWS):
+        for view in CANONICAL_VIEWS:
             image_path = Path(request.images[view])
             audit["evaluated_views"].append(view)
-            audit["skipped_views"] = list(CANONICAL_VIEWS[index + 1 :])
+            audit["skipped_views"] = list(CANONICAL_VIEWS[len(audit["evaluated_views"]) :])
             try:
                 raw_result = self.template_gate.evaluate(image_path, request.hand, view)
                 evidence = _normalize_gate_result(raw_result, image_path=image_path, view=view)
@@ -376,14 +376,17 @@ class ZS32InspectionOrchestrator:
                     or f"template gate exception: {type(error).__name__}: {error}",
                 }
             audit["template_results"].append(evidence)
-            if evidence["status"] != "PASS":
-                audit.update(
-                    machine_status=evidence["status"],
-                    short_circuited=True,
-                    stopped_after=TEMPLATE_BRANCH,
-                    early_stop_reason=evidence["reason"],
-                )
-                return audit
+
+        blocked = [result for result in audit["template_results"] if result["status"] != "PASS"]
+        if blocked:
+            decisive = next((result for result in blocked if result["status"] == "NG_TEMPLATE"), blocked[0])
+            audit.update(
+                machine_status=decisive["status"],
+                short_circuited=True,
+                stopped_after=TEMPLATE_BRANCH,
+                early_stop_reason=decisive["reason"],
+            )
+            return audit
 
         audit["skipped_branches"] = []
         try:

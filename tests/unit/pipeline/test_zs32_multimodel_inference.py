@@ -15,7 +15,11 @@ from hashlib import sha256
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
+import cv2
+import numpy as np
 import pytest
+from zs32_inspection.dashboard.contracts import BranchState
+from zs32_inspection.dashboard.parser import load_inspection_result
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 VIEWS = (
@@ -62,6 +66,15 @@ def _minimum_args(tmp_path: Path) -> list[str]:
     return values
 
 
+def _write_images(tmp_path: Path) -> dict[str, Path]:
+    images = {}
+    for index, view in enumerate(VIEWS):
+        path = tmp_path / f"{view}.png"
+        assert cv2.imwrite(str(path), np.full((3, 4, 3), index, dtype=np.uint8))
+        images[view] = path
+    return images
+
+
 def test_unified_entrypoint_parses_all_eight_explicit_images(tmp_path: Path) -> None:
     """The CLI must preserve an explicit source path for every canonical view."""
     stage32 = _load_module("pipeline_zs32_runtime_parser", "pipeline/32_run_zs32_multimodel_inference.py")
@@ -72,6 +85,26 @@ def test_unified_entrypoint_parses_all_eight_explicit_images(tmp_path: Path) -> 
     assert args.mode == "infer"
     assert tuple(request.images) == VIEWS
     assert request.hand == "right"
+    assert args.fusion_profile == "zs32-right-24-commissioning"
+    assert args.runtime_config == REPO_ROOT / "config/fusion/zs32_runtime_models_eight_view.json"
+
+
+@pytest.mark.parametrize(
+    "forbidden",
+    [
+        ("--hand", "left"),
+        ("--fusion-profile", "zs32-right"),
+        ("--fusion-profile", "zs32-right-18-commissioning"),
+    ],
+)
+def test_stage32_rejects_non_right_or_non_eight_view_commissioning_contract(
+    tmp_path: Path,
+    forbidden: tuple[str, str],
+) -> None:
+    stage32 = _load_module("pipeline_zs32_reject_legacy_contract", "pipeline/32_run_zs32_multimodel_inference.py")
+
+    with pytest.raises(SystemExit):
+        stage32.build_parser().parse_args([*_minimum_args(tmp_path), *forbidden])
 
 
 def test_stage32_parser_requires_all_eight_images() -> None:
@@ -80,6 +113,56 @@ def test_stage32_parser_requires_all_eight_images() -> None:
     required = {action.dest for action in stage32.build_parser()._actions if action.required}
 
     assert {f"{view}_image" for view in VIEWS} <= required
+
+
+def test_template_gate_evaluates_all_eight_before_aggregate_stop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stage32 = _load_module("pipeline_zs32_all_template_views", "pipeline/32_run_zs32_multimodel_inference.py")
+    images = _write_images(tmp_path)
+    calls: list[str] = []
+
+    class FakeGate:
+        def __init__(self, _model_dir: Path) -> None:
+            pass
+
+        def evaluate(self, crop_path: Path, _hand: str, view: str) -> SimpleNamespace:
+            calls.append(view)
+            status = "NG_TEMPLATE" if view == "front_left" else "PASS"
+            return SimpleNamespace(
+                to_dict=lambda: {
+                    "view": view,
+                    "status": status,
+                    "reason": "mismatch" if status == "NG_TEMPLATE" else "",
+                    "score": 0.9 if status == "NG_TEMPLATE" else 0.01,
+                    "risk_score": 0.9 if status == "NG_TEMPLATE" else 0.01,
+                    "low_threshold": 0.1,
+                    "high_threshold": 0.5,
+                    "best_template_path": str(crop_path),
+                },
+            )
+
+    monkeypatch.setattr(stage32, "TemplateGate", FakeGate)
+    request = stage32.InspectionRequest("part-001", "session-001", "group-001", "right", images)
+    runtime = SimpleNamespace(
+        config=SimpleNamespace(
+            image_width=4,
+            image_height=3,
+            patchcore_rois={"right": {view: (0, 0, 4, 3) for view in VIEWS}},
+        ),
+    )
+
+    results, _ = stage32._template_gate(
+        request,
+        runtime,
+        tmp_path / "model",
+        tmp_path / "workspace",
+        "zs32-right-24-commissioning",
+    )
+
+    assert calls == list(VIEWS)
+    assert tuple(result["view"] for result in results) == VIEWS
 
 
 def test_diagnostic_mask_threshold_parses_with_display_only_default(tmp_path: Path) -> None:
@@ -253,7 +336,7 @@ def test_commissioning_fuse_requires_only_template_and_threshold_assets(tmp_path
     values.extend(
         (
             "--fusion-profile",
-            "zs32-right-18-commissioning",
+            "zs32-right-24-commissioning",
             "--threshold-artifact",
             str(tmp_path / "thresholds.json"),
             "--template-model-dir",
@@ -265,33 +348,24 @@ def test_commissioning_fuse_requires_only_template_and_threshold_assets(tmp_path
     stage32._validate_mode(args)
 
 
-def test_production_fuse_still_requires_quality_registration_and_geometry(tmp_path: Path) -> None:
-    """Adding commissioning must not relax the existing 36-group production contract."""
+def test_validate_mode_rejects_production_namespace_even_if_constructed_directly(tmp_path: Path) -> None:
+    """The eight-view Stage32 implementation must never execute a production profile."""
     stage32 = _load_module("pipeline_zs32_runtime_production", "pipeline/32_run_zs32_multimodel_inference.py")
     values = _minimum_args(tmp_path)
     values[0] = "fuse"
-    values.extend(
-        (
-            "--threshold-artifact",
-            str(tmp_path / "thresholds.json"),
-            "--template-model-dir",
-            str(tmp_path / "template-model"),
-        ),
-    )
     args = stage32.build_parser().parse_args(values)
+    args.fusion_profile = "zs32-right"
 
-    with pytest.raises(ValueError, match=r"--quality-csv.*--registration-csv.*--geometry-csv"):
+    with pytest.raises(ValueError, match="24-group commissioning"):
         stage32._validate_mode(args)
 
 
 @pytest.mark.parametrize(
     ("profile", "status", "expected"),
     [
-        ("zs32-right", "PASS", True),
-        ("zs32-right", "REVIEW", False),
-        ("zs32-right-18-commissioning", "PASS", True),
-        ("zs32-right-18-commissioning", "REVIEW", True),
-        ("zs32-right-18-commissioning", "NG_TEMPLATE", False),
+        ("zs32-right-24-commissioning", "PASS", True),
+        ("zs32-right-24-commissioning", "REVIEW", True),
+        ("zs32-right-24-commissioning", "NG_TEMPLATE", False),
     ],
 )
 def test_template_review_continues_only_in_complementary_commissioning(
@@ -299,7 +373,7 @@ def test_template_review_continues_only_in_complementary_commissioning(
     status: str,
     expected: bool,
 ) -> None:
-    """Template GRAY may be covered downstream only in the explicit 18-group policy."""
+    """Template GRAY may be covered downstream only in the explicit 24-group policy."""
     stage32 = _load_module("pipeline_zs32_runtime_template_policy", "pipeline/32_run_zs32_multimodel_inference.py")
 
     assert stage32._template_status_allows_downstream(status, profile) is expected
@@ -326,7 +400,7 @@ def test_only_complete_semantic_template_review_continues_commissioning() -> Non
 
     assert stage32._template_result_allows_downstream(
         _valid_template_review(),
-        "zs32-right-18-commissioning",
+        "zs32-right-24-commissioning",
     )
 
 
@@ -346,7 +420,7 @@ def test_incomplete_or_nonsemantic_template_review_stops_commissioning(field: st
     result = _valid_template_review()
     result[field] = value
 
-    assert not stage32._template_result_allows_downstream(result, "zs32-right-18-commissioning")
+    assert not stage32._template_result_allows_downstream(result, "zs32-right-24-commissioning")
 
 
 def test_template_exception_review_stops_commissioning() -> None:
@@ -354,18 +428,19 @@ def test_template_exception_review_stops_commissioning() -> None:
     stage32 = _load_module("pipeline_zs32_runtime_exception_review", "pipeline/32_run_zs32_multimodel_inference.py")
     result = {"view": "front", "status": "REVIEW", "reason": "template gate exception: ValueError: broken"}
 
-    assert not stage32._template_result_allows_downstream(result, "zs32-right-18-commissioning")
+    assert not stage32._template_result_allows_downstream(result, "zs32-right-24-commissioning")
 
 
 def test_template_short_circuit_retains_commissioning_policy(tmp_path: Path) -> None:
     """Even an NG short circuit must remain visibly non-production in both runtime records."""
     stage32 = _load_module("pipeline_zs32_runtime_stop_policy", "pipeline/32_run_zs32_multimodel_inference.py")
+    images = _write_images(tmp_path)
     request = stage32.InspectionRequest(
         "part-001",
         "session-001",
         "group-001",
         "right",
-        {view: tmp_path / f"{view}.png" for view in VIEWS},
+        images,
     )
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -374,9 +449,18 @@ def test_template_short_circuit_retains_commissioning_policy(tmp_path: Path) -> 
     stage32._publish_template_stop(
         request,
         output,
-        ({"view": "front", "status": "NG_TEMPLATE", "reason": "risk reached threshold"},),
+        tuple(
+            {
+                "view": view,
+                "status": "NG_TEMPLATE" if view == "front" else "PASS",
+                "reason": "risk reached threshold" if view == "front" else "",
+                "score": 0.9 if view == "front" else 0.01,
+                "best_template_path": str(images[view]),
+            }
+            for view in VIEWS
+        ),
         workspace,
-        "zs32-right-18-commissioning",
+        "zs32-right-24-commissioning",
     )
 
     for name in ("runtime_summary.json", "runtime_manifest.json"):
@@ -387,9 +471,28 @@ def test_template_short_circuit_retains_commissioning_policy(tmp_path: Path) -> 
             "group_id": "group-001",
             "hand": "right",
         }
-        assert payload["fusion_profile"] == "zs32-right-18-commissioning"
+        assert payload["fusion_profile"] == "zs32-right-24-commissioning"
         assert payload["commissioning_only"] is True
         assert payload["production_release_allowed"] is False
+
+    manifest = json.loads((output / "runtime_manifest.json").read_text(encoding="utf-8"))
+    assert set(manifest["views"]) == set(VIEWS)
+    for view in VIEWS:
+        branches = manifest["views"][view]["branches"]
+        assert branches["template"]["status"] == ("NG_TEMPLATE" if view == "front" else "PASS")
+        for branch in ("patchcore", "yolo", "fusion"):
+            assert branches[branch] == {
+                "state": "skipped",
+                "status": "SKIPPED",
+                "score": None,
+                "reason": "template gate did not allow downstream inference",
+            }
+    parsed = load_inspection_result(output)
+    assert all(
+        view.branches[branch].state is BranchState.SKIPPED
+        for view in parsed.views
+        for branch in ("patchcore", "yolo", "fusion")
+    )
 
 
 def test_successful_strict_fusion_summary_retains_inspection_identity(
@@ -408,7 +511,7 @@ def test_successful_strict_fusion_summary_retains_inspection_identity(
         capture_session="session-001",
         group_id="group-001",
         hand="right",
-        fusion_profile="zs32-right-18-commissioning",
+        fusion_profile="zs32-right-24-commissioning",
         threshold_artifact=tmp_path / "thresholds.json",
     )
     output = tmp_path / "output"
@@ -448,7 +551,12 @@ def test_eight_view_commissioning_profile_contains_exactly_twenty_four_groups() 
     assert {record["hand"] for record in records} == {"right"}
     assert {record["view"] for record in records} == set(VIEWS)
     assert tuple(profile["required_branches_by_view"]) == VIEWS
-    assert all(len(profile["required_branches_by_view"][view]) == 3 for view in VIEWS)
+    for view in VIEWS:
+        assert set(profile["required_branches_by_view"][view]) == {
+            "template_match",
+            f"anomaly_{view}",
+            "yolo",
+        }
 
 
 def test_stage18_resolves_right_only_named_profile() -> None:
@@ -461,20 +569,15 @@ def test_stage18_resolves_right_only_named_profile() -> None:
     assert stage18._fusion_config_path(args) == REPO_ROOT / "config/fusion/zs32_right_six_view.json"
 
 
-def test_stage18_resolves_explicit_eighteen_group_commissioning_profile() -> None:
-    """The reduced profile must be a separately named, visibly non-production contract."""
-    stage18 = _load_module("pipeline_zs32_right_18_profile", "pipeline/18_fuse_inspection_results.py")
+def test_stage18_resolves_explicit_twenty_four_group_commissioning_profile() -> None:
+    stage18 = _load_module("pipeline_zs32_right_24_profile", "pipeline/18_fuse_inspection_results.py")
     args = stage18.build_parser().parse_args(
-        ["--profile", "zs32-right-18-commissioning", "--output-dir", "/tmp/zs32-right-18-profile-test"],
+        ["--profile", "zs32-right-24-commissioning", "--output-dir", "/tmp/zs32-right-24-profile-test"],
     )
-    path = stage18._fusion_config_path(args)
-    profile = json.loads(path.read_text(encoding="utf-8"))
 
-    assert path == REPO_ROOT / "config/fusion/zs32_right_unified_roi_18_group_commissioning.json"
-    assert profile["commissioning_only"] is True
-    assert profile["production_release_allowed"] is False
-    assert len(profile["expected_versions"]) == 18
-    assert all(len(profile["required_branches_by_view"][view]) == 3 for view in LEGACY_VIEWS)
+    assert stage18._fusion_config_path(args) == (
+        REPO_ROOT / "config/fusion/zs32_right_eight_view_24_group_commissioning.json"
+    )
 
 
 def test_strict_fusion_updates_runtime_manifest_without_losing_provenance(tmp_path: Path) -> None:
@@ -494,7 +597,7 @@ def test_strict_fusion_updates_runtime_manifest_without_losing_provenance(tmp_pa
         "machine_status": "OK",
         "inspection_complete": True,
         "strict_fusion": True,
-        "fusion_profile": "zs32-right-18-commissioning",
+        "fusion_profile": "zs32-right-24-commissioning",
         "commissioning_only": True,
         "production_release_allowed": False,
         "fusion_output": str(output / "fusion"),

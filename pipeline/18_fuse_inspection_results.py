@@ -30,9 +30,13 @@ from capture_data.inspection_audit import build_part_audit, sha256_file, write_p
 
 ZS32_PROFILE_PATH = REPO_ROOT / "config/fusion/zs32_six_view.json"
 ZS32_RIGHT_PROFILE_PATH = REPO_ROOT / "config/fusion/zs32_right_six_view.json"
+ZS32_RIGHT_24_COMMISSIONING_PROFILE_PATH = (
+    REPO_ROOT / "config/fusion/zs32_right_eight_view_24_group_commissioning.json"
+)
 STRICT_PROFILE_PATHS = {
     "zs32": ZS32_PROFILE_PATH,
     "zs32-right": ZS32_RIGHT_PROFILE_PATH,
+    "zs32-right-24-commissioning": ZS32_RIGHT_24_COMMISSIONING_PROFILE_PATH,
 }
 
 

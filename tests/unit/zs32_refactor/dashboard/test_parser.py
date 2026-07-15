@@ -105,6 +105,21 @@ def test_parser_accepts_secondary_available_evidence(eight_view_result_dir: Path
     assert branch.score == pytest.approx(0.25)
 
 
+@pytest.mark.parametrize("view", VIEW_ORDER)
+def test_parser_rejects_unsupported_core_branch(eight_view_result_dir: Path, view: str) -> None:
+    manifest = load_manifest(eight_view_result_dir)
+    manifest["views"][view]["branches"]["patchcore"].update(
+        state="unsupported",
+        status="UNSUPPORTED",
+        score=None,
+        reason="not commissioned",
+    )
+    write_manifest(eight_view_result_dir, manifest)
+
+    with pytest.raises(DashboardResultError, match="UNSUPPORTED"):
+        load_inspection_result(eight_view_result_dir)
+
+
 @pytest.mark.parametrize(
     ("mutation", "match"),
     [

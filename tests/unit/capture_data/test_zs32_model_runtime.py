@@ -26,6 +26,11 @@ from capture_data.zs32_model_runtime import (
     _build_patchcore_mask,
     load_runtime_config,
 )
+from capture_data.zs32_patchcore_roi_dataset import VIEWS as PATCHCORE_ROI_VIEWS
+from capture_data.zs32_patchcore_roi_dataset import load_patchcore_roi_config
+from capture_data.zs32_view_roi_dataset import VIEWS as YOLO_ROI_VIEWS
+from capture_data.zs32_view_roi_dataset import load_roi_config
+from zs32_inspection.domain.views import CANONICAL_VIEWS
 
 VIEWS = (
     "front",
@@ -116,8 +121,8 @@ def _write_images(tmp_path: Path) -> dict[str, Path]:
     return images
 
 
-def test_yolo_backend_discards_boundary_collapsed_candidates(tmp_path: Path) -> None:
-    """A zero-area candidate created by clipping must not poison the whole eight-view batch."""
+def test_yolo_backend_rejects_boundary_collapsed_candidates(tmp_path: Path) -> None:
+    """A zero-area candidate must fail closed instead of disappearing from strict evidence."""
 
     class _Xyxy:
         def detach(self) -> _Xyxy:
@@ -149,12 +154,8 @@ def test_yolo_backend_discards_boundary_collapsed_candidates(tmp_path: Path) -> 
     backend.device = "cpu"
     crops = {view: tmp_path / f"{view}.png" for view in VIEWS}
 
-    output = backend.predict(crops, tmp_path / "evidence")
-
-    assert tuple(output) == VIEWS
-    assert output["front"].score == 0.0
-    assert output["front"].detections == ()
-    assert all(evidence.evidence_path.is_file() for evidence in output.values())
+    with pytest.raises(ValueError, match="non-positive box"):
+        backend.predict(crops, tmp_path / "evidence")
 
 
 class _PatchcoreBackend:
@@ -225,6 +226,23 @@ def test_load_runtime_config_accepts_right_only_top_level_eight_view_roi(tmp_pat
     assert tuple(config.patchcore_rois["right"]) == VIEWS
 
 
+def test_roi_loader_apis_accept_exact_right_eight_view_configs(tmp_path: Path) -> None:
+    config_path, _ = _write_fixture(tmp_path)
+    runtime_payload = json.loads(config_path.read_text(encoding="utf-8"))
+
+    _, _, patchcore_rois, _ = load_patchcore_roi_config(
+        Path(runtime_payload["patchcore_roi_config"]),
+        hands=("right",),
+    )
+    _, _, yolo_rois, _ = load_roi_config(Path(runtime_payload["yolo_roi_config"]))
+
+    assert tuple(patchcore_rois) == ("right",)
+    assert tuple(patchcore_rois["right"]) == VIEWS
+    assert tuple(yolo_rois) == VIEWS
+    assert PATCHCORE_ROI_VIEWS is CANONICAL_VIEWS
+    assert YOLO_ROI_VIEWS is CANONICAL_VIEWS
+
+
 def test_load_runtime_config_requires_exactly_eight_patchcore_models(tmp_path: Path) -> None:
     """A missing view must invalidate the model bundle."""
     config_path, _ = _write_fixture(tmp_path)
@@ -245,6 +263,32 @@ def test_load_runtime_config_requires_exactly_eight_yolo_rois(tmp_path: Path) ->
     yolo_roi_path.write_text(json.dumps(roi_payload), encoding="utf-8")
 
     with pytest.raises(ValueError, match="exactly the eight views"):
+        load_runtime_config(config_path)
+
+    with pytest.raises(ValueError, match="exactly"):
+        load_roi_config(yolo_roi_path)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "match"),
+    [
+        ("product", "OTHER", "product"),
+        ("supported_hands", ["left"], "right hand"),
+        ("supported_hands", ["right", "left"], "right hand"),
+    ],
+)
+def test_load_runtime_config_requires_zs32_right_only(
+    tmp_path: Path,
+    field: str,
+    value: object,
+    match: str,
+) -> None:
+    config_path, _ = _write_fixture(tmp_path)
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    payload[field] = value
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=match):
         load_runtime_config(config_path)
 
 

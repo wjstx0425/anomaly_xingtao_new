@@ -1,7 +1,7 @@
 # Copyright (C) 2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
-"""Select six fixed ZS32 view ROIs and crop an existing YOLO dataset."""
+"""Select eight fixed ZS32 view ROIs and crop an existing YOLO dataset."""
 
 from __future__ import annotations
 
@@ -15,8 +15,9 @@ from typing import Any, Literal
 import cv2
 from capture_data.select_roi import save_overlay, select_roi
 from rich.progress import track
+from zs32_inspection.domain.views import CANONICAL_VIEWS
 
-VIEWS = ("front", "front_left", "front_right", "back", "back_left", "back_right")
+VIEWS = CANONICAL_VIEWS
 ROI = tuple[int, int, int, int]
 
 
@@ -119,18 +120,21 @@ def transform_yolo_labels(
 
 
 def load_roi_config(path: Path) -> tuple[int, int, dict[str, ROI], dict[str, Any]]:
-    """Load and validate a six-view ROI JSON file."""
+    """Load and validate an eight-view ROI JSON file."""
     payload = json.loads(path.read_text(encoding="utf-8"))
     if payload.get("coordinate_system") != "pixel_xyxy_half_open":
         msg = "ROI config coordinate_system must be pixel_xyxy_half_open."
         raise ValueError(msg)
     image_size = payload.get("image_size", {})
     width, height = int(image_size.get("width", 0)), int(image_size.get("height", 0))
-    views = payload.get("views", {})
-    missing = [view for view in VIEWS if view not in views]
-    if width <= 0 or height <= 0 or missing:
-        msg = f"Invalid ROI config image size or missing views: {missing}"
+    views = payload.get("views")
+    actual_views = set(views) if isinstance(views, dict) else set()
+    if width <= 0 or height <= 0 or actual_views != set(VIEWS):
+        missing = sorted(set(VIEWS) - actual_views)
+        extra = sorted(actual_views - set(VIEWS))
+        msg = f"ROI config must contain exactly the eight views: missing={missing}, extra={extra}"
         raise ValueError(msg)
+    assert isinstance(views, dict)
     rois: dict[str, ROI] = {}
     for view in VIEWS:
         values = views[view].get("roi", [])
@@ -337,7 +341,7 @@ def select_view_rois(
         elif expected_size != (width, height):
             msg = f"Reference image size mismatch for {view}: {width}x{height}"
             raise ValueError(msg)
-        print(f"\n[{index}/6] View: {view}")
+        print(f"\n[{index}/{len(VIEWS)}] View: {view}")
         print(f"Reference image: {reference_path}")
         roi = select_roi(reference_path, existing.get(view), max_window_width, max_window_height)
         reference_image = cv2.imread(str(reference_path), cv2.IMREAD_COLOR)
