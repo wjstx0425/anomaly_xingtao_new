@@ -252,6 +252,22 @@ def _validate_profile_template(profile: dict[str, Any], template_versions: dict[
     branches = profile.get("required_branches_by_view")
     if not isinstance(branches, dict) or tuple(branches) != VIEW_ORDER:
         raise ValueError("fusion profile template must contain exactly the canonical eight views")
+    for view in VIEW_ORDER:
+        expected_branches = ("template_match", f"anomaly_{view}", "yolo")
+        if tuple(branches[view]) != expected_branches:
+            raise ValueError(f"fusion profile template branches for {view} must be exactly {expected_branches}")
+    expected_branch_order = ("template_match", "yolo", *(f"anomaly_{view}" for view in VIEW_ORDER))
+    if tuple(profile.get("branch_order", ())) != expected_branch_order:
+        raise ValueError(f"fusion profile template branch_order must be exactly {expected_branch_order}")
+    rules = profile.get("rules")
+    if (
+        not isinstance(rules, dict)
+        or set(rules) != set(expected_branch_order)
+        or len(rules) != len(expected_branch_order)
+    ):
+        raise ValueError("fusion profile template rules must reference exactly the required branches")
+    if any(not isinstance(rules[branch], dict) for branch in expected_branch_order):
+        raise TypeError("fusion profile template rules must be objects")
     existing = profile.get("expected_versions")
     if isinstance(existing, list) and existing:
         roi_versions = {record.get("roi_version") for record in existing if isinstance(record, dict)}
@@ -417,7 +433,7 @@ def publish_runtime_assets(source_path: Path, output_dir: Path) -> RuntimeAssets
             {"view": view, "sha256": patchcore[view]["checkpoint_sha256"]} for view in VIEW_ORDER
         ],
         "yolo_weights_sha256": yolo_sha256,
-        "fusion_profile_template_sha256": sha256_file(profile_path),
+        "fusion_profile_template": {"path": str(profile_path), "sha256": sha256_file(profile_path)},
     }
     asset_set_sha256 = _canonical_sha256(asset_set)
     output_dir = output_dir.expanduser().resolve()
@@ -438,6 +454,7 @@ def publish_runtime_assets(source_path: Path, output_dir: Path) -> RuntimeAssets
             "asset_set_sha256": asset_set_sha256,
             "runtime_assets": {"path": str(output_dir / runtime_path.name), "sha256": sha256_file(runtime_path)},
             "fusion_profile": {"path": str(output_dir / fusion_path.name), "sha256": sha256_file(fusion_path)},
+            "fusion_profile_template": {"path": str(profile_path), "sha256": sha256_file(profile_path)},
             "roi_config": {"path": str(roi_path), "sha256": sha256_file(roi_path)},
             "template_model": {
                 "path": str(template_dir),
@@ -478,6 +495,7 @@ def _validate_assets_manifest(path: Path) -> dict[str, Any]:
         if asset_set.get(field) != manifest.get(field):
             raise ValueError(f"assets manifest asset-set identity differs for {field}")
     runtime_payload: dict[str, Any] | None = None
+    fusion_payload: dict[str, Any] | None = None
     for field in ("runtime_assets", "fusion_profile"):
         bound_path, _ = _validate_binding(manifest.get(field), label=field.replace("_", " "))
         try:
@@ -487,6 +505,18 @@ def _validate_assets_manifest(path: Path) -> dict[str, Any]:
         if field == "runtime_assets":
             load_runtime_config(bound_path)
             runtime_payload = _read_object(bound_path, "runtime assets")
+        else:
+            fusion_payload = _read_object(bound_path, "fusion profile")
+    profile_template_path, profile_template_sha256 = _validate_binding(
+        manifest.get("fusion_profile_template"),
+        label="fusion profile template",
+    )
+    profile_template_binding = {
+        "path": str(profile_template_path),
+        "sha256": profile_template_sha256,
+    }
+    if asset_set.get("fusion_profile_template") != profile_template_binding:
+        raise ValueError("assets manifest fusion profile template path/SHA-256 differs from the asset set")
     _, roi_sha256 = _validate_binding(manifest.get("roi_config"), label="ROI config")
     _, summary_sha256 = _validate_binding(manifest.get("patchcore_summary"), label="PatchCore summary")
     _, yolo_sha256 = _validate_binding(manifest.get("yolo_weights"), label="YOLO weights")
@@ -524,6 +554,26 @@ def _validate_assets_manifest(path: Path) -> dict[str, Any]:
         model_path.relative_to(template_dir)
     except ValueError as exc:
         raise ValueError("template model path escapes its publication directory") from exc
+    model_payload = _read_object(model_path, "template model")
+    versions = model_payload.get("versions")
+    if not isinstance(versions, dict):
+        raise TypeError("template model versions must be an object")
+    template_versions = {
+        field: str(versions.get(field, "")).strip() for field in ("model", "threshold", "roi", "template")
+    }
+    if not all(template_versions.values()):
+        raise ValueError("template model versions must be complete")
+    source_profile = _read_object(profile_template_path, "fusion profile template")
+    _validate_profile_template(source_profile, template_versions)
+    if fusion_payload is None:
+        raise ValueError("assets manifest must bind a fusion profile")
+    _validate_profile_template(fusion_payload, template_versions)
+    yolo = runtime_payload.get("yolo")
+    if not isinstance(yolo, dict):
+        raise TypeError("runtime assets yolo must be an object")
+    expected_versions = _expected_versions(patchcore, str(yolo.get("model_version", "")), template_versions)
+    if fusion_payload.get("expected_versions") != expected_versions:
+        raise ValueError("fusion profile expected_versions differ from the bound runtime and template assets")
     return manifest
 
 
@@ -582,12 +632,14 @@ def _validate_threshold_binding(path: Path, assets: dict[str, Any]) -> dict[str,
     records_by_identity = {tuple(str(record.get(field, "")) for field in identity_fields): record for record in records}
     if len(records_by_identity) != 24 or set(records_by_identity) != set(expected_by_identity):
         raise ValueError("threshold artifact must contain the exact 24 unique profile identities")
+    expected_record_order = sorted(expected_by_identity)
+    actual_record_order = [tuple(str(record.get(field, "")) for field in identity_fields) for record in records]
+    if actual_record_order != expected_record_order:
+        raise ValueError("threshold artifact records must use the exact canonical 24-group order")
+    expected_threshold_versions = sorted({str(record.get("threshold_version", "")) for record in expected})
+    if not all(expected_threshold_versions) or threshold.get("threshold_versions") != expected_threshold_versions:
+        raise ValueError("threshold artifact threshold_versions do not match the fusion profile")
     for index, record in enumerate(records):
-        identity_key = tuple(str(record.get(field, "")) for field in identity_fields)
-        expectation = expected_by_identity[identity_key]
-        for field in ("threshold_version", "template_version"):
-            if record.get(field) != expectation.get(field):
-                raise ValueError(f"threshold record {index} {field} differs from the fusion profile")
         if record.get("status") != "ok":
             raise ValueError(f"threshold record {index} status must be ok")
         finite_values: dict[str, float] = {}
@@ -613,10 +665,14 @@ def _validate_threshold_binding(path: Path, assets: dict[str, Any]) -> dict[str,
     runtime_binding = sources.get("runtime_config", sources.get("runtime_assets"))
     if not isinstance(runtime_binding, dict) or runtime_binding.get("sha256") != expected_runtime["sha256"]:
         raise ValueError("threshold artifact is not bound to the exact runtime-assets SHA-256")
+    if Path(str(runtime_binding.get("path", ""))).expanduser().resolve() != Path(expected_runtime["path"]).resolve():
+        raise ValueError("threshold artifact runtime config path differs from the runtime-assets binding")
     expected_template = assets["template_model"]["model_json"]
     template_binding = sources.get("template_model")
     if not isinstance(template_binding, dict) or template_binding.get("sha256") != expected_template["sha256"]:
         raise ValueError("threshold artifact is not bound to the exact template model SHA-256")
+    if Path(str(template_binding.get("path", ""))).expanduser().resolve() != Path(expected_template["path"]).resolve():
+        raise ValueError("threshold artifact template model path differs from the template binding")
     return threshold
 
 

@@ -155,14 +155,76 @@ def _mutate_json(path: Path, mutate: object) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
+def _stage34_records(
+    expected: list[dict[str, object]],
+    template_model: dict[str, object],
+    base: dict[tuple[str, ...], dict[str, object]],
+    yolo: dict[tuple[str, ...], dict[str, object]],
+) -> list[dict[str, object]]:
+    """Use the real dirty-worktree producer, with its exact clean-HEAD contract as fallback."""
+    try:
+        from capture_data.zs32_18_group_commissioning import _compose_records
+    except ModuleNotFoundError:
+        records = []
+        groups = template_model["groups"]
+        assert isinstance(groups, dict)
+        identity_fields = ("hand", "view", "branch", "model_version", "roi_version")
+        for expectation in sorted(
+            expected,
+            key=lambda record: tuple(str(record[field]) for field in identity_fields),
+        ):
+            key = tuple(str(expectation[field]) for field in identity_fields)
+            view = str(expectation["view"])
+            branch = str(expectation["branch"])
+            source = yolo[key] if branch == "yolo" else base[key]
+            if branch == "template_match":
+                group = groups[f"right/{view}"]
+                assert isinstance(group, dict)
+                low, high = float(group["low_threshold"]), float(group["high_threshold"])
+                provenance = "online_template_model"
+            elif branch == "yolo":
+                low = high = float(source["threshold"])
+                provenance = "stage33_high_precision_auxiliary"
+            else:
+                low, high = float(source["low_threshold"]), float(source["high_threshold"])
+                provenance = "stage33_template_patchcore_calibration"
+            records.append(
+                {
+                    "hand": expectation["hand"],
+                    "view": view,
+                    "branch": branch,
+                    "model_version": expectation["model_version"],
+                    "roi_version": expectation["roi_version"],
+                    "low_threshold": low,
+                    "high_threshold": high,
+                    "normal_count": int(source["normal_count"]),
+                    "defect_count": int(source["defect_count"]),
+                    "status": "ok",
+                    "commissioning_source": provenance,
+                },
+            )
+        return records
+    return _compose_records(expected, template_model, base, yolo)
+
+
 def _threshold_artifact(manifest_path: Path, path: Path) -> Path:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     profile = json.loads(Path(manifest["fusion_profile"]["path"]).read_text(encoding="utf-8"))
     expected = profile["expected_versions"]
-    records = []
-    for record in expected:
-        records.append({**record, "low_threshold": 0.2, "high_threshold": 0.4, "status": "ok"})
     identity_fields = ("hand", "view", "branch", "model_version", "roi_version")
+    template_model = json.loads(Path(manifest["template_model"]["model_json"]["path"]).read_text(encoding="utf-8"))
+    keyed = {tuple(str(record[field]) for field in identity_fields): record for record in expected}
+    base = {
+        key: {"low_threshold": 0.2, "high_threshold": 0.4, "normal_count": 10, "defect_count": 5}
+        for key in keyed
+        if key[2] != "yolo"
+    }
+    yolo = {
+        key: {"threshold": 0.3, "normal_count": 10, "defect_count": 5}
+        for key in keyed
+        if key[2] == "yolo"
+    }
+    records = _stage34_records(expected, template_model, base, yolo)
     required_groups = sorted([str(record[field]) for field in identity_fields] for record in expected)
     payload = {
         "artifact_schema": "anomalib.zs32_fusion_thresholds",
@@ -176,6 +238,7 @@ def _threshold_artifact(manifest_path: Path, path: Path) -> Path:
         "required_groups": required_groups,
         "thresholds": records,
         "threshold_records_sha256": _canonical_sha256(records),
+        "threshold_versions": sorted({str(record["threshold_version"]) for record in expected}),
         "deployment_contract": {
             **profile["identity"],
             "config_sha256": manifest["fusion_profile"]["sha256"],
@@ -208,6 +271,35 @@ def test_publication_generates_all_24_profile_versions(source_spec: Path, tmp_pa
     assert len(profile["expected_versions"]) == 24
     assert [record["view"] for record in profile["expected_versions"]][::3] == list(VIEW_ORDER)
     assert profile["branch_order"] == ["template_match", "yolo", *(f"anomaly_{view}" for view in VIEW_ORDER)]
+
+
+@pytest.mark.parametrize(
+    "malformation",
+    ["missing_branch", "wrong_branch", "extra_branch", "branch_order", "missing_rule", "extra_rule"],
+)
+def test_publication_rejects_malformed_profile_branches(
+    source_spec: Path,
+    tmp_path: Path,
+    malformation: str,
+) -> None:
+    source = json.loads(source_spec.read_text(encoding="utf-8"))
+    profile_path = Path(source["fusion_profile_template"])
+    profile = json.loads(profile_path.read_text(encoding="utf-8"))
+    if malformation == "missing_branch":
+        profile["required_branches_by_view"]["front"].pop()
+    elif malformation == "wrong_branch":
+        profile["required_branches_by_view"]["front"][1] = "anomaly_back"
+    elif malformation == "extra_branch":
+        profile["required_branches_by_view"]["front"].append("other")
+    elif malformation == "branch_order":
+        profile["branch_order"] = list(reversed(profile["branch_order"]))
+    elif malformation == "missing_rule":
+        profile["rules"].pop("yolo")
+    else:
+        profile["rules"]["other"] = {"status_on_positive": "NG"}
+    profile_path.write_text(json.dumps(profile), encoding="utf-8")
+    with pytest.raises(ValueError, match="branch|rules"):
+        publish_runtime_assets(source_spec, tmp_path / "assets")
 
 
 @pytest.mark.parametrize("missing_view", ["front_secondary", "back_secondary"])
@@ -406,6 +498,67 @@ def test_finalize_rejects_threshold_not_bound_to_exact_asset_hashes(source_spec:
     )
     threshold.write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(ValueError, match="runtime.assets.*SHA-256|exact runtime"):
+        finalize_runtime_bundle(publication.assets_manifest, threshold, tmp_path / "bundle")
+
+
+def test_finalize_accepts_real_stage34_threshold_record_schema(source_spec: Path, tmp_path: Path) -> None:
+    publication = publish_runtime_assets(source_spec, tmp_path / "assets")
+    threshold = _threshold_artifact(publication.assets_manifest, tmp_path / "thresholds.json")
+    payload = json.loads(threshold.read_text(encoding="utf-8"))
+    assert "threshold_version" not in payload["thresholds"][0]
+    assert "template_version" not in payload["thresholds"][0]
+    assert finalize_runtime_bundle(publication.assets_manifest, threshold, tmp_path / "bundle").is_file()
+
+
+def test_finalize_rejects_runtime_binding_path_substitution(source_spec: Path, tmp_path: Path) -> None:
+    publication = publish_runtime_assets(source_spec, tmp_path / "assets")
+    threshold = _threshold_artifact(publication.assets_manifest, tmp_path / "thresholds.json")
+    substitute = tmp_path / "runtime-copy.json"
+    substitute.write_bytes(publication.runtime_assets.read_bytes())
+    payload = json.loads(threshold.read_text(encoding="utf-8"))
+    payload["source_artifacts"]["runtime_config"]["path"] = str(substitute)
+    payload.pop("artifact_sha256")
+    payload["artifact_sha256"] = _canonical_sha256(payload)
+    threshold.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="runtime.*path|path.*runtime"):
+        finalize_runtime_bundle(publication.assets_manifest, threshold, tmp_path / "bundle")
+
+
+def test_finalize_rejects_template_binding_path_substitution(source_spec: Path, tmp_path: Path) -> None:
+    publication = publish_runtime_assets(source_spec, tmp_path / "assets")
+    threshold = _threshold_artifact(publication.assets_manifest, tmp_path / "thresholds.json")
+    manifest = json.loads(publication.assets_manifest.read_text(encoding="utf-8"))
+    model = Path(manifest["template_model"]["model_json"]["path"])
+    substitute = tmp_path / "model-copy.json"
+    substitute.write_bytes(model.read_bytes())
+    payload = json.loads(threshold.read_text(encoding="utf-8"))
+    payload["source_artifacts"]["template_model"]["path"] = str(substitute)
+    payload.pop("artifact_sha256")
+    payload["artifact_sha256"] = _canonical_sha256(payload)
+    threshold.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="template.*path|path.*template"):
+        finalize_runtime_bundle(publication.assets_manifest, threshold, tmp_path / "bundle")
+
+
+def test_finalize_rejects_fusion_profile_template_drift(source_spec: Path, tmp_path: Path) -> None:
+    publication = publish_runtime_assets(source_spec, tmp_path / "assets")
+    threshold = _threshold_artifact(publication.assets_manifest, tmp_path / "thresholds.json")
+    source = json.loads(source_spec.read_text(encoding="utf-8"))
+    Path(source["fusion_profile_template"]).write_text("{}", encoding="utf-8")
+    with pytest.raises(ValueError, match="profile template.*SHA-256|SHA-256.*profile template"):
+        finalize_runtime_bundle(publication.assets_manifest, threshold, tmp_path / "bundle")
+
+
+def test_finalize_rejects_fusion_profile_template_path_substitution(source_spec: Path, tmp_path: Path) -> None:
+    publication = publish_runtime_assets(source_spec, tmp_path / "assets")
+    threshold = _threshold_artifact(publication.assets_manifest, tmp_path / "thresholds.json")
+    manifest = json.loads(publication.assets_manifest.read_text(encoding="utf-8"))
+    substitute = tmp_path / "profile-template-copy.json"
+    source = json.loads(source_spec.read_text(encoding="utf-8"))
+    substitute.write_bytes(Path(source["fusion_profile_template"]).read_bytes())
+    manifest["fusion_profile_template"]["path"] = str(substitute)
+    publication.assets_manifest.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="profile template.*path|path.*profile template"):
         finalize_runtime_bundle(publication.assets_manifest, threshold, tmp_path / "bundle")
 
 
