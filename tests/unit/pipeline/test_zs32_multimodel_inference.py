@@ -18,7 +18,17 @@ from types import ModuleType, SimpleNamespace
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-VIEWS = ("front", "front_left", "front_right", "back", "back_left", "back_right")
+VIEWS = (
+    "front",
+    "front_left",
+    "front_right",
+    "front_secondary",
+    "back",
+    "back_left",
+    "back_right",
+    "back_secondary",
+)
+LEGACY_VIEWS = ("front", "front_left", "front_right", "back", "back_left", "back_right")
 
 
 def _load_module(name: str, relative_path: str) -> ModuleType:
@@ -35,7 +45,7 @@ def _load_module(name: str, relative_path: str) -> ModuleType:
 
 
 def _minimum_args(tmp_path: Path) -> list[str]:
-    """Return the identity and six-view arguments shared by parser tests."""
+    """Return the identity and eight-view arguments shared by parser tests."""
     values = [
         "infer",
         "--part-id",
@@ -52,7 +62,7 @@ def _minimum_args(tmp_path: Path) -> list[str]:
     return values
 
 
-def test_unified_entrypoint_parses_all_six_explicit_images(tmp_path: Path) -> None:
+def test_unified_entrypoint_parses_all_eight_explicit_images(tmp_path: Path) -> None:
     """The CLI must preserve an explicit source path for every canonical view."""
     stage32 = _load_module("pipeline_zs32_runtime_parser", "pipeline/32_run_zs32_multimodel_inference.py")
 
@@ -62,6 +72,14 @@ def test_unified_entrypoint_parses_all_six_explicit_images(tmp_path: Path) -> No
     assert args.mode == "infer"
     assert tuple(request.images) == VIEWS
     assert request.hand == "right"
+
+
+def test_stage32_parser_requires_all_eight_images() -> None:
+    stage32 = _load_module("pipeline_zs32_required_images", "pipeline/32_run_zs32_multimodel_inference.py")
+
+    required = {action.dest for action in stage32.build_parser()._actions if action.required}
+
+    assert {f"{view}_image" for view in VIEWS} <= required
 
 
 def test_diagnostic_mask_threshold_parses_with_display_only_default(tmp_path: Path) -> None:
@@ -417,8 +435,20 @@ def test_right_profile_contains_exactly_thirty_six_versioned_groups() -> None:
 
     assert len(records) == 36
     assert {record["hand"] for record in records} == {"right"}
+    assert {record["view"] for record in records} == set(LEGACY_VIEWS)
+    assert all(len(profile["required_branches_by_view"][view]) == 6 for view in LEGACY_VIEWS)
+
+
+def test_eight_view_commissioning_profile_contains_exactly_twenty_four_groups() -> None:
+    path = REPO_ROOT / "config/fusion/zs32_right_eight_view_24_group_commissioning.json"
+    profile = json.loads(path.read_text(encoding="utf-8"))
+    records = profile["expected_versions"]
+
+    assert len(records) == 24
+    assert {record["hand"] for record in records} == {"right"}
     assert {record["view"] for record in records} == set(VIEWS)
-    assert all(len(profile["required_branches_by_view"][view]) == 6 for view in VIEWS)
+    assert tuple(profile["required_branches_by_view"]) == VIEWS
+    assert all(len(profile["required_branches_by_view"][view]) == 3 for view in VIEWS)
 
 
 def test_stage18_resolves_right_only_named_profile() -> None:
@@ -444,7 +474,7 @@ def test_stage18_resolves_explicit_eighteen_group_commissioning_profile() -> Non
     assert profile["commissioning_only"] is True
     assert profile["production_release_allowed"] is False
     assert len(profile["expected_versions"]) == 18
-    assert all(len(profile["required_branches_by_view"][view]) == 3 for view in VIEWS)
+    assert all(len(profile["required_branches_by_view"][view]) == 3 for view in LEGACY_VIEWS)
 
 
 def test_strict_fusion_updates_runtime_manifest_without_losing_provenance(tmp_path: Path) -> None:

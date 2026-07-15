@@ -9,7 +9,7 @@ import cv2
 import numpy as np
 import pytest
 
-from zs32_inspection.dashboard.contracts import MODELED_VIEWS, VIEW_ORDER
+from zs32_inspection.dashboard.contracts import VIEW_ORDER
 
 IDENTITY = {
     "part_id": "ZS32-0001",
@@ -83,20 +83,9 @@ def eight_view_result_dir(tmp_path: Path) -> Path:
         source_path = source_dir / f"{view}.png"
         image = np.full((30, 40, 3), index * 20, dtype=np.uint8)
         assert cv2.imwrite(str(source_path), image)
-        modeled = view in MODELED_VIEWS
-        branches = (
-            {branch: _branch(result_dir, view, branch) for branch in ("template", "patchcore", "yolo", "fusion")}
-            if modeled
-            else {
-                branch: {
-                    "state": "unsupported",
-                    "status": "UNSUPPORTED",
-                    "score": None,
-                    "reason": "model assets are not commissioned",
-                }
-                for branch in ("template", "patchcore", "yolo", "fusion")
-            }
-        )
+        branches = {
+            branch: _branch(result_dir, view, branch) for branch in ("template", "patchcore", "yolo", "fusion")
+        }
         views[view] = {
             "view": view,
             **IDENTITY,
@@ -104,7 +93,7 @@ def eight_view_result_dir(tmp_path: Path) -> Path:
             "source_path": str(source_path.relative_to(result_dir)),
             "source_sha256": _sha256(source_path),
             "source_shape": [30, 40],
-            "model_supported": modeled,
+            "model_supported": True,
             "camera": f"camera-{index // 2}",
             "branches": branches,
         }

@@ -28,14 +28,7 @@ def test_view_order_and_modeled_views_are_closed_sets() -> None:
         "back_right",
         "back_secondary",
     )
-    assert MODELED_VIEWS == (
-        "front",
-        "front_left",
-        "front_right",
-        "back",
-        "back_left",
-        "back_right",
-    )
+    assert MODELED_VIEWS == VIEW_ORDER
 
 
 def test_evidence_enums_publish_stable_wire_values() -> None:
@@ -70,7 +63,7 @@ def test_inspection_contract_preserves_eight_ordered_views_and_optional_scores(
             source_path=tmp_path / f"{view}.png",
             source_sha256="a" * 64,
             source_shape=(1080, 1440),
-            model_supported=view in MODELED_VIEWS,
+            model_supported=True,
             branches={"patchcore": branch},
             capture={"camera": "camera-1"},
         )
@@ -101,7 +94,7 @@ def _make_view(tmp_path: Path, view: str, *, model_supported: bool | None = None
         source_path=tmp_path / f"{view}.png",
         source_sha256="a" * 64,
         source_shape=(1080, 1440),
-        model_supported=view in MODELED_VIEWS if model_supported is None else model_supported,
+        model_supported=True if model_supported is None else model_supported,
         branches={},
         capture={},
     )
@@ -113,17 +106,13 @@ def test_view_result_rejects_unknown_view(tmp_path: Path, view: str) -> None:
         _make_view(tmp_path, view)
 
 
-@pytest.mark.parametrize(
-    ("view", "model_supported"),
-    [("front", False), ("back_right", False), ("front_secondary", True), ("back_secondary", True)],
-)
-def test_view_result_requires_support_to_match_modeled_views(
+@pytest.mark.parametrize("view", VIEW_ORDER)
+def test_each_view_requires_model_support(
     tmp_path: Path,
     view: str,
-    model_supported: bool,
 ) -> None:
     with pytest.raises(ValueError, match="model_supported"):
-        _make_view(tmp_path, view, model_supported=model_supported)
+        _make_view(tmp_path, view, model_supported=False)
 
 
 @pytest.mark.parametrize(

@@ -1,7 +1,7 @@
 # Copyright (C) 2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
-"""Template-first online orchestration for six-view ZS32 inspection."""
+"""Template-first online orchestration for eight-view ZS32 inspection."""
 
 from __future__ import annotations
 
@@ -15,8 +15,8 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from capture_data.fusion_engine import BRANCH_FIELDNAMES
+from zs32_inspection.domain.views import CANONICAL_VIEWS
 
-CANONICAL_VIEWS = ("front", "front_left", "front_right", "back", "back_left", "back_right")
 DOWNSTREAM_BRANCHES = ("PatchCore", "YOLO", "geometry")
 TEMPLATE_BRANCH = "template_match"
 VALID_HANDS = {"left", "right"}
@@ -28,7 +28,7 @@ _DOWNSTREAM_STATUSES = {"OK", "REVIEW", "SUSPECT", "RETAKE", "INVALID_CAPTURE"}
 
 @dataclass(frozen=True)
 class InspectionRequest:
-    """Identify one physical ZS32 part and its complete six-view capture.
+    """Identify one physical ZS32 part and its complete eight-view capture.
 
     Args:
         part_id (str): Stable physical-part identity.
@@ -191,9 +191,9 @@ def template_results_to_branch_rows(
     request: InspectionRequest,
     template_results: tuple[dict[str, Any], ...],
     *,
-    profile: str = "zs32_six_view_v1",
+    profile: str = "zs32_eight_view_v1",
 ) -> list[dict[str, Any]]:
-    """Convert six validated gate results into strict Stage-18 branch rows."""
+    """Convert eight validated gate results into strict Stage-18 branch rows."""
     results_by_view = {str(result.get("view", "")): result for result in template_results}
     if set(results_by_view) != set(CANONICAL_VIEWS) or len(template_results) != len(CANONICAL_VIEWS):
         msg = "template results must contain exactly one row for every canonical view"
@@ -254,7 +254,7 @@ def write_template_match_csv(
     template_results: tuple[dict[str, Any], ...],
     output_csv: Path,
     *,
-    profile: str = "zs32_six_view_v1",
+    profile: str = "zs32_eight_view_v1",
 ) -> Path:
     """Atomically publish strict template evidence for Stage 18."""
     rows = template_results_to_branch_rows(request, template_results, profile=profile)
@@ -281,7 +281,7 @@ def _validation_error(request: InspectionRequest) -> str | None:
     missing_views = [view for view in CANONICAL_VIEWS if view not in actual_views]
     extra_views = sorted(str(view) for view in actual_views.difference(CANONICAL_VIEWS))
     if missing_views or extra_views:
-        return f"invalid six-view capture: missing={missing_views}, extra={extra_views}"
+        return f"invalid eight-view capture: missing={missing_views}, extra={extra_views}"
     path_error = None
     for view in CANONICAL_VIEWS:
         try:
@@ -339,10 +339,10 @@ class ZS32InspectionOrchestrator:
         self.downstream_runner = downstream_runner
 
     def run(self, request: InspectionRequest) -> dict[str, Any]:
-        """Inspect one part, calling downstream exactly once only after six passes.
+        """Inspect one part, calling downstream exactly once only after eight passes.
 
         Args:
-            request (InspectionRequest): Complete six-view part request.
+            request (InspectionRequest): Complete eight-view part request.
 
         Returns:
             dict[str, Any]: Structured execution audit including skipped work.

@@ -12,7 +12,6 @@ from typing import Any, NoReturn
 import cv2
 
 from .contracts import (
-    MODELED_VIEWS,
     VIEW_ORDER,
     BranchEvidence,
     BranchState,
@@ -286,10 +285,9 @@ def _parse_view(
     if actual_manifest_identity != expected_manifest_identity:
         raise DashboardResultError(f"{context}.manifest_identity does not match {expected_manifest_identity!r}")
 
-    expected_support = expected_view in MODELED_VIEWS
     model_supported = value.get("model_supported")
-    if model_supported is not expected_support:
-        raise DashboardResultError(f"{context}.model_supported must be {expected_support}")
+    if model_supported is not True:
+        raise DashboardResultError(f"{context}.model_supported must be True")
 
     source_path = _require_file(result_dir, value.get("source_path"), field=f"{context}.source_path")
     source_sha256 = _required_text(value, "source_sha256", context=context)

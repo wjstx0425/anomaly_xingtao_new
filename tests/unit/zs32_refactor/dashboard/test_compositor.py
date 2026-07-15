@@ -259,10 +259,18 @@ def test_compose_available_yolo_reports_partial_invalid_label_metadata(
     assert not np.array_equal(composed.image, original)
 
 
-def test_secondary_non_original_layer_is_unsupported(secondary_view: ViewResult) -> None:
-    composed = compose_view(secondary_view, EvidenceLayer.FUSION)
+def test_secondary_notice_is_determined_by_branch_state(secondary_view: ViewResult) -> None:
+    unsupported = replace(
+        secondary_view.branches["fusion"],
+        state=BranchState.UNSUPPORTED,
+        status="UNSUPPORTED",
+        reason="model assets are not commissioned",
+    )
+    view = replace(secondary_view, branches={**secondary_view.branches, "fusion": unsupported})
 
-    assert composed.notice == "暂未接入模型"
+    composed = compose_view(view, EvidenceLayer.FUSION)
+
+    assert "Fusion: 不支持" in composed.notice
     assert np.array_equal(composed.image, cv2.imread(str(secondary_view.source_path)))
 
 

@@ -343,8 +343,6 @@ def compose_view(view: ViewResult, layer: EvidenceLayer) -> ComposedView:
     source = _load_source(view)
     if layer is EvidenceLayer.ORIGINAL:
         return ComposedView(source)
-    if not view.model_supported:
-        return ComposedView(source, "暂未接入模型")
 
     if layer is EvidenceLayer.PATCHCORE:
         image, notice = _apply_patchcore(source, _required_branch(view, "patchcore"))

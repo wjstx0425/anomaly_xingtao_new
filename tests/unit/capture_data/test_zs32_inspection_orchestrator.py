@@ -20,7 +20,16 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-VIEWS = ("front", "front_left", "front_right", "back", "back_left", "back_right")
+VIEWS = (
+    "front",
+    "front_left",
+    "front_right",
+    "front_secondary",
+    "back",
+    "back_left",
+    "back_right",
+    "back_secondary",
+)
 
 
 def _request(tmp_path: Path, **overrides: object) -> InspectionRequest:
@@ -72,7 +81,7 @@ class SequenceGate:
 
 
 def test_all_template_views_pass_before_downstream_runs_once(tmp_path: Path) -> None:
-    """Downstream runs once and only after all six canonical views pass."""
+    """Downstream runs once and only after all eight canonical views pass."""
     gate = SequenceGate()
     downstream = Mock(return_value={"machine_status": "OK", "inspection_complete": True})
     request = _request(tmp_path)
@@ -83,7 +92,7 @@ def test_all_template_views_pass_before_downstream_runs_once(tmp_path: Path) -> 
     downstream.assert_called_once()
     called_request, template_results = downstream.call_args.args
     assert called_request == request
-    assert len(template_results) == 6
+    assert len(template_results) == len(VIEWS)
     assert all(result["status"] == "PASS" for result in template_results)
     assert audit["machine_status"] == "OK"
     assert audit["stopped_after"] == "downstream"
@@ -131,7 +140,7 @@ def test_non_pass_template_stops_all_downstream_work(
     assert audit["machine_status"] == machine_status
     assert audit["stopped_after"] == "template_match"
     assert audit["evaluated_views"] == ["front", "front_left"]
-    assert audit["skipped_views"] == ["front_right", "back", "back_left", "back_right"]
+    assert audit["skipped_views"] == list(VIEWS[2:])
     assert audit["skipped_branches"] == ["PatchCore", "YOLO", "geometry"]
     assert audit["inspection_complete"] is False
     assert audit["short_circuited"] is True

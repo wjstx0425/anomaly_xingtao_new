@@ -1,7 +1,7 @@
 # Copyright (C) 2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
-"""Persistent six-view PatchCore and YOLO inference runtime for ZS32."""
+"""Persistent eight-view PatchCore and YOLO inference runtime for ZS32."""
 
 # Runtime adapters intentionally translate heterogeneous third-party exceptions into
 # fail-closed evidence while retaining the original diagnostic text.
@@ -24,11 +24,10 @@ from uuid import uuid4
 import cv2
 import numpy as np
 from capture_data.fusion_engine import BranchPrediction, write_branch_predictions_csv
-from capture_data.zs32_inspection_orchestrator import CANONICAL_VIEWS, InspectionRequest
+from capture_data.zs32_inspection_orchestrator import InspectionRequest
 from capture_data.zs32_patchcore_roi_dataset import load_patchcore_roi_config
 from capture_data.zs32_view_roi_dataset import load_roi_config
-
-from zs32_inspection.dashboard.contracts import MODELED_VIEWS
+from zs32_inspection.domain.views import CANONICAL_VIEWS
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SHA256_LENGTH = 64
@@ -120,7 +119,7 @@ class ModelEvidence:
 
 @dataclass(frozen=True, slots=True)
 class RuntimeResult:
-    """Fail-closed result from one six-view model execution."""
+    """Fail-closed result from one eight-view model execution."""
 
     machine_status: str
     inspection_complete: bool
@@ -147,7 +146,7 @@ class PatchcoreBackend(Protocol):
 
 
 class YoloBackend(Protocol):
-    """Interface used by the runtime for one six-image YOLO batch."""
+    """Interface used by the runtime for one eight-image YOLO batch."""
 
     def predict(self, crops: dict[str, Path], evidence_dir: Path) -> dict[str, ModelEvidence]:
         """Predict all canonical views in one batch."""
@@ -211,15 +210,19 @@ def load_runtime_config(path: Path) -> RuntimeConfig:
         field="patchcore_roi_config",
     )
     yolo_roi_path = _resolve_path(payload.get("yolo_roi_config"), field="yolo_roi_config")
-    pc_width, pc_height, patchcore_rois, _ = load_patchcore_roi_config(patchcore_roi_path)
-    yolo_width, yolo_height, yolo_rois, _ = load_roi_config(yolo_roi_path)
+    pc_width, pc_height, patchcore_rois, _ = load_patchcore_roi_config(patchcore_roi_path, hands=("right",))
+    yolo_width, yolo_height, yolo_rois, yolo_roi_payload = load_roi_config(yolo_roi_path)
+    configured_yolo_views = yolo_roi_payload.get("views")
+    if not isinstance(configured_yolo_views, dict) or set(configured_yolo_views) != set(CANONICAL_VIEWS):
+        msg = f"YOLO ROI config must contain exactly the eight views: {CANONICAL_VIEWS}"
+        raise ValueError(msg)
     if (pc_width, pc_height) != (yolo_width, yolo_height):
         msg = "PatchCore and YOLO ROI configs must declare the same source dimensions"
         raise ValueError(msg)
 
     patchcore_payload = _require_mapping(payload.get("patchcore"), "patchcore")
     if set(patchcore_payload) != set(CANONICAL_VIEWS) or len(patchcore_payload) != len(CANONICAL_VIEWS):
-        msg = f"runtime config patchcore must contain exactly the six views: {CANONICAL_VIEWS}"
+        msg = f"runtime config patchcore must contain exactly the eight views: {CANONICAL_VIEWS}"
         raise ValueError(msg)
     patchcore: dict[str, PatchcoreSpec] = {}
     checkpoints: set[Path] = set()
@@ -228,7 +231,7 @@ def load_runtime_config(path: Path) -> RuntimeConfig:
         checkpoint = _resolve_path(record.get("checkpoint"), field=f"patchcore.{view}.checkpoint")
         _verified_asset(checkpoint, record.get("checkpoint_sha256"), field=f"patchcore.{view}.checkpoint_sha256")
         if checkpoint in checkpoints:
-            msg = f"PatchCore views must use six distinct checkpoints; duplicate: {checkpoint}"
+            msg = f"PatchCore views must use eight distinct checkpoints; duplicate: {checkpoint}"
             raise ValueError(msg)
         checkpoints.add(checkpoint)
         patchcore[view] = PatchcoreSpec(
@@ -414,7 +417,7 @@ def _write_patchcore_overlay(crop_path: Path, anomaly_map: object, output_path: 
 
 
 class AnomalibPatchcoreBackend:
-    """PatchCore adapter that retains six restored models and six engines."""
+    """PatchCore adapter that retains eight restored models and eight engines."""
 
     def __init__(self, specs: Mapping[str, PatchcoreSpec], *, accelerator: str = "auto", devices: int = 1) -> None:
         from anomalib.engine import Engine
@@ -492,7 +495,7 @@ class AnomalibPatchcoreBackend:
 
 
 class UltralyticsYoloBackend:
-    """YOLO adapter that retains one model and predicts six views as one batch."""
+    """YOLO adapter that retains one model and predicts eight views as one batch."""
 
     def __init__(self, spec: YoloSpec, *, device: str | None = None) -> None:
         from ultralytics import YOLO
@@ -502,7 +505,7 @@ class UltralyticsYoloBackend:
         self.device = device
 
     def predict(self, crops: dict[str, Path], evidence_dir: Path) -> dict[str, ModelEvidence]:
-        """Run one six-view YOLO batch and write one annotated image per view."""
+        """Run one eight-view YOLO batch and write one annotated image per view."""
         sources = [str(crops[view]) for view in CANONICAL_VIEWS]
         kwargs: dict[str, Any] = {
             "source": sources,
@@ -533,8 +536,10 @@ class UltralyticsYoloBackend:
                         raise ValueError(msg)
                     x1, y1, x2, y2 = xyxy
                     if x2 <= x1 or y2 <= y1:
-                        msg = f"YOLO emitted a non-positive box for {view}: {xyxy}"
-                        raise ValueError(msg)
+                        # Ultralytics may retain a very low-confidence candidate that collapses to the
+                        # image boundary after clipping. It has no usable area and therefore carries no
+                        # detection evidence; discard it without invalidating other boxes or views.
+                        continue
                     names = getattr(result, "names", {})
                     checkpoint_class_name = (
                         str(names.get(class_id, class_id)) if isinstance(names, Mapping) else str(class_id)
@@ -632,11 +637,11 @@ class ZS32ModelRuntime:
                 msg = "part_id, capture_session, and group_id must be non-empty"
                 raise ValueError(msg)
         if set(request.images) != set(CANONICAL_VIEWS) or len(request.images) != len(CANONICAL_VIEWS):
-            msg = f"request must contain exactly the six canonical views: {CANONICAL_VIEWS}"
+            msg = f"request must contain exactly the eight canonical views: {CANONICAL_VIEWS}"
             raise ValueError(msg)
         paths = [Path(request.images[view]).expanduser().resolve() for view in CANONICAL_VIEWS]
         if len(set(paths)) != len(paths):
-            msg = "six-view request must use six distinct source image paths"
+            msg = "eight-view request must use eight distinct source image paths"
             raise ValueError(msg)
         images: dict[str, np.ndarray] = {}
         for view, path in zip(CANONICAL_VIEWS, paths, strict=True):
@@ -775,7 +780,7 @@ class ZS32ModelRuntime:
         try:
             patchcore_crops: dict[str, Path] = {}
             yolo_crops: dict[str, Path] = {}
-            for view in MODELED_VIEWS:
+            for view in CANONICAL_VIEWS:
                 image = images[view]
                 pc_x1, pc_y1, pc_x2, pc_y2 = self.config.patchcore_rois[request.hand][view]
                 yo_x1, yo_y1, yo_x2, yo_y2 = self.config.yolo_rois[view]
@@ -799,7 +804,7 @@ class ZS32ModelRuntime:
                 patchcore_backend = self._patchcore_backend
                 yolo_backend = self._yolo_backend
 
-            for view in MODELED_VIEWS:
+            for view in CANONICAL_VIEWS:
                 temp_evidence = staging / "evidence" / "patchcore" / f"{view}.png"
                 final_evidence = final_patchcore_dir / f"{view}.png"
                 evidence: ModelEvidence | None = None

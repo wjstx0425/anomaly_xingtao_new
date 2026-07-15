@@ -1,7 +1,7 @@
 # Copyright (C) 2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for the six-view ZS32 PatchCore and YOLO runtime."""
+"""Tests for the eight-view ZS32 PatchCore and YOLO runtime."""
 
 from __future__ import annotations
 
@@ -20,12 +20,23 @@ from capture_data.zs32_model_runtime import (
     AnomalibPatchcoreBackend,
     ModelEvidence,
     PatchcoreArtifacts,
+    UltralyticsYoloBackend,
+    YoloSpec,
     ZS32ModelRuntime,
     _build_patchcore_mask,
     load_runtime_config,
 )
 
-VIEWS = ("front", "front_left", "front_right", "back", "back_left", "back_right")
+VIEWS = (
+    "front",
+    "front_left",
+    "front_right",
+    "front_secondary",
+    "back",
+    "back_left",
+    "back_right",
+    "back_secondary",
+)
 
 
 def _sha256(path: Path) -> str:
@@ -37,7 +48,7 @@ def _write_fixture(tmp_path: Path) -> tuple[Path, dict[str, Path]]:
         "schema_version": 1,
         "coordinate_system": "pixel_xyxy_half_open",
         "image_size": {"width": 12, "height": 10},
-        "hands": {hand: {"views": {view: {"roi": [0, 0, 6, 5]} for view in VIEWS}} for hand in ("right", "left")},
+        "views": {view: {"roi": [0, 0, 6, 5]} for view in VIEWS},
     }
     yolo_roi = {
         "schema_version": 1,
@@ -66,7 +77,7 @@ def _write_fixture(tmp_path: Path) -> tuple[Path, dict[str, Path]]:
     config = {
         "schema_version": 1,
         "product": "ZS32",
-        "profile": "zs32_right_six_view_v1",
+        "profile": "zs32_right_eight_view_v1",
         "supported_hands": ["right"],
         "patchcore_roi_config": str(patchcore_roi_path),
         "yolo_roi_config": str(yolo_roi_path),
@@ -103,6 +114,47 @@ def _write_images(tmp_path: Path) -> dict[str, Path]:
         assert cv2.imwrite(str(path), image)
         images[view] = path
     return images
+
+
+def test_yolo_backend_discards_boundary_collapsed_candidates(tmp_path: Path) -> None:
+    """A zero-area candidate created by clipping must not poison the whole eight-view batch."""
+
+    class _Xyxy:
+        def detach(self) -> _Xyxy:
+            return self
+
+        def cpu(self) -> _Xyxy:
+            return self
+
+        def reshape(self, *_shape: int) -> np.ndarray:
+            return np.asarray([0.0, 5.0, 12.0, 5.0])
+
+    box = SimpleNamespace(cls=np.asarray([0]), conf=np.asarray([0.001]), xyxy=_Xyxy())
+    predictions = [
+        SimpleNamespace(boxes=[box] if view == "front" else [], names={0: "item"}, plot=lambda: np.zeros((8, 8, 3)))
+        for view in VIEWS
+    ]
+    backend = object.__new__(UltralyticsYoloBackend)
+    backend.model = SimpleNamespace(predict=lambda **_kwargs: predictions)
+    backend.spec = YoloSpec(
+        weights=tmp_path / "best.pt",
+        weights_sha256="0" * 64,
+        model_version="yolo-v1",
+        imgsz=640,
+        candidate_conf=0.001,
+        iou=0.7,
+        max_det=300,
+        class_map={0: "defect"},
+    )
+    backend.device = "cpu"
+    crops = {view: tmp_path / f"{view}.png" for view in VIEWS}
+
+    output = backend.predict(crops, tmp_path / "evidence")
+
+    assert tuple(output) == VIEWS
+    assert output["front"].score == 0.0
+    assert output["front"].detections == ()
+    assert all(evidence.evidence_path.is_file() for evidence in output.values())
 
 
 class _PatchcoreBackend:
@@ -162,7 +214,18 @@ class _YoloBackend:
         return results
 
 
-def test_load_runtime_config_requires_exactly_six_patchcore_models(tmp_path: Path) -> None:
+def test_load_runtime_config_accepts_right_only_top_level_eight_view_roi(tmp_path: Path) -> None:
+    """The Stage 29 top-level ROI schema must load as the right-hand runtime ROI."""
+    config_path, _ = _write_fixture(tmp_path)
+
+    config = load_runtime_config(config_path)
+
+    assert tuple(config.patchcore) == VIEWS
+    assert tuple(config.patchcore_rois) == ("right",)
+    assert tuple(config.patchcore_rois["right"]) == VIEWS
+
+
+def test_load_runtime_config_requires_exactly_eight_patchcore_models(tmp_path: Path) -> None:
     """A missing view must invalidate the model bundle."""
     config_path, _ = _write_fixture(tmp_path)
     payload = json.loads(config_path.read_text(encoding="utf-8"))
@@ -170,6 +233,18 @@ def test_load_runtime_config_requires_exactly_six_patchcore_models(tmp_path: Pat
     config_path.write_text(json.dumps(payload), encoding="utf-8")
 
     with pytest.raises(ValueError, match="exactly"):
+        load_runtime_config(config_path)
+
+
+def test_load_runtime_config_requires_exactly_eight_yolo_rois(tmp_path: Path) -> None:
+    config_path, _ = _write_fixture(tmp_path)
+    runtime_payload = json.loads(config_path.read_text(encoding="utf-8"))
+    yolo_roi_path = Path(runtime_payload["yolo_roi_config"])
+    roi_payload = json.loads(yolo_roi_path.read_text(encoding="utf-8"))
+    roi_payload["views"]["unexpected"] = {"roi": [0, 0, 6, 5]}
+    yolo_roi_path.write_text(json.dumps(roi_payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="exactly the eight views"):
         load_runtime_config(config_path)
 
 
@@ -310,9 +385,9 @@ def test_runtime_writes_continuous_evidence_and_never_returns_ok_without_thresho
 
     assert result.machine_status == "REVIEW"
     assert result.inspection_complete is False
-    assert len(patchcore.calls) == 6
+    assert len(patchcore.calls) == len(VIEWS)
     assert len(yolo.calls) == 1
-    assert set(yolo.calls[0]) == set(VIEWS)
+    assert tuple(yolo.calls[0]) == VIEWS
     with (output_dir / "patchcore.csv").open(encoding="utf-8", newline="") as file:
         patchcore_rows = list(csv.DictReader(file))
     with (output_dir / "yolo.csv").open(encoding="utf-8", newline="") as file:
@@ -460,7 +535,7 @@ def test_runtime_omits_invalid_diagnostic_score_from_strict_manifest(
 
 
 def test_runtime_rejects_duplicate_source_images_and_wrong_dimensions(tmp_path: Path) -> None:
-    """Invalid six-view captures must fail before model execution."""
+    """Invalid eight-view captures must fail before model execution."""
     config_path, _ = _write_fixture(tmp_path)
     images = _write_images(tmp_path)
     runtime = ZS32ModelRuntime(
@@ -500,5 +575,5 @@ def test_runtime_publishes_review_diagnostics_when_model_initialization_fails(
     assert result.machine_status == "REVIEW"
     assert result.inspection_complete is False
     assert any("model initialization" in error for error in result.errors)
-    assert len(list((output_dir / "evidence" / "patchcore").glob("*.error.json"))) == 6
-    assert len(list((output_dir / "evidence" / "yolo").glob("*.error.json"))) == 6
+    assert len(list((output_dir / "evidence" / "patchcore").glob("*.error.json"))) == len(VIEWS)
+    assert len(list((output_dir / "evidence" / "yolo").glob("*.error.json"))) == len(VIEWS)

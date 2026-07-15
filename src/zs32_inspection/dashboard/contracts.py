@@ -7,25 +7,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal, Mapping
 
-
-VIEW_ORDER = (
-    "front",
-    "front_left",
-    "front_right",
-    "front_secondary",
-    "back",
-    "back_left",
-    "back_right",
-    "back_secondary",
-)
-MODELED_VIEWS = (
-    "front",
-    "front_left",
-    "front_right",
-    "back",
-    "back_left",
-    "back_right",
-)
+from zs32_inspection.domain.views import MODELED_VIEWS, VIEW_ORDER
 
 
 def _require_non_empty(field_name: str, value: object) -> None:
@@ -105,9 +87,8 @@ class ViewResult:
         if self.view not in VIEW_ORDER:
             msg = f"view must be one of VIEW_ORDER, got {self.view!r}"
             raise ValueError(msg)
-        expected_support = self.view in MODELED_VIEWS
-        if self.model_supported is not expected_support:
-            msg = f"model_supported must be {expected_support} for view {self.view!r}"
+        if self.model_supported is not True:
+            msg = f"model_supported must be True for view {self.view!r}"
             raise ValueError(msg)
 
 

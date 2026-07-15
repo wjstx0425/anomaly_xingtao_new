@@ -32,11 +32,8 @@ def test_parser_returns_eight_views_in_topology_order(eight_view_result_dir: Pat
     result = load_inspection_result(eight_view_result_dir)
 
     assert tuple(view.view for view in result.views) == VIEW_ORDER
-    assert result.views[3].model_supported is False
-    assert result.views[7].model_supported is False
-    assert all(
-        branch.state is BranchState.UNSUPPORTED for index in (3, 7) for branch in result.views[index].branches.values()
-    )
+    assert all(view.model_supported is True for view in result.views)
+    assert all(branch.state is BranchState.AVAILABLE for view in result.views for branch in view.branches.values())
     assert result.identity.hand == "right"
 
 
@@ -61,7 +58,7 @@ def test_parser_maps_task2_direct_view_branch_fields(task2_direct_result_dir: Pa
     assert result.views[4].branches["patchcore"].state is BranchState.ERROR
     assert result.views[0].branches["fusion"].state is BranchState.SKIPPED
     assert result.views[0].branches["fusion"].score == pytest.approx(0.42)
-    assert all(branch.state is BranchState.UNSUPPORTED for branch in result.views[3].branches.values())
+    assert all(branch.state is BranchState.AVAILABLE for branch in result.views[3].branches.values())
 
 
 @pytest.mark.parametrize("view", ["front", "front_secondary"])
@@ -93,7 +90,7 @@ def test_parser_preserves_nonzero_skipped_score_after_template_stop(eight_view_r
     assert result.views[1].branches["patchcore"].score == pytest.approx(0.42)
 
 
-def test_parser_accepts_future_secondary_available_evidence(eight_view_result_dir: Path) -> None:
+def test_parser_accepts_secondary_available_evidence(eight_view_result_dir: Path) -> None:
     manifest = load_manifest(eight_view_result_dir)
     source = manifest["views"]["front"]["branches"]["yolo"].copy()
     source["evidence_path"] = manifest["views"]["front_secondary"]["source_path"]
@@ -103,7 +100,7 @@ def test_parser_accepts_future_secondary_available_evidence(eight_view_result_di
     result = load_inspection_result(eight_view_result_dir)
 
     branch = result.views[3].branches["yolo"]
-    assert result.views[3].model_supported is False
+    assert result.views[3].model_supported is True
     assert branch.state is BranchState.AVAILABLE
     assert branch.score == pytest.approx(0.25)
 

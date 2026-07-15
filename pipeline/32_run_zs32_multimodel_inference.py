@@ -1,7 +1,7 @@
 # Copyright (C) 2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
-"""Run template-first ZS32 six-view PatchCore, YOLO, and strict fusion."""
+"""Run template-first ZS32 eight-view PatchCore, YOLO, and strict fusion."""
 
 # The CLI converts model, file-system, and strict-fusion failures into explicit
 # fail-closed diagnostics, so exception messages retain their original context.
@@ -28,18 +28,20 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from capture_data.zs32_18_group_commissioning import validate_18_group_source_assets  # noqa: E402
+from capture_data.zs32_18_group_commissioning import validate_commissioning_source_assets  # noqa: E402
 from capture_data.zs32_inspection_orchestrator import (  # noqa: E402
-    CANONICAL_VIEWS,
     InspectionRequest,
     write_template_match_csv,
 )
 from capture_data.zs32_model_runtime import ZS32ModelRuntime, load_runtime_config  # noqa: E402
 from capture_data.zs32_template_gate import TemplateGate  # noqa: E402
+from zs32_inspection.domain.views import CANONICAL_VIEWS  # noqa: E402
 
 DEFAULT_RUNTIME_CONFIG = REPO_ROOT / "config/fusion/zs32_runtime_models.json"
 PRODUCTION_FUSION_PROFILE = "zs32-right"
 COMMISSIONING_FUSION_PROFILE = "zs32-right-18-commissioning"
+EIGHT_VIEW_COMMISSIONING_FUSION_PROFILE = "zs32-right-24-commissioning"
+COMMISSIONING_FUSION_PROFILES = (COMMISSIONING_FUSION_PROFILE, EIGHT_VIEW_COMMISSIONING_FUSION_PROFILE)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -60,13 +62,13 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Run infer-only diagnostics without template or Stage18 evidence.",
     )
-    parser.add_argument("--quality-csv", type=Path, help="Strict six-view quality-gate evidence CSV.")
-    parser.add_argument("--registration-csv", type=Path, help="Strict six-view registration evidence CSV.")
-    parser.add_argument("--geometry-csv", type=Path, help="Strict six-view geometry evidence CSV.")
+    parser.add_argument("--quality-csv", type=Path, help="Strict eight-view quality-gate evidence CSV.")
+    parser.add_argument("--registration-csv", type=Path, help="Strict eight-view registration evidence CSV.")
+    parser.add_argument("--geometry-csv", type=Path, help="Strict eight-view geometry evidence CSV.")
     parser.add_argument("--threshold-artifact", type=Path, help="Locked Stage-31 right-hand dual thresholds.")
     parser.add_argument(
         "--fusion-profile",
-        choices=(PRODUCTION_FUSION_PROFILE, COMMISSIONING_FUSION_PROFILE),
+        choices=(PRODUCTION_FUSION_PROFILE, *COMMISSIONING_FUSION_PROFILES),
         default=PRODUCTION_FUSION_PROFILE,
         help="Explicit Stage-18 right-hand fusion contract.",
     )
@@ -92,7 +94,7 @@ def _request_from_args(args: argparse.Namespace) -> InspectionRequest:
 def _template_status_allows_downstream(status: str, fusion_profile: str) -> bool:
     """Allow template GRAY evidence to be covered only in complementary commissioning."""
     normalized = status.strip().upper()
-    return normalized == "PASS" or (fusion_profile == COMMISSIONING_FUSION_PROFILE and normalized == "REVIEW")
+    return normalized == "PASS" or (fusion_profile in COMMISSIONING_FUSION_PROFILES and normalized == "REVIEW")
 
 
 def _template_result_allows_downstream(result: dict[str, Any], fusion_profile: str) -> bool:
@@ -195,7 +197,7 @@ def _publish_template_stop(
         "reason": result.get("reason"),
         "strict_fusion": False,
         "fusion_profile": fusion_profile,
-        "commissioning_only": fusion_profile == COMMISSIONING_FUSION_PROFILE,
+        "commissioning_only": fusion_profile in COMMISSIONING_FUSION_PROFILES,
         "production_release_allowed": False,
     }
     for name in ("runtime_summary.json", "runtime_manifest.json"):
@@ -272,7 +274,7 @@ def _run_strict_fusion(args: argparse.Namespace, output_dir: Path, template_csv:
         "fusion_output": str(output_dir / "fusion"),
         "reason": decision.reason,
         "fusion_profile": args.fusion_profile,
-        "commissioning_only": args.fusion_profile == COMMISSIONING_FUSION_PROFILE,
+        "commissioning_only": args.fusion_profile in COMMISSIONING_FUSION_PROFILES,
         "production_release_allowed": args.fusion_profile == PRODUCTION_FUSION_PROFILE,
     }
 
@@ -308,9 +310,9 @@ def _validate_mode(args: argparse.Namespace) -> None:
 
 def _validate_commissioning_source_assets(args: argparse.Namespace) -> None:
     """Fail before model loading when commissioning assets drift from locked thresholds."""
-    if args.mode != "fuse" or args.fusion_profile != COMMISSIONING_FUSION_PROFILE:
+    if args.mode != "fuse" or args.fusion_profile not in COMMISSIONING_FUSION_PROFILES:
         return
-    validate_18_group_source_assets(
+    validate_commissioning_source_assets(
         args.threshold_artifact,
         args.runtime_config,
         args.template_model_dir / "model.json",
