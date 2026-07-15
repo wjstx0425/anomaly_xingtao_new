@@ -584,6 +584,57 @@ def test_stage32_fuse_replaces_skipped_fusion_with_real_parseable_evidence(tmp_p
         assert view.branches["fusion"].evidence_path == fusion_csv.resolve()
 
 
+@pytest.mark.parametrize("fault", ["missing", "not_file", "outside"])
+def test_stage32_fusion_evidence_fault_downgrades_top_level_and_remains_parseable(
+    tmp_path: Path,
+    fault: str,
+) -> None:
+    """An absent or escaped Stage18 artifact must make the whole generation incomplete."""
+    config_path, _ = _write_fixture(tmp_path)
+    images = _write_images(tmp_path)
+    output_dir = tmp_path / "strict-fuse-fault"
+    runtime = ZS32ModelRuntime(
+        load_runtime_config(config_path),
+        patchcore_backend=_PatchcoreBackend(),
+        yolo_backend=_YoloBackend(),
+    )
+    runtime.run(InspectionRequest("part-001", "session-001", "group-001", "right", images), output_dir)
+    fusion_dir = output_dir / "fusion"
+    if fault == "outside":
+        fusion_dir = tmp_path / "outside-fusion"
+    fusion_dir.mkdir()
+    fusion_evidence = fusion_dir / "fused_predictions.csv"
+    if fault == "not_file":
+        fusion_evidence.mkdir()
+    elif fault == "outside":
+        fusion_evidence.write_text("part_id,final_status\npart-001,OK\n", encoding="utf-8")
+    stage32 = cast("object", _load_stage32(f"stage32_fusion_manifest_{fault}"))
+
+    stage32._update_runtime_manifest_after_fusion(  # type: ignore[attr-defined]
+        output_dir,
+        {
+            "machine_status": "OK",
+            "inspection_complete": True,
+            "strict_fusion": True,
+            "fusion_profile": "zs32-right-24-commissioning",
+            "commissioning_only": True,
+            "production_release_allowed": False,
+            "fusion_output": str(fusion_dir),
+            "reason": "all strict branches passed",
+        },
+    )
+
+    manifest = json.loads((output_dir / "runtime_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["machine_status"] == "REVIEW"
+    assert manifest["inspection_complete"] is False
+    assert "fusion_evidence" in manifest["missing_required_evidence"]
+    parsed = load_inspection_result(output_dir)
+    assert parsed.machine_status == "REVIEW"
+    for view in parsed.views:
+        assert view.branches["fusion"].state is BranchState.ERROR
+        assert view.branches["fusion"].evidence_path is None
+
+
 @pytest.mark.parametrize(
     ("commissioning_only", "production_release_allowed"),
     [(False, False), (True, True), (None, False), (True, None)],

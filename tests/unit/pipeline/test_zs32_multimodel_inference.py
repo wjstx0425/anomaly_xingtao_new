@@ -495,6 +495,43 @@ def test_template_short_circuit_retains_commissioning_policy(tmp_path: Path) -> 
     )
 
 
+@pytest.mark.parametrize("invalid_score", [float("nan"), float("inf"), True, "0.9"])
+def test_template_stop_normalizes_invalid_scores_and_remains_parseable(
+    tmp_path: Path,
+    invalid_score: object,
+) -> None:
+    """A stopped generation must never serialize non-finite or type-coerced Template scores."""
+    stage32 = _load_module("pipeline_zs32_template_stop_score", "pipeline/32_run_zs32_multimodel_inference.py")
+    images = _write_images(tmp_path)
+    request = stage32.InspectionRequest("part-001", "session-001", "group-001", "right", images)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    output = tmp_path / "output"
+
+    stage32._publish_template_stop(
+        request,
+        output,
+        tuple(
+            {
+                "view": view,
+                "status": "NG_TEMPLATE" if view == "front" else "PASS",
+                "reason": "stopped",
+                "score": invalid_score,
+                "best_template_path": str(images[view]),
+            }
+            for view in VIEWS
+        ),
+        workspace,
+        "zs32-right-24-commissioning",
+    )
+
+    manifest = json.loads((output / "runtime_manifest.json").read_text(encoding="utf-8"))
+    assert len(manifest["views"]) == len(VIEWS)
+    assert all(manifest["views"][view]["branches"]["template"]["score"] is None for view in VIEWS)
+    parsed = load_inspection_result(output)
+    assert len(parsed.views) == len(VIEWS)
+
+
 def test_successful_strict_fusion_summary_retains_inspection_identity(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

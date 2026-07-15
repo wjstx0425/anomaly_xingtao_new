@@ -128,6 +128,14 @@ def _template_result_allows_downstream(result: dict[str, Any], fusion_profile: s
     return numbers_valid and decision_valid and versions_valid and evidence_valid
 
 
+def _finite_template_score(value: object) -> float | None:
+    """Return only strict JSON-safe numeric Template scores."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    score = float(value)
+    return score if math.isfinite(score) else None
+
+
 def _template_gate(
     request: InspectionRequest,
     runtime: ZS32ModelRuntime,
@@ -195,6 +203,11 @@ def _publish_template_stop(
     ]
     if not blocked:
         raise ValueError("template stop publication requires at least one blocked template result")
+    normalized_results = tuple(
+        {**results_by_view[view], "score": _finite_template_score(results_by_view[view].get("score"))}
+        for view in CANONICAL_VIEWS
+    )
+    normalized_by_view = {str(result["view"]): result for result in normalized_results}
     decisive = next(
         (result for result in blocked if str(result.get("status", "")).upper() == "NG_TEMPLATE"),
         blocked[0],
@@ -210,7 +223,7 @@ def _publish_template_stop(
         "group_id": request.group_id,
         "hand": request.hand,
         "evaluated_views": [item.get("view") for item in results],
-        "template_results": list(results),
+        "template_results": list(normalized_results),
         "reason": decisive.get("reason") or "template gate did not allow downstream inference",
         "strict_fusion": False,
         "fusion_profile": fusion_profile,
@@ -218,7 +231,7 @@ def _publish_template_stop(
         "production_release_allowed": False,
     }
     (workspace / "runtime_summary.json").write_text(
-        json.dumps(summary, indent=2, sort_keys=True, default=str) + "\n",
+        json.dumps(summary, indent=2, sort_keys=True, default=str, allow_nan=False) + "\n",
         encoding="utf-8",
     )
     source_dir = workspace / "sources"
@@ -227,7 +240,7 @@ def _publish_template_stop(
     template_evidence_dir.mkdir(parents=True, exist_ok=True)
     views: dict[str, dict[str, Any]] = {}
     for view in CANONICAL_VIEWS:
-        result = results_by_view[view]
+        result = normalized_by_view[view]
         source = Path(request.images[view]).resolve()
         source_copy = source_dir / f"{view}{source.suffix or '.png'}"
         shutil.copy2(source, source_copy)
@@ -282,7 +295,7 @@ def _publish_template_stop(
         "note": "Template-first aggregate stop; all model and fusion branches were skipped.",
     }
     (workspace / "runtime_manifest.json").write_text(
-        json.dumps(manifest, indent=2, sort_keys=True, default=str) + "\n",
+        json.dumps(manifest, indent=2, sort_keys=True, default=str, allow_nan=False) + "\n",
         encoding="utf-8",
     )
     workspace.replace(output_dir)
@@ -412,6 +425,16 @@ def _update_runtime_manifest_after_fusion(output_dir: Path, summary: dict[str, A
     fusion_output = Path(str(summary.get("fusion_output", ""))).expanduser().resolve()
     fusion_evidence = fusion_output / "fused_predictions.csv"
     evidence_is_local = fusion_evidence.is_file() and fusion_evidence.is_relative_to(output_dir.resolve())
+    if not evidence_is_local:
+        summary["machine_status"] = "REVIEW"
+        summary["inspection_complete"] = False
+        summary["missing_required_evidence"] = sorted(
+            {*summary.get("missing_required_evidence", []), "fusion_evidence"},
+        )
+        summary["reason"] = "Stage18 fusion evidence is missing or outside the result generation."
+        payload["machine_status"] = summary["machine_status"]
+        payload["inspection_complete"] = summary["inspection_complete"]
+        payload["reason"] = summary["reason"]
     fusion_branch = {
         "state": "available" if evidence_is_local else "error",
         "status": str(summary.get("machine_status") or "ERROR") if evidence_is_local else "ERROR",
@@ -422,14 +445,12 @@ def _update_runtime_manifest_after_fusion(output_dir: Path, summary: dict[str, A
         fusion_branch["evidence_path"] = str(fusion_evidence)
     for view in CANONICAL_VIEWS:
         payload["views"][view]["branches"]["fusion"] = dict(fusion_branch)
-    payload["missing_required_evidence"] = (
-        []
-        if summary.get("inspection_complete") is True
-        else payload.get(
-            "missing_required_evidence",
-            [],
-        )
-    )
+    if evidence_is_local and summary.get("inspection_complete") is True:
+        payload["missing_required_evidence"] = []
+    elif not evidence_is_local:
+        payload["missing_required_evidence"] = list(summary["missing_required_evidence"])
+    else:
+        payload["missing_required_evidence"] = payload.get("missing_required_evidence", [])
     payload["note"] = (
         "Stage18 fusion completed for the named profile; production release remains governed by "
         "production_release_allowed."
