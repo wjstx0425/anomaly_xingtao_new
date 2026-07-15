@@ -1,5 +1,151 @@
 # AGENTS Memory
 
+## ZS32 topology-driven Stage35 live capture (2026-07-15)
+
+- Stage35 consumes `results/zs32_runtime_bundle_eight_view_v2/runtime_bundle.json` plus `configs/zs32/topology/zs32_4cam_double_side_v1.json`; serial overrides and separate runtime/template/threshold CLI assets are removed.
+- Capture delegates to `pipeline/zs32_bootstrap_capture.py` with one right-hand normal group/image and publishes an exact eight-view legacy manifest. Manifest loading verifies view, round, camera serial, session, sample, and group identity.
+- Before any camera child runs, Stage35 validates the finalized bundle and its runtime-assets, Template model, generated fusion profile, and threshold bindings. Stage32 receives those inner assets and all eight image arguments.
+- Device discovery on 2026-07-15 found all four topology serials: `DA9805574`, `DA9625347`, `DB0998274`, and `DB0968108`. Real capture remains a foreground two-round operator action requiring the part and Enter confirmations.
+
+## ZS32 24-group commissioning bundle Task 4 (2026-07-15)
+
+- Task4 code/test commit is `f4efec44` (`feat: publish ZS32 eight-view commissioning fusion`).
+- The immutable `results/zs32_runtime_assets_eight_view_v1` publication uses the pre-hardening manifest shape and cannot be finalized by current Stage37 because it lacks the exact `fusion_profile_template` path+SHA binding. Keep it unchanged; do not add a legacy compatibility bypass.
+- The current versioned chain is `results/zs32_runtime_assets_eight_view_v2` -> `results/zs32_24group_commissioning_v2` -> `results/zs32_runtime_bundle_eight_view_v2`. The final bundle loads in a fresh process with exact 24 identities and finite thresholds.
+- The v2 thresholds intentionally use the user-authorized Stage33 v4 YOLO test-leakage auxiliary source. They declare `data_leakage=true`, `test_used_for_selection=true`, `commissioning_only=true`, and `production_release_allowed=false`; never describe this bundle as production.
+- Stage32 accepts `--fusion-config PATH` and passes that exact bundle-generated profile to Stage18. The no-GPU Stage18 replay smoke is `results/zs32_stage18_24group_bundle_profile_smoke_v1`; it consumed 24 rows from the existing same-identity group064 CSVs and returned the already-known `NG_YOLO` back-view trigger.
+- Task4 verification: 122 focused tests passed, py_compile/help/diff-check passed, and Ruff E/F/W excluding the unrelated pre-existing E501 at Stage32 line 537 passed. Detailed evidence is in `.git/sdd/task-4-report.md`.
+
+## ZS32 strict eight-view Stage33 Task 3 (2026-07-15)
+
+- Template, Stage33 case construction, threshold preflight, per-view YOLO calibration, and missing-score validation now reuse `zs32_inspection.domain.views.VIEW_ORDER` and require exact right-hand eight-view coverage.
+- Template `load_model` rejects any digest-valid model whose declared view order or hand-by-view groups are not exact. Stage33 rejects missing per-view calibration normal/defect rows, physical-part fit/test reuse, runtime/Template ROI or template-generation mismatch, and missing/extra YOLO score identities.
+- Focused RED was 4 failed/34 passed for the four missing contracts; focused GREEN is 38 passed. The existing real `results/zs32_template_gate_right_eight_view_v1` passes the exact `load_model` eight-group command, so it was not retrained.
+- Code/test commit is `a263ca2f`; its clean-HEAD export passed 73 focused/related tests, compile, CLI help, and full targeted Ruff.
+- Real Stage33 is blocked before GPU: `results/zs32_runtime_assets_eight_view_v1` is an older immutable publication. Its runtime/fusion bytes match the current source, but its asset-set SHA is `ea1756c...` rather than current publisher output `dda14d6...` because it uses the obsolete scalar `fusion_profile_template_sha256` instead of the current path+SHA binding. Do not delete or overwrite it; choose a new immutable runtime-assets directory before rerunning publish and Stage33.
+- Evidence and exact continuation commands are in `.git/sdd/task-3-report.md`. Generated runtime/template/calibration artifacts remain uncommitted.
+
+## ZS32 versioned runtime bundle publisher Task 2 (2026-07-15)
+
+- Commit `50bbc22a` adds the immutable two-phase publisher, Stage 37 CLI, and checked-in replaceable source declaration.
+- Publication enforces exact-eight identity, content-distinct checkpoints, mandatory ROI/template generation equality, Template containment, canonical SHA bindings, and atomic `renameat2(RENAME_NOREPLACE)` no-clobber publication.
+- Finalization accepts only the complete Task1 exact-24 commissioning threshold contract bound to the generated fusion profile plus exact runtime-assets and Template hashes. `reported_deploy_threshold` remains provenance only.
+- Clean-HEAD verification: 74 focused tests, py_compile, both CLI subcommands, and Ruff F/E/W/I passed. Evidence is in `.git/sdd/task-2-report.md`.
+- The existing PatchCore overlay change remains user-owned and was excluded from the Task 2 commit.
+- Main-review follow-up: real Stage34 records intentionally omit per-record `threshold_version` and `template_version`; validate those versions through top-level `threshold_versions` and `deployment_contract.expected_versions`, while records remain exact ordered five-field identities. Threshold runtime/template bindings and the fusion profile template require exact canonical paths plus hashes. Profile branch/rule/order contracts are exact.
+- Follow-up commit `b7701918`; clean HEAD passed 85 Task2/CLI/runtime tests plus compile/help/Ruff. Dirty worktree tests call the real uncommitted Stage34 `_compose_records`; clean HEAD uses its exact field-for-field contract fallback because that Task1 helper is not yet committed.
+- Final schema follow-up commit `b7898122`: manifest, asset set, runtime assets, and bundle accept only schema version 1; all published/loaded asset-set, runtime, and bundle view orders must exactly equal canonical `VIEW_ORDER`. Clean HEAD passed 94 Task2/CLI/runtime tests plus compile/help/Ruff.
+
+## ZS32 eight-view PatchCore heatmap fix (2026-07-15)
+
+- User-reported case: known-normal `group064`, old fused output `results/zs32_eight_view_24group_test_leakage_smoke/group064`.
+- Initial evidence: all eight Stage32 PatchCore crops are byte-identical to the corresponding training/evaluation preprocessed inputs (matching SHA-256), and all eight Stage32 `pred_score` values exactly match the training workflow `predictions.csv` rows for group064.
+- The eight configured checkpoint files exist and their measured SHA-256 values match `config/fusion/zs32_runtime_models_eight_view.json`.
+- Root cause: the old `capture_data/zs32_model_runtime.py::_write_patchcore_overlay` min-max normalized each image independently, while the training `ImageVisualizer` uses the checkpoint post-processor's absolute `[0, 1]` scale with `normalize=False`. Normal group064 maps with maxima only `0.278317` to `0.397034` were therefore stretched to red and appeared spatially dispersed.
+- Fix: `_write_patchcore_overlay` now reuses Anomalib `visualize_anomaly_map(..., normalize=False)` and the training visualizer's 0.5 overlay alpha. Raw maps, scores, masks, thresholds, and decisions are unchanged. Regression: `test_patchcore_overlay_preserves_absolute_anomaly_scale` first failed because proportional low/high maps rendered identically, then passed after the fix.
+- Same-image/same-checkpoint front comparison is `results/zs32_patchcore_group064_heatmap_diagnosis/front_before_fix/comparison.json`: native `Engine.predict(ckpt_path=...)` and runtime `load_from_checkpoint` plus `predict(ckpt_path=None)` produced exactly equal raw maps and scores. The warning only means Engine did not reload a second time.
+- Complete eight-model GPU smoke: `results/zs32_eight_view_runtime_heatmap_fixed_smoke_complete/group064`; it has 8 PatchCore rows, 8 YOLO rows, 16 overlays, `errors=[]`, and intentionally remains diagnostic `REVIEW` without locked thresholds/template/fusion. `diagnostics/patchcore_old_new_numeric_comparison.json` proves all eight old/new raw maps are array-equal, all score diffs are zero, all crop bytes match, and only overlay rendering changed.
+- Verification: focused Stage32/runtime suite `87 passed`; `py_compile`, `git diff --check`, and Ruff F/E/W passed. Full Ruff/format still reports unrelated pre-existing import/style and indentation findings elsewhere in the already-modified files; do not reformat those unrelated regions as part of this fix.
+
+## ZS32 strict eight-view application contract Task 1 (2026-07-15)
+
+- The authoritative dependency-free view tuple is `src/zs32_inspection/domain/views.py`: `VIEW_ORDER`, `MODELED_VIEWS`, and `CANONICAL_VIEWS` are the same ordered eight-view tuple (`front`, `front_left`, `front_right`, `front_secondary`, `back`, `back_left`, `back_right`, `back_secondary`).
+- Stage32 now requires eight explicit image arguments; runtime requires eight distinct PatchCore checkpoints, exact eight-view PatchCore/YOLO ROIs, and preserves canonical order for one eight-image YOLO batch.
+- Dashboard manifests require `model_supported=true` for every view. Compositor notices are determined by each branch state; there is no secondary-view unsupported shortcut.
+- Review correction: both orchestrator and Stage32 always evaluate all eight template views before aggregating the gate. A template stop publishes all eight actual Template states and explicit score-free `SKIPPED` PatchCore/YOLO/Fusion records; strict dashboard parsing rejects `UNSUPPORTED` for every core branch.
+- Review correction: the Stage32 eight-view CLI is right-only and accepts/defaults only `zs32-right-24-commissioning`; it uses `config/fusion/zs32_runtime_models_eight_view.json` and always publishes `commissioning_only=true`, `production_release_allowed=false`. Legacy six-view production remains confined to historical Stage18 profiles.
+- Review correction: malformed or non-positive YOLO boxes fail closed; they are never silently discarded. Runtime configs require exact product `ZS32` and supported hands `['right']`.
+- Legacy right-hand production remains the historical six-view, 36-group profile. Eight-view commissioning uses 24 groups (eight views x template/PatchCore/YOLO) and remains non-production.
+- Task 1 focused verification is 190 passed; Stage32 `--help` lists both `--front-secondary-image` and `--back-secondary-image`. Full dirty-worktree/TDD evidence is in `.git/sdd/task-1-report.md`.
+
+## ZS32 offline dashboard Task 5 checkpoint (2026-07-14)
+
+- Offline dashboard commits are `e71e18fc` (renderer, reducer, headless/GUI app,
+  CLI, Stage 36 wrapper and tests) and `e79f4f0c` (only the
+  `zs32-dashboard` console-script registration).
+- The stable acceptance result is
+  `artifacts/zs32_dashboard_offline_acceptance/result`; its part ID and reason
+  explicitly mark it as an offline fixture. The corresponding OpenCV-decoded
+  `1600 x 920` uint8 screenshot is
+  `artifacts/zs32_dashboard_offline_acceptance/zs32_dashboard_1600x920.png`.
+- Launch the accepted offline GUI with
+  `uv run --no-sync python pipeline/36_zs32_inspection_dashboard.py --result-dir /home/yunjing/anomaly_xingtao_new/artifacts/zs32_dashboard_offline_acceptance/result`.
+- Task 5 stops at the mandatory offline acceptance checkpoint. Do not implement
+  Tasks 6-9 or claim live lifecycle support until the user explicitly accepts
+  this display. `--live` currently fails with a clear not-connected error.
+- Final Task 5 verification: dashboard `141 passed`, CLI `5 passed`, compile,
+  help, focused Ruff/format, diff check, and real Stage 36 screenshot generation
+  passed. Full evidence is in `.git/sdd/task-5-report.md`.
+- Review follow-up `de5d29ef` makes disabled inspection actions return the
+  exact existing state (preserving any pending request), changes active-layer
+  and CTA outlines from 2 px to the frozen 1 px style, and adds a real
+  subprocess regression for the Stage 36 wrapper. Updated counts are dashboard
+  `143 passed` and CLI `6 passed`; the same acceptance screenshot path was
+  regenerated and OpenCV-validated after the border fix.
+
+## ZS32 eight-view inspection dashboard design (2026-07-14)
+
+- User approved the complete design for a pure OpenCV result dashboard; design document: `docs/superpowers/specs/2026-07-14-zs32-eight-view-inspection-dashboard-design.md`.
+- Detailed TDD implementation plan: `docs/superpowers/plans/2026-07-14-zs32-eight-view-inspection-dashboard.md`. Tasks 1-5 end at a mandatory offline acceptance checkpoint; Tasks 6-9 cover four-camera Stage35, structured progress/control, live process-group integration, and the real one-part smoke.
+- The display order is `front`, `front_left`, `front_right`, `front_secondary`, `back`, `back_left`, `back_right`, `back_secondary`. Four-camera Stage35 captures all eight images from one sample; the current six primary views enter the existing models while the two secondary views show real originals and `model unsupported` until their weights and calibration assets are trained.
+- The UI is an independent process with a 4 x 2 result grid, Fusion/Original/PatchCore/YOLO/Template layers, one Start button, mouse plus keyboard control, card enlargement, and Quit. It deliberately has no history browser, open-directory action, in-window file picker, product selector, or part-ID editor.
+- Live mode starts Stage35 as an owned child process and polls an atomically written progress JSON instead of parsing terminal output. Offline mode loads one `--result-dir`; both modes use the same strict identity-validating parser.
+- The single detection button is stateful: Start while idle, Confirm front and capture during `waiting_front`, and Confirm back and capture during `waiting_back`. Progress publishes a unique `confirmation_id`; the GUI atomically writes a matching control JSON, so four-camera capture needs no terminal Enter or TTY. Stale, duplicate, wrong-round, or wrong-part confirmations are rejected.
+- The GUI starts Stage35 in its own process group and terminates the owned group on exit so capture or Stage32 grandchildren cannot be orphaned.
+- PatchCore output must preserve the raw anomaly map and binary mask. Prefer real `pred_mask`; otherwise use a configurable normalized anomaly-map display threshold defaulting to `0.65` and label it `DIAGNOSTIC MASK`. The fallback never changes model or fusion decisions.
+- Existing YOLO output is box detection, so the dashboard may draw only true boxes and confidence; template score/offset alone cannot be presented as a pixel mask. `NG_TEMPLATE` is a valid template-first short circuit, while missing/mismatched artifacts remain execution errors rather than NG.
+- Delivery is gated: implement and obtain user acceptance of the offline parser/compositor/dashboard first, then extend four-camera Stage35 and connect live Start/progress, then run one real eight-image/six-model hardware smoke test. The two secondary model rows must fit later without changing the GUI result contract.
+
+## ZS32 PatchCore dashboard artifacts (2026-07-14)
+
+- Stage32 persists each modeled view's untouched finite 2D anomaly output as float32 `.npy`, a binary uint8 mask PNG, and the existing heatmap overlay below `evidence/patchcore/{raw_maps,masks}` plus the overlay root. `runtime_manifest.json.views` contains only the six `MODELED_VIEWS`; secondary views must never receive fabricated model records.
+- A valid Anomalib `pred_mask` takes priority and records no diagnostic threshold. If absent, the runtime min-max normalizes the raw map and applies `--diagnostic-mask-threshold` (default `0.65`) only to the display mask. This value never changes the score, locked thresholds, Stage18 input, or OK/NG decision.
+- Non-finite raw maps, invalid thresholds, or present-but-malformed `pred_mask`/artifact geometry fail closed. The manifest may retain a finite diagnostic score for display, but the affected PatchCore branch CSV row has no score and cannot enter Stage18.
+
+## ZS32 four-camera legacy-layout capture design (2026-07-14)
+
+- User approved and implementation completed for direct legacy-format four-camera output. Design: `docs/designs/2026-07-14-zs32-four-camera-legacy-layout-capture-design.md`; operator commands: `configs/zs32/topology/README.md`.
+- Final CLI is explicit `--legacy-layout` on `pipeline/zs32_bootstrap_capture.py`. It writes only the historical dataset tree plus one `manifests/<session>.csv`, not duplicate `_bootstrap` images. Without the flag, isolated bootstrap behavior is unchanged.
+- Historical paths remain `<root>/<hand>/<view>/normal/<session>/images` or `defect/<defect_type>/<session>/images`; filenames retain `{hand}_{view}_{label_token}_{part_id}_groupNNN_000001_{fused|single}.png`.
+- Four-camera legacy samples extend the unchanged 25-column CSV from six image rows to eight image rows plus one sample row. New views are `front_secondary/back_secondary`, both bound to `DB0968108` by topology.
+- Hardware handoff uses root `/home/yunjing/anomalib/dataset/test`, topology `configs/zs32/topology/zs32_4cam_double_side_v1.json`, `images-per-group=1`, HDR `1500/5500 us`, gain `0`, interval `0.2 s`, settle frames `1`, and timeout `2000 ms`. Run `group-count=1` first and require 8 PNGs plus 9 data rows; only after operator confirmation run 120 groups and require 960 image plus 120 complete sample rows, 1080 data rows total.
+- Stage 2 discovers arbitrary view directories and can see secondary images. Stage 3, YOLO/Label Studio, and parts of training remain six-view constrained; downstream eight-view expansion is explicitly out of this capture-format task.
+- Final offline gate on 2026-07-14: capture-focused suite `57 passed`, topology suite `9 passed`; `py_compile`, CLI `--help`, topology JSON/legacy CSV contract checks, and `git diff --check` passed. This is not evidence of a real one-group or 120-group hardware capture.
+
+## ZS32 formal four-camera topology (2026-07-14)
+
+- Checked-in topology: `configs/zs32/topology/zs32_4cam_double_side_v1.json`; operator guide: `configs/zs32/topology/README.md`. The fourth camera is the front-mounted secondary camera, serial `DB0968108`, slot `front_secondary`, producing `front_secondary` in the front round and `back_secondary` after flipping the same part.
+- The four-camera topology has eight required views in this order: `front`, `front_left`, `front_right`, `front_secondary`, `back`, `back_left`, `back_right`, `back_secondary`. Its current canonical topology SHA256 is `e516aa4fc95d31800c67720926b0855ceba881eed99a4cc4d57d0509e026ae39`.
+- The legacy `pipeline/1_collect_multicamera_data.py` remains a fixed three-camera/six-view collector and must not be described as four-camera capable. Its `--list-devices` command is still useful for confirming all four serials. Fast four-camera data collection now uses `pipeline/zs32_bootstrap_capture.py` or the `zs32-bootstrap-capture` console script; do not modify the legacy collector or replace its right serial to emulate four cameras.
+- The bootstrap command keeps the existing `group-count`, `images-per-group=1`, `manual-load`, HDR and exposure surface. It deliberately rejects `images-per-group>1` rather than changing the old collector's flip semantics, does not support `--save-hdr-sources`, and leaves HDR alignment off unless `--align-hdr` is explicit. It opens all topology cameras once for the entire batch, asks for Enter before front/back grouped rounds, and atomically publishes eight-view sets below `<root>/_bootstrap/<session>/<set>`. Failures and KeyboardInterrupt go to `_bootstrap_incomplete`. Bootstrap manifests always mark `bootstrap_only=true`, `eligible_for_dataset=false`, and `production_release_allowed=false`; they deliberately omit formal gate/canonical raw manifests.
+- The current `.venv` cannot import `MvCameraControl_class` without an SDK path. Prefix hardware commands with `PYTHONPATH=/opt/MVS/Samples/64/Python/MvImport:${PYTHONPATH:-}`; that exact path exists on this host and a direct import succeeds. The adapter intentionally does not mutate `sys.path`.
+- Formal four-camera capture must use `zs32-capture` with a new immutable gate publication bound to the four-camera topology. Before publishing it, prepare real eight-view quality/registration profiles and eight approved full-frame reference PNGs. Do not copy old thresholds or references into `front_secondary/back_secondary`.
+- ROI does not block the first formal raw capture. It does block dataset publication: the current `configs/zs32/roi/zs32_roi_v2.json` and `configs/zs32/recipes/zs32_right_patchcore_training_v1.json` are three-camera assets and cannot be combined with four-camera captures. A later four-camera dataset needs eight measured ROIs, eight-view annotations/targets, eight templates, eight PatchCore candidates, a retrained global YOLO, and new calibration artifacts.
+- TDD evidence: the checked-in-config regression first failed because `zs32_4cam_double_side_v1.json` did not exist, then passed after adding the config. The bootstrap CLI suite first failed because its module was absent, then passed seven behavior cases covering 8-image binding, one adapter open per batch, early rejection of ambiguous multi-image groups, front/back partial failure isolation, Ctrl-C retention/cleanup, and hardware-free help. Use `--confcutdir` on the focused test folders to bypass the repository CUDA skip hook.
+
+## ZS32 Stage35 live 18-group commissioning (2026-07-14)
+
+- Operator entrypoint: `pipeline/35_run_zs32_live_commissioning.py`; reusable orchestration: `capture_data/zs32_live_commissioning.py`. Preflight with `/home/yunjing/anomalib/.venv/bin/python pipeline/35_run_zs32_live_commissioning.py --list-devices`, then run one right-hand part with the same interpreter and `--part-id live_part_001`.
+- Template-operator diagnostic command: `/home/yunjing/anomalib/.venv/bin/python pipeline/35_run_zs32_live_commissioning.py --part-id live_part_001 --diagnostic-skip-template`. It captures the same six views, runs Stage32 `infer` with all six PatchCore branches plus YOLO, and prints absolute `<output_dir>/patchcore.csv` and `<output_dir>/yolo.csv` paths. It intentionally creates no `template_match.csv`, fusion output, or Stage18 audit and remains `REVIEW`, `inspection_complete=false`, `strict_fusion=false`, `commissioning_only=true`, `production_release_allowed=false`; never use it as an OK/NG or release result.
+- Stage35 locks one manual-load HDR sample (`1500/6000 us`, gain `0`, settle frames `1`) and serial-bound cameras front/centre `DA9805574`, left `DA9625347`, right `DB0998274`. The operator confirms the front three views, flips the same right-hand part, then confirms the back three views.
+- Default capture root is `/home/yunjing/anomalib/results/zs32_live_capture`; default runtime root is `/home/yunjing/anomalib/results/zs32_live_runtime/<capture_session>/<sample_id>`. Runtime assets are the local commissioning config, unified-ROI template model, and `/home/yunjing/anomalib/results/zs32_18group_commissioning_v1/thresholds.json`.
+- The default Stage35 flow invokes `fuse --fusion-profile zs32-right-18-commissioning` and does not expose quality, registration, geometry, GUI, hand, profile, or group-count switches. Every business result remains `commissioning_only=true`, `production_release_allowed=false`.
+- A complete fusion result has a Stage18 audit and 18 canonical template/PatchCore/YOLO rows. A validated Stage32 template short circuit (`NG_TEMPLATE` or exception-shaped `REVIEW`) is also a legal business result: it has `inspection_complete=false`, prints verified `template_results`, and deliberately returns `audit_path=None` because Stage18 did not run. Do not classify missing audit as a contract error in this short-circuit case. Source-image decode/dimension failures currently make Stage32 nonzero and are execution errors, not `INVALID_CAPTURE` summaries.
+- Focused tests are `tests/unit/pipeline/test_zs32_multimodel_inference.py`, `tests/unit/capture_data/test_zs32_live_commissioning.py`, and `tests/unit/pipeline/test_zs32_live_commissioning_cli.py`; right/left prompt regressions remain in `tests/unit/capture_data/test_collect_multicamera_dataset.py`.
+- Final skip-template diagnostic gate on 2026-07-14 was `233 passed`; Ruff/format, compilation, CLI help, diff check, and the Stage35 real-artifact validator passed. Real `--list-devices` returned all three configured serials with exit code 0.
+- The saved correct-right-hand capture `20260714_145508_515286` was reused without recapturing for a real GPU diagnostic at `/home/yunjing/anomalib/results/zs32_live_runtime_diagnostic/20260714_145508_515286/live_part_001_group001_000001`. It produced 6 PatchCore plus 6 YOLO rows, 12 evidence files, no runtime errors, no template/fusion/audit artifacts, and the required REVIEW/incomplete/non-production flags. PatchCore scores were front `0.313845`, front_left `0.888506`, front_right `1.0`, back `0.364892`, back_left `0.796209`, back_right `0.919070`; all YOLO scores were `0.0` on this normal part.
+- Hardware preflight saw one RTX 4090 with PyTorch `2.8.0+cu128` and CUDA available. All six PatchCore checkpoints plus YOLO `best.pt` existed and matched the SHA-256 values in `runtime_models.local.json`; both ROI configs existed and `validate_18_group_source_assets` accepted the threshold/runtime/template binding.
+
+## ZS32 unified-ROI offline commissioning (2026-07-14)
+
+- The authoritative reference/training dataset for this commissioning pass is `/home/yunjing/anomalib/dataset/zs32_patchcore_roi_yolo`; do not substitute the older `zs32_patchcore_roi` tree.
+- The right-hand six-view template gate was trained from that tree's `crop_manifest.csv` and published at `/home/yunjing/anomalib/results/zs32_template_gate_right_unified_roi_v1`. It contains six groups, five templates per group, and a `model.json` SHA-256 of `db3730a5e6559ef734b77c67c8f82b2b06c0165719533ebf929dd8f0e3ad330d`.
+- Fresh serial PatchCore training from the same dataset completed under `/home/yunjing/anomalib/results/six_view_roi_yolo_fixed_seed42`; `six_view_summary.csv` has exactly six rows, every checkpoint exists, and `failed_views.txt` is absent. This is the commissioning model set; do not mix it with checkpoints from `six_view_roi_fixed_seed42` or `six_view_roi_wrn_l23_r005_bs16_fp32_seed42`.
+- Local ignored runtime config: `/home/yunjing/anomalib/results/zs32_offline_commissioning/runtime_models.local.json`. It pins those six fresh checkpoints, PatchCore ROI `/home/yunjing/anomalib/dataset/zs32_patchcore_stage29_roi_config.json`, YOLO ROI `/home/yunjing/anomalib/dataset/zs32_six_view_roi_config.json`, and YOLO `/home/yunjing/ultralytics-c789/final_n640_p1_seed42/weights/best.pt` (`8c9495d150a008db2c9b0a464848d92c06088d24a33960404d549c0412ca15e2`).
+- A real GPU `infer` smoke on right normal `group038` succeeded at `/home/yunjing/anomalib/results/zs32_offline_commissioning/group038`: six template rows all PASS, six PatchCore rows with nonzero scores, six YOLO rows with zero detections, 12 evidence PNGs, 18 crop PNGs, and no runtime errors.
+- The expected terminal state is `REVIEW` with `inspection_complete=false`: Stage32 `infer` intentionally has no locked dual-threshold artifact or quality/registration/geometry evidence. PatchCore/YOLO CSV row status is therefore `ERROR` with reason `locked dual thresholds unavailable` even though continuous inference and evidence generation succeeded. Do not call this a completed production inspection.
+- Fresh PatchCore deployment recall was weakest on `right_front_left` (`0.689655`) and `right_back_right` (`0.724138`); inspect these views during calibration instead of accepting the smoke result as an accuracy sign-off.
+
 ## ZS32 right-hand unified PatchCore + YOLO runtime (2026-07-13)
 
 - Use `pipeline/32_run_zs32_multimodel_inference.py` as the single entrypoint. `infer` preserves continuous evidence and remains REVIEW; `fuse` calls strict Stage 18 only when all required external branches and locked thresholds are supplied.
@@ -520,3 +666,139 @@
 - `ZS32InspectionOrchestrator` passes all six normalized template results to its downstream runner. It records early-stop/skipped state without inventing missing branch CLEAR evidence.
 - Local integration on 2026-07-13 merged `feat/zs32/multimodel-fusion` into `main` after first committing the completed PatchCore ROI workflow and C789 matcher prototype. Backup branch: `backup/main-before-zs32-fusion-20260713`; no GitHub push was performed.
 - The merged PatchCore + fusion target suite reports `333 passed, 1 warning`; production/core-import Ruff, Python compilation, shell syntax, profile JSON, and all five relevant CLI help commands pass.
+
+### ZS32 right-hand offline calibration commissioning (2026-07-14)
+
+- Stage 33 is `pipeline/33_run_zs32_offline_calibration.py`; its core is `capture_data/zs32_offline_calibration.py`. It is explicitly commissioning-only, keeps six PatchCore models plus YOLO resident in one process, supports case-level resume, and recomputes all six template scores without applying the online short-circuit.
+- The source contract is `/home/yunjing/anomalib/dataset/zs32_patchcore_roi_yolo/crop_manifest.csv`, but semantic views come from original source basenames rather than legacy `resolved_view`. This repairs 24 known routed-view mismatches among deform groups 009-013. Template score/split input is `/home/yunjing/anomalib/results/zs32_template_gate_right_unified_roi_v1/calibration_rows.csv`.
+- The completed GPU run is `/home/yunjing/anomalib/results/zs32_offline_calibration_unified_roi_v1`: 99 physical parts, 594 views, 1782 three-model rows, zero runtime errors. Fit has 42 normal plus 25 defect parts; held-out test has 28 normal plus only 4 defect parts.
+- `template_patchcore_threshold_calibration/` is a 12-group diagnostic fit: held-out defect non-clear recall is 4/4, normal strong-reject rate is 5/28, and review rate is 16/32. It is not a production-independent validation because model/data splits were not jointly locked.
+- YOLO labels come from `/home/yunjing/anomalib/dataset/zs32_six_view_roi_yolo/labels/{train,val,test}`. Stage 33 excludes train, maps val to calibration and test to test, and uses per-view identities. `yolo_annotation_thresholds_by_view/summary.json` reports that only front/front_right avoid zero thresholds; four views are degenerate because labeled positives have score zero at the candidate floor. Do not inject these thresholds.
+- The naive 18-group root threshold fit is explicitly rejected by `threshold_quality_report.json`: it lacks the remaining 18 right-profile quality/registration/geometry groups, uses physical-part labels for its YOLO branch, has only four held-out defect parts, and strongly rejects all 28 held-out normal parts because of zero YOLO thresholds.
+- Post-review hardening adds `commissioning_run_contract.json` plus one `stage33_publication.json` per threshold directory. Resume now binds runtime config/checkpoints, template model, all selected source-image SHA-256 values, physical labels/splits, YOLO label-tree hash, fit parameters, aggregate CSV and threshold/metric hashes. It also rejects one physical part split across YOLO train/val/test and validates paired images plus normalized bbox syntax.
+- The strengthened per-view acceptance contract requires distinct positive thresholds, at least five fit and five test positives, held-out recall at the requested target, and normal strong-reject rate at most 0.2. Under that contract all six current YOLO views are `operationally_usable=false`; front/front_right are also rejected for low sample counts and 2/3 held-out positive recall.
+- The hardened preflight validates YOLO label syntax and physical-part split isolation before GPU work and hashes every paired ROI image. The real resume verification decoded and compared all 594 selected runtime YOLO crops against their labeled dataset ROI pixels; all matched, recorded in `/home/yunjing/anomalib/results/zs32_offline_calibration_unified_roi_v1/yolo_runtime_crop_identity.json`.
+- Raw `/home/yunjing/anomalib/dataset/zs32_six_view_yolo` and cropped `/home/yunjing/anomalib/dataset/zs32_six_view_roi_yolo` label stems/splits/box-presence align exactly: train 1398, val 306, test 306, with zero missing, extra, or presence mismatches. Calibration uses the ROI labels because runtime YOLO scores are produced from those ROI pixels.
+- Stage 33 now has an explicit complementary YOLO policy via `--yolo-aux-min-image-precision`. It preserves the old recall-first `yolo_annotation_thresholds_by_view/` diagnostic and separately publishes `yolo_high_precision_auxiliary/`; fit uses only val/calibration, test is evaluation-only, zero-score/no-box rows can never become a threshold, and every physical part is revalidated as split-isolated with exactly six canonical views.
+- The 2026-07-14 commissioning run at minimum fit image-presence precision 0.90 selected front `0.38068947196006775`, front_left `0.8800162672996521`, front_right `0.8765060305595398`, back `0.025683363899588585`, back_left `0.5230337381362915`, and back_right `0.008334489539265633`. Physical-part six-view OR is val TP/FP/FN/TN `4/0/1/8` and test `5/0/0/13`; test GT-aligned trigger recall is also 5/5, so no positive part was counted solely from a trigger on an unlabeled view.
+- Interpret this as report-only direct-NG candidates: a future locked profile would map `low=high=T`, so `score>=T` is YOLO STRONG and may directly produce `NG_YOLO`, while a YOLO miss remains CLEAR for that branch and can be caught by PatchCore/template/another view. The artifact uses image-level bbox-presence precision, not IoU-matched box precision, and is marked `runtime_injection_supported=false`; do not pass it directly to Stage 32/18 until the full 36-group right profile is locked.
+
+### ZS32 unified-ROI 18-group fusion commissioning (2026-07-14)
+
+- The explicit reduced profile is `config/fusion/zs32_right_unified_roi_18_group_commissioning.json`, Stage18/32 alias `zs32-right-18-commissioning`. It requires exactly six right-hand views times `template_match`, the matching `anomaly_<view>` PatchCore branch, and `yolo`; it never replaces or relaxes production `zs32-right` and carries `commissioning_only=true`, `production_release_allowed=false`.
+- Stage 34 is `pipeline/34_publish_zs32_18_group_commissioning.py`, backed by `capture_data/zs32_18_group_commissioning.py`. It verifies the live runtime/template version contract, template `model.sha256`, both Stage33 publication sidecars, exact 12+6 group coverage, and atomically signs a Stage18-compatible artifact with profile SHA, canonical records SHA and immutable artifact SHA. It rejects invalid calibration, non-ok records, YOLO candidate incompleteness, test-selection leakage and candidates below their declared fit-precision floor. Output: `/home/yunjing/anomalib/results/zs32_18group_commissioning_v1/thresholds.json`.
+- Template thresholds come from the online template `model.json`, not the Stage33 refit; front_left low is exactly `0.011378765106201172`. PatchCore uses the six Stage33 template/PatchCore records. YOLO maps the six auxiliary thresholds to binary `low=high=T`.
+- Stage32 now has explicit `--fusion-profile`. Production remains the default and still requires quality/registration/geometry CSVs. Only `zs32-right-18-commissioning` omits them. Stage32 validates the current runtime-config and template `model.json` byte hashes against the artifact before model/GPU loading. Under this complementary commissioning profile, only a complete finite REVIEW genuinely inside the template gray band continues so PatchCore/YOLO may cover it; exception-shaped REVIEW and explicit NG_TEMPLATE short-circuit while retaining non-production policy metadata.
+- Real GPU smoke output is `/home/yunjing/anomalib/results/zs32_18group_smoke/group038`: 18 required rows, all CLEAR, Stage18 `OK`, `inspection_complete=true`, no runtime errors. The post-hardening rerun is `/home/yunjing/anomalib/results/zs32_18group_smoke_v2/group038` with the same terminal result. The runtime summary/manifest, `fusion/fusion_policy.json`, and audit all retain `production_release_allowed=false`; the manifest also preserves its pre-fusion REVIEW under `pre_fusion_result`.
+- Final regression gate after hardening: 216 relevant fusion/runtime tests passed; the focused publisher/Stage18/Stage32 subset reports 37 passed. Ruff, legacy core E/F/I, formatting, compilation, JSON and diff checks also pass.
+
+### ZS32 live template-score geometry drift diagnosis (2026-07-14)
+
+- The confirmed normal right-hand live capture is `/home/yunjing/anomalib/results/zs32_live_capture/20260714_145508_291649_live_part_001`, manifest session `20260714_145508_515286`. The historical same-domain control is right normal `group038` from session `20260711_165347_078120`; the wrong-left-hand capture remains a useful negative control.
+- The live and historical manifests bind the same serials to the same camera-slot views: `DA9805574` -> `front/back`, `DA9625347` -> `front_left/back_left`, and `DB0998274` -> `front_right/back_right`. SDK `device_index` changed between sessions, but collection reorders handles by serial; cross-view and left/right swap scoring became worse, so the anomaly is not a view-routing or flip-naming error.
+- The runtime uses the exact configured PatchCore ROI for template crops. All source images are `4024x3036`; live, group038, training crops, and saved templates have matching per-view dimensions. All 30 template PNGs hash-match `model.json`, trace to normal right-hand same-view samples, and equal the declared grayscale/width-512/Gaussian preprocessing output. No template contamination or version/hash mismatch was found.
+- Same-code replay on group038 gives all-zero/one-pixel offsets and risks `0.0046-0.0073`. On the live normal right part, `front=0.01217@(1,0)` and `back=0.01279@(0,0)` remain near the normal domain, while `front_left=0.05847@(9,-12)`, `front_right=0.70670@(-12,-12)`, `back_left=0.07591@(9,-12)`, and `back_right=0.69402@(-12,-12)` hit the configured translation boundary.
+- SIFT/RANSAC comparison with group038 shows camera-specific, front/back-consistent drift: the centre camera is effectively stable; the left camera is approximately `(+48,-129)` raw pixels; the right camera is approximately `(-848,+39)` raw pixels with about `+5%` scale and `-5.8 deg` rotation. The current template gate searches only translation (`+-12` pixels after resize), with no rotation or scale search.
+- Expanding translation only in memory recovers the left views near the threshold range but cannot recover the right views. Warping the live images back toward group038 geometry before applying the same ROI and matcher reduces left risks into PASS (`front_left 0.01016`, `back_left 0.01185`) and reduces right risks by roughly an order of magnitude, confirming geometry drift as causal. The right fixed ROIs also clip content after the roughly 848-pixel framing shift, so translation-only matching cannot reconstruct the missing region.
+- Root-cause priority is: side-camera acquisition geometry changed (right camera severe, left camera mild) > fixed-ROI clipping/background participation and insufficient translation-only alignment > smaller HDR photometric shift (`1500/6000 us` live versus `1500/5500 us` historical). Threshold direction, score formula, template aggregation, hashes, crop dimensions, hand identity, and serial/view routing were consistent.
+- Do not repair this by raising production template thresholds. First restore/lock the physical camera and fixture geometry against approved full-frame references, recapture one six-view normal sample, and require current `+-12` matching to stop hitting boundaries. If the new camera pose is intentional, create a new measured ROI/reference/model/calibration generation from the new geometry rather than mixing it with the July 11 model.
+
+### ZS32 eight-view YOLO ROI preparation (2026-07-15)
+
+- Stage 29 now selects and converts all eight four-camera views in topology order: `front`, `front_left`, `front_right`, `front_secondary`, `back`, `back_left`, `back_right`, `back_secondary`.
+- Real eight-view YOLO data lives under `/home/yunjing/anomalib/dataset`, so Stage 29 exposes `--repo-root`; use `/home/yunjing/anomalib` together with explicit absolute input/config/output paths so manifest-relative paths resolve correctly.
+- Secondary mirrored normals reuse their own source-view ROI and horizontally flip it, matching the existing normal-mirror geometry contract. The focused Stage 29 suite reports `11 passed`.
+
+### ZS32 right-hand eight-view PatchCore ROI preparation (2026-07-15)
+
+- Stage 30 accepts `--repo-root`, repeated `--hand`, and repeated `--exclude-session`; the current commissioning path is right-only and uses all eight views including `front_secondary/back_secondary`.
+- A right-only conversion accepts the Stage 29 top-level `views` config directly. The current source is `/home/yunjing/anomalib/dataset/zs32_new`, and the ROI config is `/home/yunjing/anomalib/dataset/zs32_eight_view_roi_config.json`.
+- Exclude complete duplicate sessions `zs32_right_deform_20260714_204302_593214015` and `zs32_right_deform_20260714_201404_438451409`; never delete or rewrite the raw source tree.
+- Expected clean output is 1048 images: each of eight right-hand views has 108 normal and 23 defect images. Focused Stage 30 tests report `53 passed`.
+
+### ZS32 right-hand eight-view PatchCore training (2026-07-15)
+
+- `pipeline/run_patchcore_roi_eight_views.sh` is the eight-view strong-parameter entrypoint. It reuses the serial/resumable runner while selecting `right_front`, `right_front_left`, `right_front_right`, `right_front_secondary`, `right_back`, `right_back_left`, `right_back_right`, and `right_back_secondary`.
+- The eight-view run writes `eight_view_summary.csv`; the legacy six-view entrypoint and `six_view_summary.csv` remain compatible and unchanged by default.
+- Both `pipeline/8_train_custom_models.py` and `examples/api/03_models/zs32_defect_workflow.py` accept the two secondary views. Focused runner/workflow verification reports `26 passed`.
+
+### ZS32 right-hand eight-view 24-group fusion commissioning (2026-07-15)
+
+- `config/fusion/zs32_right_eight_view_24_group_commissioning.json` is the exact right-only `8×3=24` profile for `template_match`, `anomaly_<view>`, and `yolo`; alias: `zs32-right-24-commissioning`.
+- The Stage 34 publisher is profile-driven and supports both the legacy 18-group profile and the new 24-group profile. Both remain `commissioning_only=true` and `production_release_allowed=false`.
+- `capture_data/inspection_audit.py` preserves the legacy six-view audit shape for six-view inputs and adds the secondary keys only when those views are present. Focused publisher, Stage 18, and audit verification reports `25 passed`.
+
+### ZS32 Stage 32 eight-view runtime (2026-07-15)
+
+- `capture_data/zs32_inspection_orchestrator.py` and `capture_data/zs32_model_runtime.py` use the exact eight-view order `front`, `front_left`, `front_right`, `front_secondary`, `back`, `back_left`, `back_right`, `back_secondary`.
+- Runtime config loading requests `load_patchcore_roi_config(..., hands=("right",))`, so the right-only Stage 29 top-level `views` ROI config is valid without fabricating a left-hand section.
+- PatchCore loads and runs eight distinct checkpoints; YOLO receives one ordered eight-image batch. Both secondary views are included in crops, evidence rows, manifests, and request validation.
+- Focused orchestrator/runtime/Stage 32 tests report `75 passed` before the separate fusion-profile assertions are included.
+
+### ZS32 eight-view trained assets and calibration result (2026-07-15)
+
+- The real eight-view template model is `results/zs32_template_gate_right_eight_view_v1/model.json`: eight groups, 40 template PNGs, 720 calibration rows, and a verified `model.sha256` of `bc5fa70965e756c30030a9e523df927c396f99629cfd3cbe4e6e4bae0a86ebfd`.
+- The pinned runtime bundle is `config/fusion/zs32_runtime_models_eight_view.json`. It binds all eight PatchCore checkpoints from `eight_view_summary.csv`, YOLO `results/yolo/zs32_eight_view_roi_n640_seed42/weights/best.pt`, and the right-only eight-view ROI config.
+- Real GPU Stage 32 smoke output is `results/zs32_eight_view_runtime_smoke/group064_v2`: eight template PASS rows, eight PatchCore rows, eight YOLO rows, all expected crops/overlays/maps, and no runtime errors. It intentionally remains REVIEW until a valid locked threshold artifact exists.
+- Real Stage 33 output is `results/zs32_offline_calibration_eight_view_v1`: 90 complete cases, 720 pixel-identical runtime YOLO crop checks, 2160 calibration rows, and 16 valid template/PatchCore thresholds.
+- The 24-group profile is implemented, but Stage 34 must currently reject publication because YOLO lacks two valid calibration candidates. `front` has only 2 calibration positives and its best threshold has precision `2/3`, below `0.90`; `front_secondary` has zero calibration positives and its only positive is held-out test data. Do not hand-fill, move test data after inspection, or disable these YOLO branches to pretend the requested 24-group artifact is calibrated.
+- Final focused eight-view template/runtime/offline-calibration/fusion regression reports `133 passed`.
+
+### ZS32 temporary test-leaked 24-group smoke (2026-07-15)
+
+- The user explicitly authorized a temporary fake 24-group commissioning result before collecting more labels. Stage 33 therefore has opt-in `--yolo-aux-use-test-for-selection` plus `--reuse-existing-inference`; Stage 34 requires the separate `--allow-test-leakage` opt-in. Default strict behavior remains unchanged.
+- The leaked Stage 33 source is `results/zs32_offline_calibration_eight_view_v1/yolo_high_precision_auxiliary_test_leakage/thresholds.json`. It reuses all 90 completed cases and marks `test_used_for_selection=true`, `data_leakage=true`, `fit_split=calibration+test`, and `evaluation_split=test_reused_for_selection`. All eight YOLO records are `ok`; leaked `front=0.7289669513702393` and `front_secondary=0.8694137334823608`.
+- The fake 24-group artifact is `results/zs32_24group_commissioning_test_leakage_v1/thresholds.json`: 24 exact records, `commissioning_only=true`, `production_release_allowed=false`, and the same explicit leakage markers. Never use it as production validation.
+- The real GPU fused smoke is `results/zs32_eight_view_24group_test_leakage_smoke/group064`: 24 branch rows across eight views and three branches per view, `inspection_complete=true`, final `NG_YOLO`. The known-normal group was rejected by back YOLO (`score=0.00245661 >= leaked threshold=0.00126685`), demonstrating the expected false-positive risk of the fake thresholds rather than a runtime failure.
+- Focused leakage/Stage33/Stage34/Stage32/Stage18 verification after the run reports `64 passed`; compilation and `git diff --check` pass.
+
+### ZS32 strict eight-view commissioning decision (2026-07-15)
+
+- User approved `docs/superpowers/specs/2026-07-15-zs32-strict-eight-view-commissioning-design.md`: all eight views are modeled; `MODELED_VIEWS == VIEW_ORDER`; secondary may not be published as unsupported or with empty branches.
+- The accepted target is commissioning completeness, not production release. Every view must have Template, PatchCore, YOLO, and Fusion dashboard records, while Stage18 consumes exact `8×3=24` commissioning evidence groups.
+- Model paths must live in a versioned runtime bundle accepted through `--runtime-config`. Replacing Template, any per-view PatchCore, or the shared YOLO must publish a new hash-bound bundle and matching 24-group threshold artifact without Python edits.
+- Existing eight PatchCore checkpoints, eight-view ROI, and shared eight-view YOLO are real assets. A same-ROI eight-view Template and unified locked bundle still must be published; the current `front_secondary` PatchCore is commissioning-only because its sample F1 is about `0.286`.
+- The approved execution plan is `docs/superpowers/plans/2026-07-15-zs32-strict-eight-view-commissioning-plan.md`. It supersedes only Tasks 6-9 of the 2026-07-14 dashboard plan and preserves the accepted offline Tasks 1-5.
+- The bundle implementation is two-phase to avoid circular hashes: publish immutable inner runtime assets plus a generated 24-group profile, publish Stage33/34 thresholds bound to those assets and the Template, then finalize the outer Stage35 bundle.
+
+### ZS32 strict eight-view Task 1 implementation boundary (2026-07-15)
+
+- Commit `a6980413` freezes the right-only eight-view Stage32 contract: all eight Template gates are evaluated before aggregate stop, stopped views retain real Template status, and PatchCore/YOLO/Fusion are explicit `SKIPPED` with null scores.
+- Stage32 exposes only `zs32-right-24-commissioning`; it always publishes `commissioning_only=true` and `production_release_allowed=false`. The legacy six-view production contract stays outside this path.
+- Runtime bundles require exact `product=ZS32`, `supported_hands=[right]`, eight canonical PatchCore views, and fail closed on non-positive YOLO boxes. Dashboard parsing rejects `UNSUPPORTED` in every core branch.
+- The clean commit snapshot passes 139 focused tests; the dirty checkout with later user tests passes 206. User-staged 18-group Stage18/test work was deliberately preserved outside the Task 1 commit.
+
+### ZS32 strict runtime manifest and ROI compatibility correction (2026-07-15)
+
+- Follow-up commit: `e283fec6` (`fix: publish strict ZS32 runtime manifests`); its clean archive passes 219 focused plus ROI tests.
+- Model-only runtime output is itself a strict dashboard generation: eight copied/distinct source images with real SHA-256 and shapes, exact per-view identity, and Template/PatchCore/YOLO/Fusion branches. Unexecuted branches use `SKIPPED` plus null score.
+- Stage32 ordinary infer merges copied Template evidence into those records; successful fuse replaces every Fusion branch with the real local `fusion/fused_predictions.csv`, still without inventing a per-view score.
+- `zs32_patchcore_roi_dataset.VIEWS` and `zs32_view_roi_dataset.VIEWS` remain historical six-view defaults. Strict Stage32 passes `expected_views=CANONICAL_VIEWS` explicitly to both loaders.
+- The eight-view runtime config must declare `commissioning_only=true` and `production_release_allowed=false`; runtime loading rejects missing or changed flags, and all manifest/summary modes expose them.
+- YOLO ROI JSON image sizes and coordinates accept only positive/non-bool integers; bool, float, and string values fail closed rather than being converted.
+- Template-stop scores are JSON-safe: only finite non-bool int/float values survive as floats; NaN, infinity, bool, and strings become null, with `allow_nan=false` serialization.
+- Successful Stage18 status is conditional on a real `fusion/fused_predictions.csv` inside the generation. Missing, non-file, or escaped evidence forces REVIEW/incomplete, adds `fusion_evidence` to missing evidence, and marks all eight Fusion branches ERROR without paths.
+- Final fail-closed follow-up commit is `db1e23e6`; its clean archive passes 226 complete Task 1 focused plus ROI tests.
+
+### ZS32 eight-view YOLO label reconciliation (2026-07-15)
+
+- Source data is read-only at `/home/yunjing/anomalib/dataset/zs32_new`; the fixed eight-view ROI is read-only at `/home/yunjing/anomalib/dataset/zs32_eight_view_roi_config.json`.
+- Historical annotation evidence comes from `/home/yunjing/anomalib/dataset/zs32_new_yolo_labeling` and the existing cropped dataset `/home/yunjing/anomalib/dataset/zs32_eight_view_roi_yolo`; never infer that an unlabeled defect image is negative merely because the generated YOLO txt is empty.
+- Reconciliation must use all eight canonical views, content hashes before filenames, group/session-isolated splits, explicit conflict/review flags, and a new independent output under this checkout. Stage 27 local-file conventions and Stage 29 ROI/label transforms are the compatibility anchors.
+- Stage 36 is `pipeline/36_reconcile_zs32_yolo_labels.py`, backed by `capture_data/reconcile_zs32_yolo_labels.py`. `prepare` uses encoded SHA256, decoded-pixel SHA256, a recorded horizontal-flip pixel digest, ROI dHash candidates, Stage 29 label migration, alias-bound deterministic splits, Label Studio predictions, and strict YOLO validation; `finalize` consumes a completed Label Studio JSON task export and creates a separate final dataset. The current raw set produced no horizontal-flip auto-reuse rows.
+- Prepared output is `dataset/zs32_eight_view_yolo_reconciled_20260715_v3`: 2104 source images -> 1664 canonical images, 440 duplicate images across 55 renamed group aliases, 248 historical positive labels reused, 864 normal-directory empty labels confirmed, 526 missing labels, 26 exact-duplicate label conflicts, and 552 Label Studio review tasks. Perceptual candidates are audit-only and never auto-reused; the current data has zero proven horizontal-flip reuse rows. The earlier unsuffixed target existed as an empty directory, so it was not overwritten.
+- The draft is deliberately blocked from training: it has `yolo_draft/DO_NOT_TRAIN_UNTIL_LABEL_STUDIO_REVIEW_COMPLETE.txt` and intentionally has no `data.yaml`. Import `label_studio/tasks_all.json` to see every reused prediction and filter on `needs_human_annotation`; use `tasks_review.json` only for the 552 unresolved/conflicting tasks. After review, export Label Studio JSON and run Stage 36 `finalize` to produce the only standard train/val/test dataset and a refreshed final mapping.
+- The operator later narrowed labeling scope to all 840 raw defect images only. Use `pipeline/36_reconcile_zs32_yolo_labels.py prepare-defect-840` and `dataset/zs32_eight_view_yolo_reconciled_20260715/defect_label_studio_840/tasks_defect_840.json`; it contains exactly 105 tasks per view, no normal images, 253 safe preannotations, 52 conflict-review tasks across 26 exact-duplicate clusters, and 535 missing-label tasks. The 40 duplicate aliases remain independent tasks while retaining alias-bound splits.
+
+### ZS32 strict eight-view Stage33 real commissioning attempt (2026-07-15)
+
+- Immutable runtime assets are `results/zs32_runtime_assets_eight_view_v1`; asset-set hash `ea1756c26b45126d86c9d2396b19985efd7073dc6c7e8d13a0744c08ab4b7647` binds the eight PatchCore checkpoints, shared YOLO, exact-eight Template, ROI, and commissioning profile.
+- Real Stage33 inference completed all 90 cases under `results/zs32_stage33_eight_view_commissioning_v4`; its run contract binds runtime SHA `27d9fcf9ce69b5037ab917694d27936be856c83842c45877680c7e308e1abd86`, Template SHA `bc5fa70965e756c30030a9e523df927c396f99629cfd3cbe4e6e4bae0a86ebfd`, 90 source records, and the YOLO dataset hash. The artifact is commissioning-only.
+- Ultralytics can emit a finite four-coordinate box collapsed to zero area after boundary clipping. Such candidates are now warning diagnostics and are excluded from detection/score; malformed/nonfinite boxes still fail closed. The observed real candidate was `right:normal:group019/back_right`, confidence about `0.00445`, box `[0,2429,2763,2429]`.
+- `threshold_calibration/thresholds.json` has 24 finite part-level thresholds and `template_patchcore_threshold_calibration/thresholds.json` has 16 finite thresholds, but strict Stage33 publication remains blocked: `front_secondary` YOLO annotation calibration has 13 rows all labeled `0` and no positive calibration row. The single positive is in test and must not be used for selection. Complete Label Studio review/finalization before rerunning to a new immutable output directory.
+- For the explicitly approved quick commissioning fallback, v4 also contains `yolo_high_precision_auxiliary_test_leakage/thresholds.json`: exact eight views, finite thresholds, `test_used_for_selection=true`, `data_leakage=true`, and a sidecar bound to the v4 run contract. Stage34 may consume it only with `--allow-test-leakage`; it is never production evidence. Threshold SHA is `7f2c45b4bcdb730e1579d6c3c9d405e0b6f8921b3cce0c64b514a71172812edb`.
+
+### ZS32 Stage33 review hardening (2026-07-15)
+
+- Stage33 reuse validates every case against the active runtime, ROI, model, source, and evidence contract; preflight performs the same available read-only checks before GPU initialization.
+- Stage31's four reports and Stage33 sidecar are one atomic no-replace generation. Task2 is consumed through its public manifest loader and binds the asset-set SHA, ROI bytes, and Template bytes; regenerate stale immutable generations instead of editing them.

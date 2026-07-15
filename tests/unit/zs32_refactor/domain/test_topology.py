@@ -3,13 +3,20 @@
 from __future__ import annotations
 
 import copy
+from pathlib import Path
 
 import pytest
 
+from zs32_inspection.config.loaders import load_topology
 from zs32_inspection.config.schemas import parse_topology
 from zs32_inspection.domain.errors import TopologyValidationError
 
 from ._fixtures import topology_mapping
+
+
+FOUR_CAMERA_TOPOLOGY = (
+    Path(__file__).parents[4] / "configs/zs32/topology/zs32_4cam_double_side_v1.json"
+)
 
 
 @pytest.mark.parametrize(("camera_count", "view_count"), [(3, 6), (4, 8), (5, 10)])
@@ -20,6 +27,34 @@ def test_topology_compiles_camera_count_to_required_views(camera_count: int, vie
     assert len(topology.camera_slots) == camera_count
     assert topology.expected_view_count == view_count
     assert len(set(topology.required_views)) == view_count
+
+
+def test_checked_in_four_camera_topology_binds_secondary_front_camera() -> None:
+    """The production authoring config binds DB0968108 to two canonical views."""
+    topology = load_topology(FOUR_CAMERA_TOPOLOGY)
+
+    assert topology.topology_id == "zs32-4cam-double-side-v1"
+    assert topology.expected_view_count == 8
+    assert topology.required_views == (
+        "front",
+        "front_left",
+        "front_right",
+        "front_secondary",
+        "back",
+        "back_left",
+        "back_right",
+        "back_secondary",
+    )
+    assert topology.binding_for_view("front_secondary") == (
+        "front",
+        "front_secondary",
+        "DB0968108",
+    )
+    assert topology.binding_for_view("back_secondary") == (
+        "back",
+        "front_secondary",
+        "DB0968108",
+    )
 
 
 def test_duplicate_camera_serial_is_rejected() -> None:
