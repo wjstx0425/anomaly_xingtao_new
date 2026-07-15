@@ -50,6 +50,7 @@ class PatchcoreSpec:
     checkpoint: Path
     checkpoint_sha256: str
     model_version: str
+    reported_deploy_threshold: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -254,6 +255,7 @@ def load_runtime_config(path: Path) -> RuntimeConfig:
             checkpoint=checkpoint,
             checkpoint_sha256=str(record["checkpoint_sha256"]).lower(),
             model_version=_required_text(record, "model_version"),
+            reported_deploy_threshold=_finite_float_or_none(record.get("reported_deploy_threshold")),
         )
 
     yolo_payload = _require_mapping(payload.get("yolo"), "yolo")
