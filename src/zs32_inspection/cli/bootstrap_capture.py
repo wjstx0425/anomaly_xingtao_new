@@ -24,6 +24,7 @@ from zs32_inspection.capture.bootstrap import (
     BootstrapCaptureService,
     BootstrapCaptureStore,
     BootstrapRoundCoordinator,
+    DashboardRoundCoordinator,
 )
 from zs32_inspection.capture.legacy_dataset import (
     LegacyCaptureContext,
@@ -83,6 +84,8 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--operator-id", default=getpass.getuser())
     parser.add_argument("--round-confirmation-timeout", type=float, default=120.0)
+    parser.add_argument("--progress-json", type=Path)
+    parser.add_argument("--control-json", type=Path)
     parser.add_argument("--hand", choices=[item.value for item in Hand], required=True)
     parser.add_argument("--label", choices=("normal", "defect"), required=True)
     parser.add_argument("--defect-type")
@@ -180,10 +183,21 @@ def _run(argv: Sequence[str] | None) -> int:
     capture_session = args.capture_session or _default_session(
         legacy_layout=args.legacy_layout
     )
-    coordinator = BootstrapRoundCoordinator(
-        args.operator_id,
-        args.round_confirmation_timeout,
-        manual_load=args.manual_load,
+    if (args.progress_json is None) != (args.control_json is None):
+        raise ValueError("--progress-json and --control-json must be provided together")
+    coordinator = (
+        DashboardRoundCoordinator(
+            args.operator_id,
+            args.progress_json,
+            args.control_json,
+            timeout_seconds=args.round_confirmation_timeout,
+        )
+        if args.progress_json is not None
+        else BootstrapRoundCoordinator(
+            args.operator_id,
+            args.round_confirmation_timeout,
+            manual_load=args.manual_load,
+        )
     )
     requests: list[CaptureRequest] = []
     for group_index in range(1, args.group_count + 1):

@@ -19,6 +19,9 @@ from types import MappingProxyType
 from capture_data.zs32_18_group_commissioning import validate_commissioning_source_assets
 from capture_data.zs32_inspection_orchestrator import CANONICAL_VIEWS
 from capture_data.zs32_runtime_bundle import RuntimeBundle, load_runtime_bundle
+from zs32_inspection.capture.contracts import utc_now
+from zs32_inspection.dashboard.contracts import ProgressRecord
+from zs32_inspection.dashboard.control import write_progress
 from zs32_inspection.config.loaders import load_topology
 from zs32_inspection.domain.views import VIEW_ORDER
 
@@ -49,6 +52,8 @@ class LiveRunConfig:
     devices: int = 1
     yolo_device: str = "0"
     diagnostic_skip_template: bool = False
+    progress_json: Path | None = None
+    control_json: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -79,7 +84,7 @@ CommandRunner = Callable[..., object]
 
 def build_capture_command(config: LiveRunConfig, capture_run_root: Path) -> list[str]:
     """Build the locked one-sample topology-driven capture command."""
-    return [
+    command = [
         sys.executable,
         str((config.repo_root / "pipeline/zs32_bootstrap_capture.py").expanduser().resolve()),
         "--topology",
@@ -102,6 +107,9 @@ def build_capture_command(config: LiveRunConfig, capture_run_root: Path) -> list
         "--manual-load",
         "--hdr",
     ]
+    if config.progress_json is not None and config.control_json is not None:
+        command.extend(("--progress-json", str(config.progress_json), "--control-json", str(config.control_json)))
+    return command
 
 
 def build_stage32_command(config: LiveRunConfig, sample: CapturedSample, output_dir: Path) -> list[str]:
@@ -156,6 +164,8 @@ def build_stage32_command(config: LiveRunConfig, sample: CapturedSample, output_
             str(output_dir.expanduser().resolve()),
         ),
     )
+    if config.progress_json is not None:
+        command.extend(("--progress-json", str(config.progress_json)))
     return command
 
 
@@ -547,10 +557,40 @@ def run_live_commissioning(
 ) -> LiveRunResult:
     """Capture and inspect one right-hand part using fail-closed child contracts."""
     try:
-        _validate_path_component(config.part_id, "part_id")
-        _validate_path_component(config.run_id, "run_id")
-    except ValueError as error:
-        raise LiveCommissioningError(str(error)) from error
+        try:
+            _validate_path_component(config.part_id, "part_id")
+            _validate_path_component(config.run_id, "run_id")
+            if (config.progress_json is None) != (config.control_json is None):
+                raise ValueError("progress_json and control_json must be provided together")
+        except ValueError as error:
+            raise LiveCommissioningError(str(error)) from error
+        return _run_live_commissioning(config, command_runner)
+    except (Exception, KeyboardInterrupt) as error:
+        if config.progress_json is not None:
+            try:
+                write_progress(
+                    config.progress_json,
+                    ProgressRecord(
+                        config.part_id,
+                        None,
+                        "failed",
+                        "inspection failed",
+                        utc_now(),
+                        error=f"{type(error).__name__}: {error}",
+                    ),
+                )
+            except Exception as progress_error:
+                raise LiveCommissioningError(
+                    f"inspection failed and failed progress could not be written: {progress_error}"
+                ) from error
+        raise
+
+
+def _run_live_commissioning(
+    config: LiveRunConfig,
+    command_runner: CommandRunner,
+) -> LiveRunResult:
+    """Run the live child sequence after the fail-closed progress wrapper."""
     _preflight_runtime(config)
     capture_root = config.capture_root.expanduser().resolve()
     capture_run_root = (capture_root / config.run_id).resolve()
@@ -604,7 +644,7 @@ def run_live_commissioning(
         diagnostic_skip_template = False
         patchcore_csv = None
         yolo_csv = None
-    return LiveRunResult(
+    result = LiveRunResult(
         sample=sample,
         capture_run_root=capture_run_root,
         output_dir=output_dir,
@@ -619,6 +659,18 @@ def run_live_commissioning(
         patchcore_csv=patchcore_csv,
         yolo_csv=yolo_csv,
     )
+    if config.progress_json is not None:
+        write_progress(
+            config.progress_json,
+            ProgressRecord(
+                sample.part_id,
+                sample.capture_session,
+                "complete",
+                str(output_dir),
+                utc_now(),
+            ),
+        )
+    return result
 
 
 def find_single_manifest(root: Path) -> Path:

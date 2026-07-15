@@ -36,6 +36,9 @@ from capture_data.zs32_inspection_orchestrator import (  # noqa: E402
 )
 from capture_data.zs32_model_runtime import ZS32ModelRuntime, load_runtime_config  # noqa: E402
 from capture_data.zs32_template_gate import TemplateGate  # noqa: E402
+from zs32_inspection.capture.contracts import utc_now  # noqa: E402
+from zs32_inspection.dashboard.contracts import ProgressRecord  # noqa: E402
+from zs32_inspection.dashboard.control import write_progress  # noqa: E402
 from zs32_inspection.domain.views import CANONICAL_VIEWS  # noqa: E402
 
 DEFAULT_RUNTIME_CONFIG = REPO_ROOT / "config/fusion/zs32_runtime_models_eight_view.json"
@@ -59,6 +62,7 @@ def build_parser() -> argparse.ArgumentParser:
         parser.add_argument(f"--{view.replace('_', '-')}-image", type=Path, required=True)
     parser.add_argument("--runtime-config", type=Path, default=DEFAULT_RUNTIME_CONFIG)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--progress-json", type=Path)
     parser.add_argument("--template-model-dir", type=Path, help="Optional first-stage template gate model.")
     parser.add_argument(
         "--diagnostic-skip-template",
@@ -618,6 +622,8 @@ def main() -> None:
     template_results: tuple[dict[str, Any], ...] | None = None
     template_workspace: Path | None = None
     if args.template_model_dir is not None:
+        if args.progress_json is not None:
+            write_progress(args.progress_json, ProgressRecord(request.part_id, request.capture_session, "running_template", "running template", utc_now()))
         template_results, template_workspace = _template_gate(
             request,
             runtime,
@@ -634,6 +640,8 @@ def main() -> None:
             print(f"output_dir: {output_dir}")
             return
 
+    if args.progress_json is not None:
+        write_progress(args.progress_json, ProgressRecord(request.part_id, request.capture_session, "running_patchcore_yolo", "running PatchCore and YOLO", utc_now()))
     result = runtime.run(
         request,
         output_dir,
@@ -681,6 +689,8 @@ def main() -> None:
             result.yolo_csv,
         )
     if args.mode == "fuse":
+        if args.progress_json is not None:
+            write_progress(args.progress_json, ProgressRecord(request.part_id, request.capture_session, "running_fusion", "running fusion", utc_now()))
         if template_csv is None:
             raise RuntimeError("template evidence unexpectedly missing")
         summary = _run_strict_fusion(args, output_dir, template_csv)

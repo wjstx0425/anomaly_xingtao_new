@@ -14,7 +14,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 from .compositor import compose_view, fit_letterbox
-from .contracts import EvidenceLayer, InspectionResult, ProgressRecord, ViewResult
+from .contracts import VIEW_ORDER, EvidenceLayer, InspectionResult, ProgressRecord, ViewResult
 
 _BACKGROUND = (14, 15, 16)
 _SURFACE = (22, 23, 24)
@@ -79,7 +79,7 @@ class ButtonVisual:
 class DashboardState:
     """Complete immutable state consumed by the renderer and reducer."""
 
-    result: InspectionResult
+    result: InspectionResult | None
     layer: EvidenceLayer = EvidenceLayer.FUSION
     selected_view: str | None = None
     progress: ProgressRecord | None = None
@@ -192,18 +192,23 @@ def _render_header(
     texts: list[_Text],
     hits: list[HitRegion],
 ) -> None:
-    identity = state.result.identity
-    status = state.result.machine_status
+    result = state.result
+    identity = result.identity if result is not None else None
+    status = result.machine_status if result is not None else "READY"
     texts.extend([
         _Text("ZS32 / RIGHT  八视角检测", (16, 10), 28, _TEXT, True),
         _Text(
-            f"part_id={identity.part_id}  capture_session={identity.capture_session}  group_id={identity.group_id}",
+            (
+                f"part_id={identity.part_id}  capture_session={identity.capture_session}  group_id={identity.group_id}"
+                if identity is not None
+                else f"part_id={state.progress.part_id if state.progress else '-'}  等待开始检测"
+            ),
             (16, 50),
             18,
             _MUTED,
         ),
         _Text(f"总状态  {status}", (1260, 12), 24, _status_color(status), True),
-        _Text(_ellipsize(state.result.reason, 46), (1090, 50), 16, _MUTED),
+        _Text(_ellipsize(result.reason if result is not None else "", 46), (1090, 50), 16, _MUTED),
     ])
     cv2.line(canvas, (16, 92), (1584, 92), _BORDER, 1, cv2.LINE_8)
     for index, (layer, label) in enumerate(_LAYER_LABELS):
@@ -229,6 +234,14 @@ def _render_grid(
 ) -> str:
     notice = ""
     card_width, card_height = 380, 302
+    if state.result is None:
+        for index, view_name in enumerate(VIEW_ORDER):
+            column, row = index % 4, index // 4
+            rect = Rect(16 + column * 392, 170 + row * 314, 380, 302)
+            cv2.rectangle(canvas, (rect.x, rect.y), (rect.x + rect.width - 1, rect.y + rect.height - 1), _SURFACE, -1)
+            _outline(canvas, rect, _BORDER)
+            texts.append(_Text(view_name, (rect.x + 10, rect.y + 7), 18, _TEXT, True))
+        return notice
     for index, view in enumerate(state.result.views):
         column, row = index % 4, index // 4
         rect = Rect(16 + column * 392, 170 + row * 314, card_width, card_height)
@@ -252,6 +265,8 @@ def _render_grid(
 
 
 def _render_selected(canvas: np.ndarray, state: DashboardState, texts: list[_Text]) -> str:
+    if state.result is None:
+        return ""
     view = next(view for view in state.result.views if view.view == state.selected_view)
     composed = compose_view(view, state.layer)
     rect = Rect(16, 170, 1568, 616)

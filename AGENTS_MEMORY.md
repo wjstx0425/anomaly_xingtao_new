@@ -1,5 +1,13 @@
 # AGENTS Memory
 
+## ZS32 live dashboard progress/control Tasks 6+7 (2026-07-15)
+
+- Bootstrap now supports paired `--progress-json/--control-json` operation without a TTY. Each front/back wait publishes a fresh confirmation token, consumes one exact command, and publishes `capturing_front/back` immediately before camera capture.
+- Stage32 publishes `running_template`, `running_patchcore_yolo`, and `running_fusion` at the real operation boundaries. Stage35 owns the final strict-contract `complete` publication and the fail-closed `failed` fallback.
+- `Stage35Controller` owns one new-session subprocess group, rejects duplicate starts, writes each waiting token once, translates nonzero exits to failed progress, and closes with SIGTERM then SIGKILL on timeout.
+- Live dashboard mode uses one contextual Start/Confirm CTA. Before a result exists it renders an empty eight-view shell; only `complete` loads result evidence through the strict parser. `--no-gui` performs no HighGUI calls.
+- Focused verification at the implementation checkpoint: Task6 `63 passed`, Task7 `24 passed` (`87 passed` combined); CLI help, targeted `py_compile`, `git diff --check`, and a decodable `1600 x 920` headless fake screenshot passed. No real camera/GPU smoke was run.
+
 ## ZS32 topology-driven Stage35 live capture (2026-07-15)
 
 - Stage35 consumes `results/zs32_runtime_bundle_eight_view_v2/runtime_bundle.json` plus `configs/zs32/topology/zs32_4cam_double_side_v1.json`; serial overrides and separate runtime/template/threshold CLI assets are removed.

@@ -62,6 +62,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--runtime-config", type=Path, default=DEFAULT_RUNTIME_CONFIG)
     parser.add_argument("--topology", type=Path, default=DEFAULT_TOPOLOGY)
+    parser.add_argument("--progress-json", type=Path)
+    parser.add_argument("--control-json", type=Path)
     return parser
 
 
@@ -105,6 +107,8 @@ def _config_from_args(args: argparse.Namespace) -> LiveRunConfig:
         runtime_config=args.runtime_config,
         topology_path=args.topology,
         diagnostic_skip_template=args.diagnostic_skip_template,
+        progress_json=args.progress_json,
+        control_json=args.control_json,
     )
 
 

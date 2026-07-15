@@ -30,9 +30,15 @@ def test_one_offline_or_live_source_is_required() -> None:
         dashboard._parser().parse_args([])
 
 
-def test_live_is_an_explicit_not_connected_error(capsys: pytest.CaptureFixture[str]) -> None:
-    assert dashboard._run(["--live", "--part-id", "part-1", "--no-gui"]) != 0
-    assert "尚未接入" in capsys.readouterr().err
+def test_live_headless_renders_without_highgui(monkeypatch: pytest.MonkeyPatch) -> None:
+    def forbidden(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("HighGUI must not be called")
+
+    monkeypatch.setattr(cv2, "namedWindow", forbidden)
+    monkeypatch.setattr(cv2, "imshow", forbidden)
+    monkeypatch.setattr(cv2, "waitKey", forbidden)
+
+    assert dashboard._run(["--live", "--part-id", "part-1", "--no-gui"]) == 0
 
 
 def test_offline_no_gui_saves_decodable_screenshot(

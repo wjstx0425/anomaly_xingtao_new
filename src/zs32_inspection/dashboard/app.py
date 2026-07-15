@@ -12,6 +12,8 @@ from pathlib import Path
 import cv2
 
 from .contracts import VIEW_ORDER, EvidenceLayer
+from .live import Stage35Controller
+from .parser import load_inspection_result
 from .render import DashboardState, HitRegion, RenderFrame, render_dashboard
 
 _WINDOW_NAME = "ZS32 Inspection Dashboard"
@@ -113,18 +115,45 @@ def _save_screenshot(frame: RenderFrame, path: Path) -> None:
         raise OSError(f"failed to save dashboard screenshot: {path}")
 
 
+def service_live_state(
+    state: DashboardState,
+    controller: Stage35Controller,
+    part_id: str,
+) -> DashboardState:
+    """Apply one contextual CTA and one progress poll without blocking the UI."""
+    if state.inspection_requested:
+        if controller.running:
+            controller.confirm()
+        else:
+            controller.start(part_id)
+        state = replace(state, inspection_requested=False)
+    progress = controller.poll()
+    result = state.result
+    if progress is not None and progress.state == "complete":
+        result = replace(load_inspection_result(Path(progress.message)), mode="live")
+    return replace(state, progress=progress, running=controller.running, result=result)
+
+
 def run_dashboard(
     initial_state: DashboardState,
     *,
     no_gui: bool = False,
     save_screenshot: Path | None = None,
+    live_controller: Stage35Controller | None = None,
+    part_id: str | None = None,
 ) -> DashboardState:
     """Render once headlessly or run the 50 ms HighGUI event loop."""
     state = initial_state
+    if live_controller is not None:
+        if not part_id:
+            raise ValueError("part_id is required for live dashboard mode")
+        state = service_live_state(state, live_controller, part_id)
     frame = render_dashboard(state)
     if save_screenshot is not None:
         _save_screenshot(frame, save_screenshot)
     if no_gui:
+        if live_controller is not None:
+            live_controller.close()
         return state
 
     cv2.namedWindow(_WINDOW_NAME, cv2.WINDOW_NORMAL)
@@ -143,6 +172,9 @@ def run_dashboard(
     cv2.setMouseCallback(_WINDOW_NAME, on_mouse)
     try:
         while not state.exit_requested:
+            if live_controller is not None:
+                assert part_id is not None
+                state = service_live_state(state, live_controller, part_id)
             frame = render_dashboard(state)
             current["frame"] = frame
             cv2.imshow(_WINDOW_NAME, frame.canvas)
@@ -153,5 +185,7 @@ def run_dashboard(
                 action, value = mouse_events.pop(0)
                 state = reduce_state(state, action, value=value)
     finally:
+        if live_controller is not None:
+            live_controller.close()
         cv2.destroyWindow(_WINDOW_NAME)
     return state

@@ -12,12 +12,16 @@ from __future__ import annotations
 
 import select
 import sys
+import time
+import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
 from zs32_inspection.runtime.publisher import AtomicDirectoryPublisher
+from zs32_inspection.dashboard.contracts import ConfirmationCommand, ProgressRecord
+from zs32_inspection.dashboard.control import consume_confirmation, write_progress
 
 from .contracts import (
     CaptureFrame,
@@ -145,6 +149,92 @@ class BootstrapRoundCoordinator:
             confirmed_by=self.operator_id,
             prompted_at=prompted_at,
             confirmed_at=utc_now(),
+        )
+
+
+class DashboardRoundCoordinator:
+    """File-backed round confirmation for a dashboard-owned headless capture."""
+
+    def __init__(
+        self,
+        operator_id: str,
+        progress_path: Path,
+        control_path: Path,
+        *,
+        timeout_seconds: float = 120.0,
+        poll_interval: float = 0.05,
+    ) -> None:
+        self.operator_id = operator_id
+        self.progress_path = progress_path
+        self.control_path = control_path
+        self.timeout_seconds = timeout_seconds
+        self.poll_interval = poll_interval
+        self._expected: ConfirmationCommand | None = None
+
+    def publish_waiting(self, request: CaptureRequest, round_plan: CaptureRoundPlan) -> None:
+        confirmation_id = uuid.uuid4().hex
+        self._expected = ConfirmationCommand(
+            "confirm_round", round_plan.round_id, confirmation_id, request.part_instance_id
+        )
+        write_progress(
+            self.progress_path,
+            ProgressRecord(
+                request.part_instance_id,
+                request.capture_session,
+                f"waiting_{round_plan.round_id}",
+                round_plan.prompt,
+                utc_now(),
+                confirmation_id,
+            ),
+        )
+
+    def consume_current_confirmation(
+        self, request: CaptureRequest, round_plan: CaptureRoundPlan
+    ) -> bool:
+        expected = self._expected
+        return bool(
+            expected
+            and expected.part_id == request.part_instance_id
+            and expected.round == round_plan.round_id
+            and consume_confirmation(self.control_path, expected)
+        )
+
+    def confirm_round(
+        self,
+        request: CaptureRequest,
+        round_plan: CaptureRoundPlan,
+        *,
+        round_index: int,
+        round_count: int,
+    ) -> RoundConfirmation:
+        del round_index, round_count
+        if self._expected is None:
+            self.publish_waiting(request, round_plan)
+        prompted_at = utc_now()
+        deadline = time.monotonic() + self.timeout_seconds
+        while time.monotonic() < deadline:
+            if self.consume_current_confirmation(request, round_plan):
+                self._expected = None
+                write_progress(
+                    self.progress_path,
+                    ProgressRecord(
+                        request.part_instance_id,
+                        request.capture_session,
+                        f"capturing_{round_plan.round_id}",
+                        round_plan.prompt,
+                        utc_now(),
+                    ),
+                )
+                return RoundConfirmation(
+                    round_plan.round_id,
+                    round_plan.prompt,
+                    self.operator_id,
+                    prompted_at,
+                    utc_now(),
+                )
+            time.sleep(self.poll_interval)
+        raise CaptureRetakeRequired(
+            f"operator confirmation timed out for round {round_plan.round_id!r}"
         )
 
 
