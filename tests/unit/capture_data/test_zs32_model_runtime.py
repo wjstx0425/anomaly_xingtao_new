@@ -137,10 +137,16 @@ def _write_images(tmp_path: Path) -> dict[str, Path]:
     return images
 
 
-def test_yolo_backend_rejects_boundary_collapsed_candidates(tmp_path: Path) -> None:
-    """A zero-area candidate must fail closed instead of disappearing from strict evidence."""
+def test_yolo_backend_drops_boundary_collapsed_candidates(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A box collapsed by image-boundary clipping is not detection evidence."""
 
     class _Xyxy:
+        def __init__(self, values: list[float]) -> None:
+            self.values = values
+
         def detach(self) -> _Xyxy:
             return self
 
@@ -148,9 +154,63 @@ def test_yolo_backend_rejects_boundary_collapsed_candidates(tmp_path: Path) -> N
             return self
 
         def reshape(self, *_shape: int) -> np.ndarray:
-            return np.asarray([0.0, 5.0, 12.0, 5.0])
+            return np.asarray(self.values)
 
-    box = SimpleNamespace(cls=np.asarray([0]), conf=np.asarray([0.001]), xyxy=_Xyxy())
+    collapsed = SimpleNamespace(
+        cls=np.asarray([0]),
+        conf=np.asarray([0.00445]),
+        xyxy=_Xyxy([0.0, 5.0, 12.0, 5.0]),
+    )
+    valid = SimpleNamespace(
+        cls=np.asarray([0]),
+        conf=np.asarray([0.003]),
+        xyxy=_Xyxy([1.0, 2.0, 8.0, 9.0]),
+    )
+    predictions = [
+        SimpleNamespace(
+            boxes=[collapsed, valid] if view == "front" else [],
+            names={0: "item"},
+            plot=lambda: np.zeros((8, 8, 3)),
+        )
+        for view in VIEWS
+    ]
+    backend = object.__new__(UltralyticsYoloBackend)
+    backend.model = SimpleNamespace(predict=lambda **_kwargs: predictions)
+    backend.spec = YoloSpec(
+        weights=tmp_path / "best.pt",
+        weights_sha256="0" * 64,
+        model_version="yolo-v1",
+        imgsz=640,
+        candidate_conf=0.001,
+        iou=0.7,
+        max_det=300,
+        class_map={0: "defect"},
+    )
+    backend.device = "cpu"
+    crops = {view: tmp_path / f"{view}.png" for view in VIEWS}
+
+    output = backend.predict(crops, tmp_path / "evidence")
+
+    assert output["front"].score == pytest.approx(0.003)
+    assert len(output["front"].detections) == 1
+    assert output["front"].detections[0]["xyxy"] == [1.0, 2.0, 8.0, 9.0]
+    assert "confidence=0.00445" in caplog.text
+
+
+def test_yolo_backend_still_rejects_nonfinite_candidates(tmp_path: Path) -> None:
+    """Dropping boundary-clipped boxes must not weaken malformed-box validation."""
+
+    class _NonfiniteXyxy:
+        def detach(self) -> _NonfiniteXyxy:
+            return self
+
+        def cpu(self) -> _NonfiniteXyxy:
+            return self
+
+        def reshape(self, *_shape: int) -> np.ndarray:
+            return np.asarray([0.0, 1.0, float("nan"), 2.0])
+
+    box = SimpleNamespace(cls=np.asarray([0]), conf=np.asarray([0.1]), xyxy=_NonfiniteXyxy())
     predictions = [
         SimpleNamespace(boxes=[box] if view == "front" else [], names={0: "item"}, plot=lambda: np.zeros((8, 8, 3)))
         for view in VIEWS
@@ -170,7 +230,7 @@ def test_yolo_backend_rejects_boundary_collapsed_candidates(tmp_path: Path) -> N
     backend.device = "cpu"
     crops = {view: tmp_path / f"{view}.png" for view in VIEWS}
 
-    with pytest.raises(ValueError, match="non-positive box"):
+    with pytest.raises(ValueError, match="malformed xyxy"):
         backend.predict(crops, tmp_path / "evidence")
 
 

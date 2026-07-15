@@ -12,6 +12,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import logging
 import math
 import shutil
 import tempfile
@@ -31,6 +32,7 @@ from zs32_inspection.domain.views import CANONICAL_VIEWS
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SHA256_LENGTH = 64
+LOGGER = logging.getLogger(__name__)
 
 
 def sha256_file(path: Path) -> str:
@@ -555,8 +557,16 @@ class UltralyticsYoloBackend:
                         raise ValueError(msg)
                     x1, y1, x2, y2 = xyxy
                     if x2 <= x1 or y2 <= y1:
-                        msg = f"YOLO emitted a non-positive box for {view}: {xyxy}"
-                        raise ValueError(msg)
+                        # Ultralytics may clip a low-confidence candidate entirely
+                        # onto an image boundary. It has no pixel area and therefore
+                        # cannot be retained as detection evidence.
+                        LOGGER.warning(
+                            "Ignoring boundary-collapsed YOLO candidate for %s: confidence=%s xyxy=%s",
+                            view,
+                            confidence,
+                            xyxy,
+                        )
+                        continue
                     names = getattr(result, "names", {})
                     checkpoint_class_name = (
                         str(names.get(class_id, class_id)) if isinstance(names, Mapping) else str(class_id)
