@@ -30,12 +30,16 @@ from capture_data.inspection_audit import build_part_audit, sha256_file, write_p
 
 ZS32_PROFILE_PATH = REPO_ROOT / "config/fusion/zs32_six_view.json"
 ZS32_RIGHT_PROFILE_PATH = REPO_ROOT / "config/fusion/zs32_right_six_view.json"
+ZS32_RIGHT_18_COMMISSIONING_PROFILE_PATH = (
+    REPO_ROOT / "config/fusion/zs32_right_unified_roi_18_group_commissioning.json"
+)
 ZS32_RIGHT_24_COMMISSIONING_PROFILE_PATH = (
     REPO_ROOT / "config/fusion/zs32_right_eight_view_24_group_commissioning.json"
 )
 STRICT_PROFILE_PATHS = {
     "zs32": ZS32_PROFILE_PATH,
     "zs32-right": ZS32_RIGHT_PROFILE_PATH,
+    "zs32-right-18-commissioning": ZS32_RIGHT_18_COMMISSIONING_PROFILE_PATH,
     "zs32-right-24-commissioning": ZS32_RIGHT_24_COMMISSIONING_PROFILE_PATH,
 }
 
@@ -168,6 +172,33 @@ def _load_threshold_artifact(  # noqa: C901
     if payload.get("profile_sha256") != profile_sha256 or payload.get("config_sha256") != profile_sha256:
         msg = "threshold artifact profile/config SHA256 does not match the current ZS32 config"
         raise ValueError(msg)
+    profile_payload = json.loads(profile_path.read_text(encoding="utf-8"))
+    profile_policy = (
+        bool(profile_payload.get("commissioning_only", False)),
+        bool(profile_payload.get("production_release_allowed", True)),
+    )
+    artifact_policy = (
+        bool(payload.get("commissioning_only", False)),
+        bool(payload.get("production_release_allowed", True)),
+    )
+    if artifact_policy != profile_policy:
+        msg = "threshold artifact policy flags do not match the current ZS32 config"
+        raise ValueError(msg)
+    source_artifacts = payload.get("source_artifacts")
+    if profile_policy[0]:
+        if not isinstance(source_artifacts, dict):
+            msg = "commissioning threshold artifact source_artifacts must be an object"
+            raise ValueError(msg)
+        for name in ("runtime_config", "template_model"):
+            binding = source_artifacts.get(name)
+            sha256 = binding.get("sha256") if isinstance(binding, dict) else None
+            if (
+                not isinstance(sha256, str)
+                or len(sha256) != 64
+                or any(character not in "0123456789abcdef" for character in sha256)
+            ):
+                msg = f"commissioning threshold artifact source_artifacts.{name}.sha256 is invalid"
+                raise ValueError(msg)
     declared_groups = payload.get("required_groups")
     if not isinstance(declared_groups, list):
         msg = "threshold artifact required_groups must be a list"
@@ -222,6 +253,9 @@ def _load_threshold_artifact(  # noqa: C901
         "threshold_records_sha256": payload["threshold_records_sha256"],
         "artifact_schema": payload["artifact_schema"],
         "artifact_version": payload["artifact_version"],
+        "commissioning_only": bool(payload.get("commissioning_only", False)),
+        "production_release_allowed": bool(payload.get("production_release_allowed", True)),
+        "source_artifacts": source_artifacts,
     }
     return threshold_by_group, metadata
 
@@ -583,6 +617,7 @@ def _publish_generation(
     *,
     strict_zs32: bool,
     threshold_metadata: dict[str, Any] | None,
+    policy_metadata: dict[str, Any],
 ) -> None:
     """Publish CSV, summary, and every audit through one sibling directory rename."""
     args.output_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -612,7 +647,12 @@ def _publish_generation(
                     inspection_complete=completion.get(part_id, False),
                 )
                 audit["threshold_artifact"] = threshold_metadata
+                audit["fusion_policy"] = policy_metadata
                 write_part_audit(audit, _audit_output_path(staging / "audit", part_id))
+        (staging / "fusion_policy.json").write_text(
+            json.dumps(policy_metadata, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
         staging.replace(args.output_dir)
     finally:
         if staging.exists():
@@ -623,6 +663,12 @@ def run_fusion(args: argparse.Namespace) -> list[fusion.FusedDecision]:
     """Run CSV-based fusion and write branch/fused reports."""
     profile_path = _fusion_config_path(args)
     config = fusion.load_fusion_config(profile_path)
+    policy_metadata = {
+        "profile": config.get("profile"),
+        "commissioning_only": bool(config.get("commissioning_only", False)),
+        "production_release_allowed": bool(config.get("production_release_allowed", True)),
+        "required_group_count": len(config.get("expected_versions", [])),
+    }
     strict_zs32 = args.profile in STRICT_PROFILE_PATHS
     _validate_generation_target(args, strict_zs32=strict_zs32)
     warnings: list[str] = []
@@ -705,6 +751,7 @@ def run_fusion(args: argparse.Namespace) -> list[fusion.FusedDecision]:
         warnings,
         strict_zs32=strict_zs32,
         threshold_metadata=threshold_metadata,
+        policy_metadata=policy_metadata,
     )
     if malformed:
         msg = "strict diagnostic generation published: " + "; ".join(malformed)

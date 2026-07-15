@@ -39,7 +39,11 @@ DEFAULT_STATUS_BY_BRANCH = {
     "yolo": "NG_YOLO",
 }
 GATE_BRANCHES = {"quality", "quality_gate", "registration"}
-STRICT_ZS32_PROFILES = {"zs32_six_view_v1", "zs32_right_six_view_v1"}
+STRICT_ZS32_PROFILES = {
+    "zs32_six_view_v1",
+    "zs32_right_six_view_v1",
+    "zs32_right_unified_roi_commissioning_v1",
+}
 BRANCH_FIELDNAMES = [
     "part_id",
     "side",

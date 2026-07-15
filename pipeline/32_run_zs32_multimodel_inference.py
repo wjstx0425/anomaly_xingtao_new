@@ -75,6 +75,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=EIGHT_VIEW_COMMISSIONING_FUSION_PROFILE,
         help="Explicit Stage-18 right-hand fusion contract.",
     )
+    parser.add_argument(
+        "--fusion-config",
+        type=Path,
+        help="Exact bundle-generated Stage-18 fusion profile; overrides the matching named profile path.",
+    )
     parser.add_argument("--gt-label", type=int, choices=(0, 1), help="Optional label for calibration-row export.")
     parser.add_argument("--split", help="Optional physical-part split paired with --gt-label.")
     parser.add_argument("--accelerator", default="auto", help="Anomalib accelerator.")
@@ -352,9 +357,14 @@ def _load_stage18() -> ModuleType:
 def _run_strict_fusion(args: argparse.Namespace, output_dir: Path, template_csv: Path) -> dict[str, Any]:
     """Call Stage 18 in-process so one profile remains authoritative."""
     stage18 = _load_stage18()
+    fusion_config = getattr(args, "fusion_config", None)
+    profile_args = (
+        ["--fusion-config", str(fusion_config)]
+        if fusion_config is not None
+        else ["--profile", args.fusion_profile]
+    )
     values = [
-        "--profile",
-        args.fusion_profile,
+        *profile_args,
         "--threshold-artifact",
         str(args.threshold_artifact),
         "--template-match-csv",

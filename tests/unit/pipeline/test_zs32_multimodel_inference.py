@@ -640,6 +640,44 @@ def test_successful_strict_fusion_summary_retains_inspection_identity(
     }
 
 
+def test_strict_fusion_forwards_exact_published_fusion_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stage32 must pass the bundle-generated profile path unchanged to Stage18."""
+    stage32 = _load_module("pipeline_zs32_runtime_published_profile", "pipeline/32_run_zs32_multimodel_inference.py")
+    parsed_values: list[str] = []
+
+    def parse_args(values: list[str]) -> SimpleNamespace:
+        parsed_values.extend(values)
+        return SimpleNamespace()
+
+    stage18 = SimpleNamespace(
+        build_parser=lambda: SimpleNamespace(parse_args=parse_args),
+        run_fusion=lambda _args: [SimpleNamespace(part_id="part-001", final_status="OK", reason="all clear")],
+    )
+    monkeypatch.setattr(stage32, "_load_stage18", lambda: stage18)
+    fusion_config = tmp_path / "published" / "fusion_profile.json"
+    args = SimpleNamespace(
+        part_id="part-001",
+        capture_session="session-001",
+        group_id="group-001",
+        hand="right",
+        fusion_profile="zs32-right-24-commissioning",
+        fusion_config=fusion_config,
+        threshold_artifact=tmp_path / "thresholds.json",
+    )
+    output = tmp_path / "output"
+    audit = output / "fusion" / "audit" / "part-001.json"
+    audit.parent.mkdir(parents=True)
+    audit.write_text(json.dumps({"inspection_complete": True}), encoding="utf-8")
+
+    stage32._run_strict_fusion(args, output, tmp_path / "template.csv")
+
+    assert parsed_values[:2] == ["--fusion-config", str(fusion_config)]
+    assert "--profile" not in parsed_values
+
+
 def test_right_profile_contains_exactly_thirty_six_versioned_groups() -> None:
     """The right-only deployment contract must not fabricate left-hand groups."""
     path = REPO_ROOT / "config/fusion/zs32_right_six_view.json"
@@ -677,6 +715,22 @@ def test_stage18_resolves_right_only_named_profile() -> None:
     )
 
     assert stage18._fusion_config_path(args) == REPO_ROOT / "config/fusion/zs32_right_six_view.json"
+
+
+def test_stage18_resolves_explicit_eighteen_group_commissioning_profile() -> None:
+    """The reduced profile must be a separately named, visibly non-production contract."""
+    stage18 = _load_module("pipeline_zs32_right_18_profile", "pipeline/18_fuse_inspection_results.py")
+    args = stage18.build_parser().parse_args(
+        ["--profile", "zs32-right-18-commissioning", "--output-dir", "/tmp/zs32-right-18-profile-test"],
+    )
+    path = stage18._fusion_config_path(args)
+    profile = json.loads(path.read_text(encoding="utf-8"))
+
+    assert path == REPO_ROOT / "config/fusion/zs32_right_unified_roi_18_group_commissioning.json"
+    assert profile["commissioning_only"] is True
+    assert profile["production_release_allowed"] is False
+    assert len(profile["expected_versions"]) == 18
+    assert all(len(profile["required_branches_by_view"][view]) == 3 for view in LEGACY_VIEWS)
 
 
 def test_stage18_resolves_explicit_twenty_four_group_commissioning_profile() -> None:

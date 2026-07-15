@@ -18,6 +18,16 @@ if TYPE_CHECKING:
     from capture_data.fusion_engine import BranchPrediction, TriggerEvidence
 
 CANONICAL_VIEWS = ("front", "front_left", "front_right", "back", "back_left", "back_right")
+SUPPORTED_VIEWS = (
+    "front",
+    "front_left",
+    "front_right",
+    "front_secondary",
+    "back",
+    "back_left",
+    "back_right",
+    "back_secondary",
+)
 
 
 def sha256_file(path: Path) -> str:
@@ -123,7 +133,7 @@ def build_part_audit(
     session_id: str | None = None,
     timestamp: str | None = None,
 ) -> dict[str, Any]:
-    """Build a complete six-view machine audit without mutating review state.
+    """Build a complete ZS32 machine audit without mutating review state.
 
     Args:
         part_id (str): Stable identity for the inspected part.
@@ -140,7 +150,10 @@ def build_part_audit(
     Raises:
         ValueError: If a prediction has another part identity or unknown view.
     """
-    views: dict[str, list[dict[str, Any]]] = {view: [] for view in CANONICAL_VIEWS}
+    requested_views = {prediction.view for prediction in predictions}
+    views: dict[str, list[dict[str, Any]]] = {
+        view: [] for view in SUPPORTED_VIEWS if view in CANONICAL_VIEWS or view in requested_views
+    }
     for prediction in predictions:
         if prediction.part_id != part_id:
             msg = f"part_id mismatch: expected {part_id}, found {prediction.part_id}"
