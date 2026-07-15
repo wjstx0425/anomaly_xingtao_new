@@ -17,7 +17,7 @@ from capture_data.select_roi import save_overlay, select_roi
 from rich.progress import track
 from zs32_inspection.domain.views import CANONICAL_VIEWS
 
-VIEWS = CANONICAL_VIEWS
+VIEWS = ("front", "front_left", "front_right", "back", "back_left", "back_right")
 ROI = tuple[int, int, int, int]
 
 
@@ -119,29 +119,56 @@ def transform_yolo_labels(
     return "\n".join(output) + ("\n" if output else "")
 
 
-def load_roi_config(path: Path) -> tuple[int, int, dict[str, ROI], dict[str, Any]]:
-    """Load and validate an eight-view ROI JSON file."""
+def _require_positive_integer(value: object, *, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        msg = f"ROI config {field} must be a positive integer."
+        raise ValueError(msg)
+    return value
+
+
+def load_roi_config(
+    path: Path,
+    *,
+    expected_views: tuple[str, ...] = VIEWS,
+) -> tuple[int, int, dict[str, ROI], dict[str, Any]]:
+    """Load a legacy-six or explicitly selected strict-view ROI JSON file."""
     payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        msg = "ROI config root must be an object."
+        raise ValueError(msg)
     if payload.get("coordinate_system") != "pixel_xyxy_half_open":
         msg = "ROI config coordinate_system must be pixel_xyxy_half_open."
         raise ValueError(msg)
     image_size = payload.get("image_size", {})
-    width, height = int(image_size.get("width", 0)), int(image_size.get("height", 0))
+    if not isinstance(image_size, dict):
+        msg = "ROI config image_size must be an object."
+        raise ValueError(msg)
+    width = _require_positive_integer(image_size.get("width"), field="image_size.width")
+    height = _require_positive_integer(image_size.get("height"), field="image_size.height")
+    if not expected_views or len(set(expected_views)) != len(expected_views):
+        msg = f"Expected views must be a non-empty unique tuple: {expected_views!r}"
+        raise ValueError(msg)
     views = payload.get("views")
     actual_views = set(views) if isinstance(views, dict) else set()
-    if width <= 0 or height <= 0 or actual_views != set(VIEWS):
-        missing = sorted(set(VIEWS) - actual_views)
-        extra = sorted(actual_views - set(VIEWS))
-        msg = f"ROI config must contain exactly the eight views: missing={missing}, extra={extra}"
+    if actual_views != set(expected_views):
+        missing = sorted(set(expected_views) - actual_views)
+        extra = sorted(actual_views - set(expected_views))
+        contract = "the eight views" if expected_views == CANONICAL_VIEWS else "the expected views"
+        msg = f"ROI config must contain exactly {contract}: missing={missing}, extra={extra}"
         raise ValueError(msg)
     assert isinstance(views, dict)
     rois: dict[str, ROI] = {}
-    for view in VIEWS:
-        values = views[view].get("roi", [])
-        if len(values) != 4:
-            msg = f"Invalid ROI for view {view}: {values}"
+    for view in expected_views:
+        view_payload = views[view]
+        values = view_payload.get("roi", []) if isinstance(view_payload, dict) else []
+        if (
+            not isinstance(values, list)
+            or len(values) != 4
+            or any(isinstance(value, bool) or not isinstance(value, int) for value in values)
+        ):
+            msg = f"Invalid ROI for view {view}; expected four non-bool integers: {values!r}"
             raise ValueError(msg)
-        roi = tuple(int(value) for value in values)
+        roi = tuple(values)
         x1, y1, x2, y2 = roi
         invalid_origin = x1 < 0 or y1 < 0
         invalid_extent = x2 <= x1 or y2 <= y1

@@ -408,6 +408,20 @@ def _update_runtime_manifest_after_fusion(output_dir: Path, summary: dict[str, A
         "fusion_output",
     ):
         payload[field] = summary.get(field)
+    payload["reason"] = str(summary.get("reason") or "Stage18 fusion completed.")
+    fusion_output = Path(str(summary.get("fusion_output", ""))).expanduser().resolve()
+    fusion_evidence = fusion_output / "fused_predictions.csv"
+    evidence_is_local = fusion_evidence.is_file() and fusion_evidence.is_relative_to(output_dir.resolve())
+    fusion_branch = {
+        "state": "available" if evidence_is_local else "error",
+        "status": str(summary.get("machine_status") or "ERROR") if evidence_is_local else "ERROR",
+        "score": None,
+        "reason": str(summary.get("reason") or "") if evidence_is_local else "Stage18 fusion evidence is missing",
+    }
+    if evidence_is_local:
+        fusion_branch["evidence_path"] = str(fusion_evidence)
+    for view in CANONICAL_VIEWS:
+        payload["views"][view]["branches"]["fusion"] = dict(fusion_branch)
     payload["missing_required_evidence"] = (
         []
         if summary.get("inspection_complete") is True
@@ -422,6 +436,51 @@ def _update_runtime_manifest_after_fusion(output_dir: Path, summary: dict[str, A
     )
     temporary = path.with_name(f".{path.name}.tmp")
     temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temporary.replace(path)
+
+
+def _merge_template_results_into_runtime_manifest(
+    output_dir: Path,
+    results: tuple[dict[str, Any], ...],
+) -> None:
+    """Replace skipped Template branches with the real eight-view gate evidence."""
+    by_view = {str(result.get("view", "")): result for result in results}
+    if len(results) != len(CANONICAL_VIEWS) or set(by_view) != set(CANONICAL_VIEWS):
+        raise ValueError("template manifest merge requires exactly one result for all eight views")
+    evidence_dir = output_dir / "evidence" / "template"
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / "runtime_manifest.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    all_available = True
+    for view in CANONICAL_VIEWS:
+        result = by_view[view]
+        raw_score = result.get("score")
+        score = (
+            float(raw_score)
+            if not isinstance(raw_score, bool) and isinstance(raw_score, int | float) and math.isfinite(float(raw_score))
+            else None
+        )
+        source = Path(str(result.get("best_template_path", ""))).expanduser()
+        branch: dict[str, Any] = {
+            "state": "error",
+            "status": str(result.get("status") or "ERROR").upper(),
+            "score": score,
+            "reason": str(result.get("reason") or "Template evidence is incomplete"),
+        }
+        if source.is_file():
+            destination = evidence_dir / f"{view}{source.suffix or '.bin'}"
+            shutil.copy2(source, destination)
+            branch.update(state="available", evidence_path=str(destination.resolve()))
+        else:
+            all_available = False
+        payload["views"][view]["branches"]["template"] = branch
+    if all_available:
+        payload["missing_required_evidence"] = [
+            item for item in payload.get("missing_required_evidence", []) if item != "template_match"
+        ]
+    payload["template_results"] = list(results)
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
     temporary.replace(path)
 
 
@@ -525,6 +584,7 @@ def main() -> None:
             output_dir / "template_match.csv",
             profile=config.profile,
         )
+        _merge_template_results_into_runtime_manifest(output_dir, template_results)
 
     summary: dict[str, Any] = {
         "machine_status": result.machine_status,
@@ -532,6 +592,8 @@ def main() -> None:
         "strict_fusion": False,
         "missing_required_evidence": list(result.missing_required_evidence),
         "errors": list(result.errors),
+        "commissioning_only": True,
+        "production_release_allowed": False,
     }
     if args.diagnostic_skip_template:
         _publish_diagnostic_contract(

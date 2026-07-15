@@ -18,9 +18,13 @@ import pytest
 from capture_data.zs32_view_roi_dataset import (
     VIEWS,
     crop_zs32_yolo_dataset,
+    load_roi_config,
     select_view_rois,
     transform_yolo_labels,
 )
+from zs32_inspection.domain.views import CANONICAL_VIEWS
+
+LEGACY_VIEWS = ("front", "front_left", "front_right", "back", "back_left", "back_right")
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -265,3 +269,75 @@ def test_crop_dataset_preserves_split_and_empty_labels(
     assert output_rows[0]["output_image"] == "dataset/output/images/train/defect.png"
     assert [output_rows[2][key] for key in ("roi_x1", "roi_y1", "roi_x2", "roi_y2")] == ["40", "10", "90", "70"]
     assert progress_calls == [("Preflight", 3), ("Cropping", 3)]
+
+
+def test_legacy_six_view_yolo_roi_config_replays_by_default(tmp_path: Path) -> None:
+    path = tmp_path / "legacy-six.json"
+    path.write_text(
+        json.dumps(
+            {
+                "coordinate_system": "pixel_xyxy_half_open",
+                "image_size": {"width": 100, "height": 80},
+                "views": {view: {"roi": [0, 0, 100, 80]} for view in LEGACY_VIEWS},
+            },
+        ),
+        encoding="utf-8",
+    )
+    _, _, rois, _ = load_roi_config(path)
+    assert VIEWS == LEGACY_VIEWS
+    assert tuple(rois) == LEGACY_VIEWS
+
+
+def test_yolo_strict_eight_mode_requires_exact_canonical_set(tmp_path: Path) -> None:
+    path = tmp_path / "strict-eight.json"
+    path.write_text(
+        json.dumps(
+            {
+                "coordinate_system": "pixel_xyxy_half_open",
+                "image_size": {"width": 100, "height": 80},
+                "views": {view: {"roi": [0, 0, 100, 80]} for view in CANONICAL_VIEWS},
+            },
+        ),
+        encoding="utf-8",
+    )
+    _, _, rois, _ = load_roi_config(path, expected_views=CANONICAL_VIEWS)
+    assert tuple(rois) == CANONICAL_VIEWS
+
+
+@pytest.mark.parametrize("bad_size", [True, 100.5, "100"])
+@pytest.mark.parametrize("dimension", ["width", "height"])
+def test_yolo_roi_config_rejects_non_integer_image_size(tmp_path: Path, bad_size: object, dimension: str) -> None:
+    image_size: dict[str, object] = {"width": 100, "height": 80}
+    image_size[dimension] = bad_size
+    path = tmp_path / "bad-size.json"
+    path.write_text(
+        json.dumps(
+            {
+                "coordinate_system": "pixel_xyxy_half_open",
+                "image_size": image_size,
+                "views": {view: {"roi": [0, 0, 100, 80]} for view in LEGACY_VIEWS},
+            },
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="positive integer"):
+        load_roi_config(path)
+
+
+@pytest.mark.parametrize("bad_coordinate", [True, 1.5, "1"])
+def test_yolo_roi_config_rejects_non_integer_coordinate(tmp_path: Path, bad_coordinate: object) -> None:
+    views = {view: {"roi": [0, 0, 100, 80]} for view in LEGACY_VIEWS}
+    views["front"] = {"roi": [bad_coordinate, 0, 100, 80]}
+    path = tmp_path / "bad-coordinate.json"
+    path.write_text(
+        json.dumps(
+            {
+                "coordinate_system": "pixel_xyxy_half_open",
+                "image_size": {"width": 100, "height": 80},
+                "views": views,
+            },
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="four non-bool integers"):
+        load_roi_config(path)

@@ -84,6 +84,8 @@ class RuntimeConfig:
     product: str
     profile: str
     supported_hands: tuple[str, ...]
+    commissioning_only: bool
+    production_release_allowed: bool
     patchcore_roi_config: Path
     yolo_roi_config: Path
     image_width: int
@@ -208,13 +210,23 @@ def load_runtime_config(path: Path) -> RuntimeConfig:
     if supported_hands != ("right",):
         msg = "the checked-in ZS32 weights currently support exactly the right hand"
         raise ValueError(msg)
+    if payload.get("commissioning_only") is not True or payload.get("production_release_allowed") is not False:
+        msg = "runtime config must be commissioning-only and production release must be disabled"
+        raise ValueError(msg)
     patchcore_roi_path = _resolve_path(
         payload.get("patchcore_roi_config"),
         field="patchcore_roi_config",
     )
     yolo_roi_path = _resolve_path(payload.get("yolo_roi_config"), field="yolo_roi_config")
-    pc_width, pc_height, patchcore_rois, _ = load_patchcore_roi_config(patchcore_roi_path, hands=("right",))
-    yolo_width, yolo_height, yolo_rois, yolo_roi_payload = load_roi_config(yolo_roi_path)
+    pc_width, pc_height, patchcore_rois, _ = load_patchcore_roi_config(
+        patchcore_roi_path,
+        hands=("right",),
+        expected_views=CANONICAL_VIEWS,
+    )
+    yolo_width, yolo_height, yolo_rois, yolo_roi_payload = load_roi_config(
+        yolo_roi_path,
+        expected_views=CANONICAL_VIEWS,
+    )
     configured_yolo_views = yolo_roi_payload.get("views")
     if not isinstance(configured_yolo_views, dict) or set(configured_yolo_views) != set(CANONICAL_VIEWS):
         msg = f"YOLO ROI config must contain exactly the eight views: {CANONICAL_VIEWS}"
@@ -282,6 +294,8 @@ def load_runtime_config(path: Path) -> RuntimeConfig:
         product=_required_text(payload, "product"),
         profile=_required_text(payload, "profile"),
         supported_hands=supported_hands,
+        commissioning_only=True,
+        production_release_allowed=False,
         patchcore_roi_config=patchcore_roi_path,
         yolo_roi_config=yolo_roi_path,
         image_width=pc_width,
@@ -781,8 +795,13 @@ class ZS32ModelRuntime:
         try:
             patchcore_crops: dict[str, Path] = {}
             yolo_crops: dict[str, Path] = {}
+            source_dir = staging / "sources"
+            source_dir.mkdir(parents=True)
             for view in CANONICAL_VIEWS:
                 image = images[view]
+                source = Path(request.images[view]).resolve()
+                source_copy = source_dir / f"{view}{source.suffix or '.png'}"
+                shutil.copy2(source, source_copy)
                 pc_x1, pc_y1, pc_x2, pc_y2 = self.config.patchcore_rois[request.hand][view]
                 yo_x1, yo_y1, yo_x2, yo_y2 = self.config.yolo_rois[view]
                 pc_crop = staging / "crops" / "patchcore" / f"{view}.png"
@@ -795,6 +814,18 @@ class ZS32ModelRuntime:
                     raise OSError(f"failed to write YOLO crop: {yo_crop}")
                 patchcore_crops[view] = pc_crop
                 yolo_crops[view] = yo_crop
+                view_manifest[view] = {
+                    "view": view,
+                    "part_id": request.part_id,
+                    "capture_session": request.capture_session,
+                    "group_id": request.group_id,
+                    "hand": request.hand,
+                    "manifest_identity": f"{request.part_id}:{request.hand}:{view}",
+                    "source_path": str(source_copy.relative_to(staging)),
+                    "source_sha256": sha256_file(source_copy),
+                    "source_shape": list(image.shape[:2]),
+                    "model_supported": True,
+                }
 
             backend_load_error: Exception | None = None
             try:
@@ -857,11 +888,8 @@ class ZS32ModelRuntime:
                         raise ValueError(f"PatchCore mask source is invalid for {view}")
                     final_raw = final_patchcore_dir / "raw_maps" / f"{view}.npy"
                     final_mask = final_patchcore_dir / "masks" / f"{view}.png"
-                    view_manifest[view] = {
-                        "view": view,
-                        "source_path": str(Path(request.images[view]).resolve()),
-                        "model_supported": True,
-                        "patchcore": {
+                    view_manifest[view]["patchcore"] = {
+                            "state": "available",
                             "score": float(evidence.score),
                             "status": "available",
                             "evidence_path": str(final_evidence.resolve()),
@@ -873,7 +901,6 @@ class ZS32ModelRuntime:
                             "roi_xyxy": list(self.config.patchcore_rois[request.hand][view]),
                             "raw_anomaly_map_shape": list(artifacts.raw_anomaly_map_shape),
                             "mask_shape": list(artifacts.mask_shape),
-                        },
                     }
                 except Exception as error:  # noqa: BLE001 - retain other view evidence
                     errors.append(f"anomaly_{view}: {type(error).__name__}: {error}")
@@ -883,18 +910,14 @@ class ZS32ModelRuntime:
                     temp_evidence = temp_evidence.with_suffix(".error.json")
                     final_evidence = final_evidence.with_suffix(".error.json")
                     self._write_error_evidence(temp_evidence, branch=f"anomaly_{view}", view=view, error=error)
-                    view_manifest[view] = {
-                        "view": view,
-                        "source_path": str(Path(request.images[view]).resolve()),
-                        "model_supported": True,
-                        "patchcore": {
+                    view_manifest[view]["patchcore"] = {
+                            "state": "error",
                             "score": diagnostic_score,
                             "status": "error",
                             "reason": error_reason,
                             "evidence_path": str(final_evidence.resolve()),
                             "display_only": True,
                             "roi_xyxy": list(self.config.patchcore_rois[request.hand][view]),
-                        },
                     }
                 row = self._prediction(
                     request,
@@ -938,6 +961,15 @@ class ZS32ModelRuntime:
                         raise ValueError(f"YOLO score must equal max detection confidence for {view}")
                     if evidence.evidence_path.resolve() != temp_evidence.resolve() or not temp_evidence.is_file():
                         raise RuntimeError(f"YOLO backend did not publish the requested evidence for {view}")
+                    view_manifest[view]["yolo"] = {
+                        "state": "available",
+                        "status": "available",
+                        "score": float(evidence.score),
+                        "reason": "",
+                        "evidence_path": str(final_evidence.resolve()),
+                        "roi_xyxy": list(self.config.yolo_rois[view]),
+                        "detections": list(evidence.detections),
+                    }
                 except Exception as error:  # noqa: BLE001 - retain other model evidence
                     errors.append(f"yolo/{view}: {type(error).__name__}: {error}")
                     error_reason = errors[-1]
@@ -945,6 +977,15 @@ class ZS32ModelRuntime:
                     temp_evidence = temp_evidence.with_suffix(".error.json")
                     final_evidence = final_evidence.with_suffix(".error.json")
                     self._write_error_evidence(temp_evidence, branch="yolo", view=view, error=error)
+                    view_manifest[view]["yolo"] = {
+                        "state": "error",
+                        "status": "error",
+                        "score": None,
+                        "reason": error_reason,
+                        "evidence_path": str(final_evidence.resolve()),
+                        "roi_xyxy": list(self.config.yolo_rois[view]),
+                        "detections": [],
+                    }
                 row = self._prediction(
                     request,
                     view=view,
@@ -1001,9 +1042,23 @@ class ZS32ModelRuntime:
             ]
             if errors:
                 missing.append("complete_model_evidence")
+            skipped_branch = {
+                "state": "skipped",
+                "status": "SKIPPED",
+                "score": None,
+                "reason": "branch was not executed by the model-only runtime",
+            }
+            for view in CANONICAL_VIEWS:
+                view_manifest[view]["branches"] = {
+                    "template": dict(skipped_branch),
+                    "patchcore": dict(view_manifest[view]["patchcore"]),
+                    "yolo": dict(view_manifest[view]["yolo"]),
+                    "fusion": dict(skipped_branch),
+                }
             manifest = {
                 "schema_version": "1.0",
                 "product": self.config.product,
+                "manifest_identity": "ZS32/right",
                 "profile": self.config.profile,
                 "part_id": request.part_id,
                 "capture_session": request.capture_session,
@@ -1011,6 +1066,8 @@ class ZS32ModelRuntime:
                 "hand": request.hand,
                 "machine_status": "REVIEW",
                 "inspection_complete": False,
+                "commissioning_only": self.config.commissioning_only,
+                "production_release_allowed": self.config.production_release_allowed,
                 "source_images": {view: str(Path(request.images[view]).resolve()) for view in CANONICAL_VIEWS},
                 "views": view_manifest,
                 "runtime_config": str(self.config.path),
@@ -1024,6 +1081,7 @@ class ZS32ModelRuntime:
                 "errors": errors,
                 "missing_required_evidence": missing,
                 "note": "Continuous evidence only; OK is forbidden until strict Stage 18 fusion succeeds.",
+                "reason": "Strict Template and Fusion evidence have not both completed.",
             }
             (staging / "runtime_manifest.json").write_text(
                 json.dumps(manifest, indent=2, sort_keys=True, default=str) + "\n",
@@ -1034,6 +1092,8 @@ class ZS32ModelRuntime:
                     {
                         "machine_status": "REVIEW",
                         "inspection_complete": False,
+                        "commissioning_only": self.config.commissioning_only,
+                        "production_release_allowed": self.config.production_release_allowed,
                         "errors": errors,
                         "missing_required_evidence": missing,
                     },

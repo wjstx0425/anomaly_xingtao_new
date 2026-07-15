@@ -25,6 +25,9 @@ from capture_data.zs32_patchcore_roi_dataset import (
     discover_patchcore_images,
     load_patchcore_roi_config,
 )
+from zs32_inspection.domain.views import CANONICAL_VIEWS
+
+LEGACY_VIEWS = ("front", "front_left", "front_right", "back", "back_left", "back_right")
 
 
 def _load_stage30() -> ModuleType:
@@ -1041,3 +1044,36 @@ def test_stage30_select_and_convert_delegate_and_print_results(
     assert calls[0][0] == "select"
     assert calls[1][0] == "convert"
     assert calls[1][1]["overwrite"] is True
+
+
+def test_legacy_six_view_roi_config_replays_by_default(tmp_path: Path) -> None:
+    payload = {
+        "schema_version": 1,
+        "coordinate_system": "pixel_xyxy_half_open",
+        "image_size": {"width": 100, "height": 80},
+        "hands": {
+            hand: {"views": {view: {"roi": [0, 0, 100, 80]} for view in LEGACY_VIEWS}} for hand in HANDS
+        },
+    }
+    path = tmp_path / "legacy-six.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    _, _, rois, _ = load_patchcore_roi_config(path)
+
+    assert VIEWS == LEGACY_VIEWS
+    assert all(tuple(rois[hand]) == LEGACY_VIEWS for hand in HANDS)
+
+
+def test_patchcore_strict_eight_mode_requires_exact_canonical_set(tmp_path: Path) -> None:
+    payload = {
+        "schema_version": 1,
+        "coordinate_system": "pixel_xyxy_half_open",
+        "image_size": {"width": 100, "height": 80},
+        "views": {view: {"roi": [0, 0, 100, 80]} for view in CANONICAL_VIEWS},
+    }
+    path = tmp_path / "strict-eight.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    _, _, rois, _ = load_patchcore_roi_config(path, hands=("right",), expected_views=CANONICAL_VIEWS)
+
+    assert tuple(rois["right"]) == CANONICAL_VIEWS

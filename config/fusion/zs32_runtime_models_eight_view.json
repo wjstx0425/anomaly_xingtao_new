@@ -5,6 +5,8 @@
   "supported_hands": [
     "right"
   ],
+  "commissioning_only": true,
+  "production_release_allowed": false,
   "patchcore_roi_config": "/home/yunjing/anomalib/dataset/zs32_eight_view_roi_config.json",
   "yolo_roi_config": "/home/yunjing/anomalib/dataset/zs32_eight_view_roi_config.json",
   "versions": {

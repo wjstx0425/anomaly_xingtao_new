@@ -20,7 +20,7 @@ from rich.progress import track
 from zs32_inspection.domain.views import CANONICAL_VIEWS
 
 HANDS = ("right", "left")
-VIEWS = CANONICAL_VIEWS
+VIEWS = ("front", "front_left", "front_right", "back", "back_left", "back_right")
 IMAGE_EXTENSIONS = (".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff")
 ROI = tuple[int, int, int, int]
 
@@ -91,15 +91,17 @@ def load_patchcore_roi_config(
     path: Path,
     *,
     hands: tuple[str, ...] = HANDS,
+    expected_views: tuple[str, ...] = VIEWS,
 ) -> tuple[int, int, dict[str, dict[str, ROI]], dict[str, object]]:
-    """Load and strictly validate the selected-hand, eight-view ROI configuration.
+    """Load and strictly validate the selected-hand ROI configuration.
 
     Args:
         path (Path): Path to the ROI JSON configuration.
 
     Returns:
         tuple[int, int, dict[str, dict[str, ROI]], dict[str, object]]: Configured width, height, ROI mapping, and
-            unmodified decoded JSON payload.
+            unmodified decoded JSON payload. ``expected_views`` keeps legacy callers on six views while strict
+            eight-view runtimes opt in with :data:`CANONICAL_VIEWS`.
 
     Raises:
         ValueError: If the JSON payload does not match the required schema or contains an invalid ROI.
@@ -116,6 +118,9 @@ def load_patchcore_roi_config(
     width = _require_positive_integer(image_size.get("width"), field="image_size.width")
     height = _require_positive_integer(image_size.get("height"), field="image_size.height")
     hands = _normalize_hands(hands)
+    if not expected_views or len(set(expected_views)) != len(expected_views):
+        msg = f"Expected views must be a non-empty unique tuple: {expected_views!r}"
+        raise ValueError(msg)
     if "views" in payload:
         if hands != ("right",):
             msg = "A top-level views ROI config can only be used with hands=('right',)."
@@ -131,11 +136,11 @@ def load_patchcore_roi_config(
     for hand in hands:
         hand_payload = _require_mapping(configured_hands[hand], field=f"hands.{hand}")
         configured_views = _require_mapping(hand_payload.get("views"), field=f"hands.{hand}.views")
-        if set(configured_views) != set(VIEWS):
-            msg = f"ROI config views for {hand} must be exactly {VIEWS}."
+        if set(configured_views) != set(expected_views):
+            msg = f"ROI config views for {hand} must be exactly {expected_views}."
             raise ValueError(msg)
         hand_rois: dict[str, ROI] = {}
-        for view in VIEWS:
+        for view in expected_views:
             view_payload = _require_mapping(configured_views[view], field=f"hands.{hand}.views.{view}")
             values = view_payload.get("roi")
             valid_values = (

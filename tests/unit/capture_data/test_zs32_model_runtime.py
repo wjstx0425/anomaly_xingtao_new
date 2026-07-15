@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import importlib.util
 import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -30,6 +32,8 @@ from capture_data.zs32_patchcore_roi_dataset import VIEWS as PATCHCORE_ROI_VIEWS
 from capture_data.zs32_patchcore_roi_dataset import load_patchcore_roi_config
 from capture_data.zs32_view_roi_dataset import VIEWS as YOLO_ROI_VIEWS
 from capture_data.zs32_view_roi_dataset import load_roi_config
+from zs32_inspection.dashboard.contracts import BranchState
+from zs32_inspection.dashboard.parser import load_inspection_result
 from zs32_inspection.domain.views import CANONICAL_VIEWS
 
 VIEWS = (
@@ -46,6 +50,16 @@ VIEWS = (
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _load_stage32(name: str) -> object:
+    path = Path(__file__).resolve().parents[3] / "pipeline/32_run_zs32_multimodel_inference.py"
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def _write_fixture(tmp_path: Path) -> tuple[Path, dict[str, Path]]:
@@ -84,6 +98,8 @@ def _write_fixture(tmp_path: Path) -> tuple[Path, dict[str, Path]]:
         "product": "ZS32",
         "profile": "zs32_right_eight_view_v1",
         "supported_hands": ["right"],
+        "commissioning_only": True,
+        "production_release_allowed": False,
         "patchcore_roi_config": str(patchcore_roi_path),
         "yolo_roi_config": str(yolo_roi_path),
         "versions": {
@@ -233,14 +249,18 @@ def test_roi_loader_apis_accept_exact_right_eight_view_configs(tmp_path: Path) -
     _, _, patchcore_rois, _ = load_patchcore_roi_config(
         Path(runtime_payload["patchcore_roi_config"]),
         hands=("right",),
+        expected_views=CANONICAL_VIEWS,
     )
-    _, _, yolo_rois, _ = load_roi_config(Path(runtime_payload["yolo_roi_config"]))
+    _, _, yolo_rois, _ = load_roi_config(
+        Path(runtime_payload["yolo_roi_config"]),
+        expected_views=CANONICAL_VIEWS,
+    )
 
     assert tuple(patchcore_rois) == ("right",)
     assert tuple(patchcore_rois["right"]) == VIEWS
     assert tuple(yolo_rois) == VIEWS
-    assert PATCHCORE_ROI_VIEWS is CANONICAL_VIEWS
-    assert YOLO_ROI_VIEWS is CANONICAL_VIEWS
+    assert PATCHCORE_ROI_VIEWS == ("front", "front_left", "front_right", "back", "back_left", "back_right")
+    assert YOLO_ROI_VIEWS == PATCHCORE_ROI_VIEWS
 
 
 def test_load_runtime_config_requires_exactly_eight_patchcore_models(tmp_path: Path) -> None:
@@ -457,6 +477,141 @@ def test_runtime_writes_continuous_evidence_and_never_returns_ok_without_thresho
     assert manifest["views"]["front"]["patchcore"]["mask_shape"] == [5, 6]
     assert Path(manifest["views"]["front"]["patchcore"]["raw_anomaly_map_path"]).is_file()
     assert Path(manifest["views"]["front"]["patchcore"]["mask_path"]).is_file()
+
+
+def test_runtime_manifest_is_directly_parseable_with_truthful_four_branch_records(tmp_path: Path) -> None:
+    """Standalone model inference must publish a strict dashboard generation without fake scores."""
+    config_path, _ = _write_fixture(tmp_path)
+    images = _write_images(tmp_path)
+    output_dir = tmp_path / "strict-runtime"
+    runtime = ZS32ModelRuntime(
+        load_runtime_config(config_path),
+        patchcore_backend=_PatchcoreBackend(),
+        yolo_backend=_YoloBackend(),
+    )
+
+    runtime.run(InspectionRequest("part-001", "session-001", "group-001", "right", images), output_dir)
+
+    result = load_inspection_result(output_dir)
+    manifest = json.loads((output_dir / "runtime_manifest.json").read_text(encoding="utf-8"))
+    summary = json.loads((output_dir / "runtime_summary.json").read_text(encoding="utf-8"))
+    assert manifest["commissioning_only"] is True
+    assert manifest["production_release_allowed"] is False
+    assert summary["commissioning_only"] is True
+    assert summary["production_release_allowed"] is False
+    for view in result.views:
+        assert set(view.branches) == {"template", "patchcore", "yolo", "fusion"}
+        assert view.branches["patchcore"].state is BranchState.AVAILABLE
+        assert view.branches["yolo"].state is BranchState.AVAILABLE
+        assert view.branches["template"].state is BranchState.SKIPPED
+        assert view.branches["template"].score is None
+        assert view.branches["fusion"].state is BranchState.SKIPPED
+        assert view.branches["fusion"].score is None
+
+
+def test_stage32_infer_merges_real_template_evidence_into_parseable_runtime_manifest(tmp_path: Path) -> None:
+    """Ordinary template-first infer must replace only the executed Template branch."""
+    config_path, _ = _write_fixture(tmp_path)
+    images = _write_images(tmp_path)
+    output_dir = tmp_path / "strict-infer"
+    runtime = ZS32ModelRuntime(
+        load_runtime_config(config_path),
+        patchcore_backend=_PatchcoreBackend(),
+        yolo_backend=_YoloBackend(),
+    )
+    runtime.run(InspectionRequest("part-001", "session-001", "group-001", "right", images), output_dir)
+    template_source = tmp_path / "template.png"
+    assert cv2.imwrite(str(template_source), np.zeros((5, 6, 3), dtype=np.uint8))
+    results = tuple(
+        {
+            "view": view,
+            "status": "PASS",
+            "score": 0.9,
+            "reason": "template matched",
+            "best_template_path": str(template_source),
+        }
+        for view in VIEWS
+    )
+    stage32 = cast("object", _load_stage32("stage32_template_manifest_integration"))
+
+    stage32._merge_template_results_into_runtime_manifest(output_dir, results)  # type: ignore[attr-defined]
+
+    parsed = load_inspection_result(output_dir)
+    for view in parsed.views:
+        assert view.branches["template"].state is BranchState.AVAILABLE
+        assert view.branches["template"].score == pytest.approx(0.9)
+        assert view.branches["fusion"].state is BranchState.SKIPPED
+        assert view.branches["fusion"].score is None
+
+
+def test_stage32_fuse_replaces_skipped_fusion_with_real_parseable_evidence(tmp_path: Path) -> None:
+    """Successful Stage18 fusion must publish an executed per-view branch without inventing a score."""
+    config_path, _ = _write_fixture(tmp_path)
+    images = _write_images(tmp_path)
+    output_dir = tmp_path / "strict-fuse"
+    runtime = ZS32ModelRuntime(
+        load_runtime_config(config_path),
+        patchcore_backend=_PatchcoreBackend(),
+        yolo_backend=_YoloBackend(),
+    )
+    runtime.run(InspectionRequest("part-001", "session-001", "group-001", "right", images), output_dir)
+    fusion_dir = output_dir / "fusion"
+    fusion_dir.mkdir()
+    fusion_csv = fusion_dir / "fused_predictions.csv"
+    fusion_csv.write_text("part_id,final_status\npart-001,OK\n", encoding="utf-8")
+    stage32 = cast("object", _load_stage32("stage32_fusion_manifest_integration"))
+
+    stage32._update_runtime_manifest_after_fusion(  # type: ignore[attr-defined]
+        output_dir,
+        {
+            "machine_status": "OK",
+            "inspection_complete": True,
+            "strict_fusion": True,
+            "fusion_profile": "zs32-right-24-commissioning",
+            "commissioning_only": True,
+            "production_release_allowed": False,
+            "fusion_output": str(fusion_dir),
+            "reason": "all strict branches passed",
+        },
+    )
+
+    parsed = load_inspection_result(output_dir)
+    assert parsed.machine_status == "OK"
+    for view in parsed.views:
+        assert view.branches["fusion"].state is BranchState.AVAILABLE
+        assert view.branches["fusion"].status == "OK"
+        assert view.branches["fusion"].score is None
+        assert view.branches["fusion"].evidence_path == fusion_csv.resolve()
+
+
+@pytest.mark.parametrize(
+    ("commissioning_only", "production_release_allowed"),
+    [(False, False), (True, True), (None, False), (True, None)],
+)
+def test_runtime_config_requires_fixed_commissioning_policy(
+    tmp_path: Path,
+    commissioning_only: object,
+    production_release_allowed: object,
+) -> None:
+    config_path, _ = _write_fixture(tmp_path)
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    payload["commissioning_only"] = commissioning_only
+    payload["production_release_allowed"] = production_release_allowed
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="commissioning-only"):
+        load_runtime_config(config_path)
+
+
+def test_checked_in_runtime_config_declares_non_production_policy() -> None:
+    payload = json.loads(
+        (Path(__file__).resolve().parents[3] / "config/fusion/zs32_runtime_models_eight_view.json").read_text(
+            encoding="utf-8",
+        ),
+    )
+
+    assert payload["commissioning_only"] is True
+    assert payload["production_release_allowed"] is False
 
 
 def test_runtime_rejects_left_and_existing_output_before_backend_calls(tmp_path: Path) -> None:

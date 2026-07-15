@@ -591,8 +591,15 @@ def test_strict_fusion_updates_runtime_manifest_without_losing_provenance(tmp_pa
         "inspection_complete": False,
         "missing_required_evidence": ["strict_fusion_not_run", "quality_gate"],
         "note": "continuous evidence only",
+        "views": {
+            view: {"branches": {"fusion": {"state": "skipped", "status": "SKIPPED", "score": None}}}
+            for view in VIEWS
+        },
     }
     (output / "runtime_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    fusion = output / "fusion"
+    fusion.mkdir()
+    (fusion / "fused_predictions.csv").write_text("part_id,final_status\npart-001,OK\n", encoding="utf-8")
     summary = {
         "machine_status": "OK",
         "inspection_complete": True,
