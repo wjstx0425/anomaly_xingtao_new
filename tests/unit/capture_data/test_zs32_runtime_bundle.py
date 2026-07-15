@@ -573,6 +573,48 @@ def test_finalize_rejects_asset_set_hash_not_bound_to_manifest_asset(source_spec
         finalize_runtime_bundle(publication.assets_manifest, threshold, tmp_path / "bundle")
 
 
+@pytest.mark.parametrize("location", ["manifest", "asset_set"])
+def test_finalize_rejects_unknown_manifest_schema(
+    source_spec: Path,
+    tmp_path: Path,
+    location: str,
+) -> None:
+    publication = publish_runtime_assets(source_spec, tmp_path / "assets")
+    threshold = _threshold_artifact(publication.assets_manifest, tmp_path / "thresholds.json")
+    manifest = json.loads(publication.assets_manifest.read_text(encoding="utf-8"))
+    if location == "manifest":
+        manifest["schema_version"] = 999
+    else:
+        manifest["asset_set"]["schema_version"] = 999
+        manifest["asset_set_sha256"] = _canonical_sha256(manifest["asset_set"])
+    publication.assets_manifest.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="schema_version|schema version"):
+        finalize_runtime_bundle(publication.assets_manifest, threshold, tmp_path / "bundle")
+
+
+@pytest.mark.parametrize("mutation", ["reversed", "missing", "extra"])
+def test_finalize_rejects_noncanonical_asset_set_view_order(
+    source_spec: Path,
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    publication = publish_runtime_assets(source_spec, tmp_path / "assets")
+    threshold = _threshold_artifact(publication.assets_manifest, tmp_path / "thresholds.json")
+    manifest = json.loads(publication.assets_manifest.read_text(encoding="utf-8"))
+    views = list(VIEW_ORDER)
+    if mutation == "reversed":
+        views.reverse()
+    elif mutation == "missing":
+        views.pop()
+    else:
+        views.append("other")
+    manifest["asset_set"]["view_order"] = views
+    manifest["asset_set_sha256"] = _canonical_sha256(manifest["asset_set"])
+    publication.assets_manifest.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="view_order|canonical eight"):
+        finalize_runtime_bundle(publication.assets_manifest, threshold, tmp_path / "bundle")
+
+
 def test_finalize_rejects_threshold_not_bound_to_exact_template_hash(source_spec: Path, tmp_path: Path) -> None:
     publication = publish_runtime_assets(source_spec, tmp_path / "assets")
     threshold = _threshold_artifact(publication.assets_manifest, tmp_path / "thresholds.json")
@@ -662,6 +704,44 @@ def test_bundle_rejects_bundle_id_different_from_assets_manifest(source_spec: Pa
     payload["bundle_sha256"] = _canonical_sha256(payload)
     bundle_path.write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(ValueError, match="bundle_id"):
+        load_runtime_bundle(bundle_path)
+
+
+def test_load_bundle_rejects_unknown_schema_with_recomputed_hash(source_spec: Path, tmp_path: Path) -> None:
+    publication = publish_runtime_assets(source_spec, tmp_path / "assets")
+    threshold = _threshold_artifact(publication.assets_manifest, tmp_path / "thresholds.json")
+    bundle_path = finalize_runtime_bundle(publication.assets_manifest, threshold, tmp_path / "bundle")
+    payload = json.loads(bundle_path.read_text(encoding="utf-8"))
+    payload["schema_version"] = 999
+    payload.pop("bundle_sha256")
+    payload["bundle_sha256"] = _canonical_sha256(payload)
+    bundle_path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="schema_version|schema version"):
+        load_runtime_bundle(bundle_path)
+
+
+@pytest.mark.parametrize("mutation", ["reversed", "missing", "extra"])
+def test_load_bundle_rejects_noncanonical_view_order(
+    source_spec: Path,
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    publication = publish_runtime_assets(source_spec, tmp_path / "assets")
+    threshold = _threshold_artifact(publication.assets_manifest, tmp_path / "thresholds.json")
+    bundle_path = finalize_runtime_bundle(publication.assets_manifest, threshold, tmp_path / "bundle")
+    payload = json.loads(bundle_path.read_text(encoding="utf-8"))
+    views = list(VIEW_ORDER)
+    if mutation == "reversed":
+        views.reverse()
+    elif mutation == "missing":
+        views.pop()
+    else:
+        views.append("other")
+    payload["view_order"] = views
+    payload.pop("bundle_sha256")
+    payload["bundle_sha256"] = _canonical_sha256(payload)
+    bundle_path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="view_order|canonical eight"):
         load_runtime_bundle(bundle_path)
 
 

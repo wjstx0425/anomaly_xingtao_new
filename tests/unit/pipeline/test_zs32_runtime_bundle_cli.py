@@ -37,12 +37,25 @@ def test_finalize_hash_mismatch_exits_nonzero(tmp_path: Path) -> None:
     manifest = tmp_path / "assets_manifest.json"
     manifest.write_text(
         json.dumps(
-            {
-                "product": "ZS32",
+                {
+                    "schema_version": 1,
+                    "product": "ZS32",
                 "hand": "right",
                 "commissioning_only": True,
                 "production_release_allowed": False,
-                "asset_set": {},
+                    "asset_set": {
+                        "schema_version": 1,
+                        "view_order": [
+                            "front",
+                            "front_left",
+                            "front_right",
+                            "front_secondary",
+                            "back",
+                            "back_left",
+                            "back_right",
+                            "back_secondary",
+                        ],
+                    },
                 "asset_set_sha256": "0" * 64,
             },
         ),

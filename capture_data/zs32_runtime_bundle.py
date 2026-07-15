@@ -29,6 +29,7 @@ from zs32_inspection.domain.views import VIEW_ORDER
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SHA256_LENGTH = 64
+SCHEMA_VERSION = 1
 AT_FDCWD = -100
 RENAME_NOREPLACE = 1
 
@@ -484,6 +485,8 @@ def publish_runtime_assets(source_path: Path, output_dir: Path) -> RuntimeAssets
 def _validate_assets_manifest(path: Path) -> dict[str, Any]:
     path = path.expanduser().resolve()
     manifest = _read_object(path, "assets manifest")
+    if manifest.get("schema_version") != SCHEMA_VERSION:
+        raise ValueError(f"assets manifest schema_version must be {SCHEMA_VERSION}")
     if manifest.get("product") != "ZS32" or manifest.get("hand") != "right":
         raise ValueError("assets manifest must use exact ZS32/right identity")
     if manifest.get("commissioning_only") is not True or manifest.get("production_release_allowed") is not False:
@@ -491,6 +494,10 @@ def _validate_assets_manifest(path: Path) -> dict[str, Any]:
     asset_set = manifest.get("asset_set")
     if not isinstance(asset_set, dict) or _canonical_sha256(asset_set) != manifest.get("asset_set_sha256"):
         raise ValueError("assets manifest asset-set canonical SHA-256 mismatch")
+    if asset_set.get("schema_version") != SCHEMA_VERSION:
+        raise ValueError(f"asset set schema_version must be {SCHEMA_VERSION}")
+    if tuple(asset_set.get("view_order", ())) != VIEW_ORDER:
+        raise ValueError(f"asset set view_order must be exactly the canonical eight views: {VIEW_ORDER}")
     for field in ("bundle_id", "product", "hand", "commissioning_only", "production_release_allowed"):
         if asset_set.get(field) != manifest.get(field):
             raise ValueError(f"assets manifest asset-set identity differs for {field}")
@@ -505,6 +512,10 @@ def _validate_assets_manifest(path: Path) -> dict[str, Any]:
         if field == "runtime_assets":
             load_runtime_config(bound_path)
             runtime_payload = _read_object(bound_path, "runtime assets")
+            if runtime_payload.get("schema_version") != SCHEMA_VERSION:
+                raise ValueError(f"runtime assets schema_version must be {SCHEMA_VERSION}")
+            if tuple(runtime_payload.get("view_order", ())) != VIEW_ORDER:
+                raise ValueError(f"runtime assets view_order must be exactly the canonical eight views: {VIEW_ORDER}")
         else:
             fusion_payload = _read_object(bound_path, "fusion profile")
     profile_template_path, profile_template_sha256 = _validate_binding(
@@ -684,10 +695,11 @@ def finalize_runtime_bundle(assets_manifest: Path, threshold_artifact: Path, out
     threshold = _validate_threshold_binding(threshold_artifact, assets)
     output_dir = output_dir.expanduser().resolve()
     payload = {
-        "schema_version": 1,
+        "schema_version": SCHEMA_VERSION,
         "bundle_id": assets["bundle_id"],
         "product": "ZS32",
         "hand": "right",
+        "view_order": list(VIEW_ORDER),
         "commissioning_only": True,
         "production_release_allowed": False,
         "asset_set_sha256": assets["asset_set_sha256"],
@@ -720,6 +732,10 @@ def load_runtime_bundle(path: Path) -> RuntimeBundle:
     claimed = unsigned.pop("bundle_sha256", None)
     if not _valid_sha256(claimed) or claimed != _canonical_sha256(unsigned):
         raise ValueError("runtime bundle canonical SHA-256 mismatch")
+    if payload.get("schema_version") != SCHEMA_VERSION:
+        raise ValueError(f"runtime bundle schema_version must be {SCHEMA_VERSION}")
+    if tuple(payload.get("view_order", ())) != VIEW_ORDER:
+        raise ValueError(f"runtime bundle view_order must be exactly the canonical eight views: {VIEW_ORDER}")
     if payload.get("product") != "ZS32" or payload.get("hand") != "right":
         raise ValueError("runtime bundle must use exact ZS32/right identity")
     if payload.get("commissioning_only") is not True or payload.get("production_release_allowed") is not False:
