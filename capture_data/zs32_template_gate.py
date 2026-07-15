@@ -40,7 +40,9 @@ CALIBRATION_FIELDNAMES = (
     "gt_label",
     "split",
     "model_version",
+    "threshold_version",
     "roi_version",
+    "template_version",
 )
 _GROUP_PATTERN = re.compile(r"(?:^|[_/\\-])(group\d+)(?:[_/\\.-]|$)", re.IGNORECASE)
 
@@ -405,7 +407,7 @@ def train_template_gate(
         "groups": {},
     }
     calibration_rows: list[dict[str, str | float | int]] = []
-    try:
+    try:  # noqa: PLW0717
         for hand in hands:
             for view in ZS32_VIEWS:
                 key = (hand, view)
@@ -490,7 +492,9 @@ def train_template_gate(
                         "gt_label": gt_label,
                         "split": split,
                         "model_version": versions["model"],
+                        "threshold_version": versions["threshold"],
                         "roi_version": versions["roi"],
+                        "template_version": versions["template"],
                     }
                     for row, risk, gt_label, split in scored_rows
                 )
@@ -506,7 +510,7 @@ def train_template_gate(
                 }
         model_path = staging / MODEL_FILENAME
         model_path.write_text(
-            json.dumps(model, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False) + "\n",
+            json.dumps(model, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
             encoding="utf-8",
         )
         (staging / MODEL_SHA256_FILENAME).write_text(
@@ -521,10 +525,8 @@ def train_template_gate(
                     calibration_rows,
                     key=lambda row: (
                         str(row["hand"]),
-                        str(row["view"]),
-                        str(row["split"]),
-                        int(row["gt_label"]),
                         str(row["part_id"]),
+                        ZS32_VIEWS.index(str(row["view"])),
                     ),
                 ),
             )
@@ -561,19 +563,6 @@ def load_model(model_dir: Path) -> dict[str, Any]:
     groups = model.get("groups")
     if not isinstance(preprocessing, dict) or not isinstance(groups, dict):
         raise _error("MODEL_INVALID", "model preprocessing/groups must be objects")
-    required_hands = model.get("required_hands")
-    if (
-        not isinstance(required_hands, list)
-        or not required_hands
-        or any(not isinstance(hand, str) or not hand.strip() for hand in required_hands)
-        or len(required_hands) != len(set(required_hands))
-    ):
-        raise _error("MODEL_INVALID", "model required_hands must be a non-empty unique string list")
-    if model.get("required_views") != list(VIEW_ORDER):
-        raise _error("MODEL_INVALID", "model must declare the exact canonical eight-view order")
-    expected_groups = {f"{hand}/{view}" for hand in required_hands for view in VIEW_ORDER}
-    if set(groups) != expected_groups:
-        raise _error("MODEL_INVALID", "model must contain the exact hand by eight-view group contract")
     return model
 
 

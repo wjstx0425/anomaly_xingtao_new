@@ -9,6 +9,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,7 +24,7 @@ from zs32_inspection.domain.views import VIEW_ORDER
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping, Sequence
 
-    from capture_data.zs32_model_runtime import ZS32ModelRuntime
+    from capture_data.zs32_model_runtime import RuntimeConfig, ZS32ModelRuntime
 
 ZS32_VIEWS = VIEW_ORDER
 CALIBRATION_FIELDS = (
@@ -99,12 +100,19 @@ def _resolve(root: Path, value: str) -> Path:
 def _template_split_contract(path: Path, hand: str) -> dict[str, tuple[int, str]]:
     """Load the frozen physical-part labels and splits from template scoring."""
     records: dict[str, tuple[int, str]] = {}
-    row_count_by_part: dict[str, int] = {}
+    views_by_part: dict[str, list[str]] = {}
+    versions_seen: set[tuple[str, str, str, str]] = set()
     for row_number, row in enumerate(_read_csv(path), start=2):
         if _required(row, "hand", source=path, row_number=row_number).lower() != hand:
             continue
         if _required(row, "branch", source=path, row_number=row_number) != "template_match":
             raise ValueError(f"{path} row {row_number} must use branch=template_match")
+        versions_seen.add(
+            tuple(
+                _required(row, field, source=path, row_number=row_number)
+                for field in ("model_version", "threshold_version", "roi_version", "template_version")
+            ),
+        )
         part_id = _required(row, "part_id", source=path, row_number=row_number)
         label_text = _required(row, "gt_label", source=path, row_number=row_number)
         if label_text not in {"0", "1"}:
@@ -119,13 +127,15 @@ def _template_split_contract(path: Path, hand: str) -> dict[str, tuple[int, str]
         view = _required(row, "view", source=path, row_number=row_number)
         if view not in ZS32_VIEWS:
             raise ValueError(f"{path} row {row_number} has unsupported view: {view}")
-        row_count_by_part[part_id] = row_count_by_part.get(part_id, 0) + 1
+        views_by_part.setdefault(part_id, []).append(view)
     if not records:
         raise ValueError(f"no {hand!r} template calibration rows found: {path}")
-    for part_id, row_count in row_count_by_part.items():
-        if row_count != len(ZS32_VIEWS):
+    if len(versions_seen) != 1:
+        raise ValueError(f"Template artifact versions must be complete and identical in every row: {path}")
+    for part_id, views in views_by_part.items():
+        if tuple(views) != ZS32_VIEWS:
             raise ValueError(
-                f"template split part {part_id!r} must contain exactly {len(ZS32_VIEWS)} score rows",
+                f"template split part {part_id!r} must contain exact canonical views in canonical view order",
             )
     return records
 
@@ -460,11 +470,12 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _completed_runtime_case(  # noqa: PLR0911
+def _completed_runtime_case(  # noqa: C901, PLR0911
     case: OfflineCalibrationCase,
     case_dir: Path,
     *,
     runtime_config_sha256: str,
+    runtime_config: RuntimeConfig | None = None,
 ) -> bool:
     manifest_path = case_dir / "runtime_manifest.json"
     model_rows_path = case_dir / "calibration_rows.csv"
@@ -482,10 +493,39 @@ def _completed_runtime_case(  # noqa: PLR0911
     }
     if any(manifest.get(key) != value for key, value in expected_manifest.items()):
         return False
+    if runtime_config is not None:
+        if (
+            manifest.get("runtime_config") != str(runtime_config.path)
+            or manifest.get("patchcore_roi_config") != str(runtime_config.patchcore_roi_config)
+            or manifest.get("patchcore_roi_sha256") != _sha256_file(runtime_config.patchcore_roi_config)
+            or manifest.get("yolo_roi_config") != str(runtime_config.yolo_roi_config)
+            or manifest.get("yolo_roi_sha256") != _sha256_file(runtime_config.yolo_roi_config)
+        ):
+            return False
+        patchcore_models = manifest.get("patchcore_models")
+        if not isinstance(patchcore_models, dict) or tuple(patchcore_models) != ZS32_VIEWS:
+            return False
+        for view in ZS32_VIEWS:
+            spec = runtime_config.patchcore[view]
+            binding = patchcore_models.get(view, {})
+            if (
+                binding.get("checkpoint") != str(spec.checkpoint)
+                or binding.get("checkpoint_sha256") != spec.checkpoint_sha256
+                or binding.get("model_version") != spec.model_version
+            ):
+                return False
+        yolo_binding = manifest.get("yolo_model", {})
+        if (
+            yolo_binding.get("weights") != str(runtime_config.yolo.weights)
+            or yolo_binding.get("weights_sha256") != runtime_config.yolo.weights_sha256
+            or yolo_binding.get("model_version") != runtime_config.yolo.model_version
+        ):
+            return False
     rows = _read_csv(model_rows_path)
-    expected_keys = {(view, f"anomaly_{view}") for view in ZS32_VIEWS}
-    expected_keys |= {(view, "yolo") for view in ZS32_VIEWS}
-    if len(rows) != len(expected_keys) or {(row.get("view"), row.get("branch")) for row in rows} != expected_keys:
+    expected_keys = tuple((view, f"anomaly_{view}") for view in ZS32_VIEWS) + tuple(
+        (view, "yolo") for view in ZS32_VIEWS
+    )
+    if tuple((row.get("view"), row.get("branch")) for row in rows) != expected_keys:
         return False
     if any(
         row.get("part_id") != case.part_id
@@ -496,20 +536,92 @@ def _completed_runtime_case(  # noqa: PLR0911
     ):
         return False
     source_hashes = {view: _sha256_file(case.images[view]) for view in ZS32_VIEWS}
-    for name in ("patchcore.csv", "yolo.csv"):
+    evidence_by_key: dict[tuple[str, str], dict[str, str]] = {}
+    for name, branches in (
+        ("patchcore.csv", tuple(f"anomaly_{view}" for view in ZS32_VIEWS)),
+        ("yolo.csv", tuple("yolo" for _view in ZS32_VIEWS)),
+    ):
         evidence_path = case_dir / name
         if not evidence_path.is_file():
             return False
         evidence_rows = _read_csv(evidence_path)
-        if len(evidence_rows) != len(ZS32_VIEWS):
+        if tuple(row.get("view") for row in evidence_rows) != ZS32_VIEWS:
             return False
-        if any(
-            row.get("source_path") != str(case.images.get(row.get("view", ""), ""))
-            or row.get("source_hash") != source_hashes.get(row.get("view", ""))
-            for row in evidence_rows
+        for row, branch in zip(evidence_rows, branches, strict=True):
+            view = row.get("view", "")
+            if row.get("branch") != branch:
+                return False
+            try:
+                score = float(row.get("score", ""))
+            except ValueError:
+                return False
+            evidence_file = Path(row.get("evidence_path", "")).expanduser().resolve()
+            try:
+                evidence_file.relative_to(case_dir.resolve())
+            except ValueError:
+                return False
+            if (
+                not math.isfinite(score)
+                or row.get("source_path") != str(case.images.get(view, ""))
+                or row.get("source_hash") != source_hashes.get(view)
+                or not evidence_file.is_file()
+                or row.get("evidence_hash") != _sha256_file(evidence_file)
+            ):
+                return False
+            evidence_by_key[view, branch] = row
+    for row in rows:
+        key = (row["view"], row["branch"])
+        evidence_row = evidence_by_key.get(key)
+        if evidence_row is None:
+            return False
+        try:
+            raw_score = float(row["raw_score"])
+            evidence_score = float(evidence_row["score"])
+        except ValueError:
+            return False
+        if (
+            not math.isfinite(raw_score)
+            or raw_score != evidence_score
+            or row["model_version"] != evidence_row.get("model_version")
+            or row["roi_version"] != evidence_row.get("roi_version")
         ):
             return False
+        if runtime_config is not None:
+            expected_model = (
+                runtime_config.patchcore[row["view"]].model_version
+                if row["branch"].startswith("anomaly_")
+                else runtime_config.yolo.model_version
+            )
+            expected_roi = (
+                runtime_config.versions.patchcore_roi
+                if row["branch"].startswith("anomaly_")
+                else runtime_config.versions.yolo_roi
+            )
+            if row["model_version"] != expected_model or row["roi_version"] != expected_roi:
+                return False
+        manifest_branch = "patchcore" if row["branch"].startswith("anomaly_") else "yolo"
+        manifest_view = manifest.get("views", {}).get(row["view"], {})
+        if manifest_view.get(manifest_branch, {}).get("score") != raw_score:
+            return False
     return True
+
+
+def validate_completed_runtime_cases(
+    cases: Sequence[OfflineCalibrationCase],
+    case_root: Path,
+    runtime_config: RuntimeConfig,
+) -> None:
+    """Fail closed unless every requested case exactly matches the active runtime contract."""
+    runtime_sha256 = _sha256_file(runtime_config.path)
+    for case in cases:
+        case_dir = case_root / case.slug
+        if not case_dir.is_dir() or not _completed_runtime_case(
+            case,
+            case_dir,
+            runtime_config_sha256=runtime_sha256,
+            runtime_config=runtime_config,
+        ):
+            raise ValueError(f"existing case publication is incomplete or invalid: {case_dir}")
 
 
 def run_offline_batch(
@@ -537,6 +649,7 @@ def run_offline_batch(
                 case,
                 case_dir,
                 runtime_config_sha256=runtime_config_sha256,
+                runtime_config=runtime.config,
             ):
                 raise ValueError(f"existing case publication is incomplete or invalid: {case_dir}")
             skipped += 1
@@ -583,7 +696,7 @@ def write_case_index(cases: Iterable[OfflineCalibrationCase], output_csv: Path) 
         "session_id",
         "group_id",
         "defect_type",
-        *(f"{view}_source_path" for view in ZS32_VIEWS),
+        *(field for view in ZS32_VIEWS for field in (f"{view}_source_path", f"{view}_source_sha256")),
     )
     rows = []
     for case in cases:
@@ -596,9 +709,14 @@ def write_case_index(cases: Iterable[OfflineCalibrationCase], output_csv: Path) 
             "group_id": case.group_id,
             "defect_type": case.defect_type,
         }
-        row.update({f"{view}_source_path": case.images[view] for view in ZS32_VIEWS})
+        for view in ZS32_VIEWS:
+            row[f"{view}_source_path"] = case.images[view]
+            row[f"{view}_source_sha256"] = _sha256_file(case.images[view])
         rows.append(row)
     if output_csv.exists():
+        expected = [{field: str(row.get(field, "")) for field in fields} for row in rows]
+        if _read_csv(output_csv) != expected:
+            raise ValueError(f"existing case index differs from current canonical inputs: {output_csv}")
         return
     output_csv.parent.mkdir(parents=True, exist_ok=True)
     with output_csv.open("x", encoding="utf-8", newline="") as file:

@@ -6,19 +6,25 @@
 from __future__ import annotations
 
 import csv
+import hashlib
+import json
 from typing import TYPE_CHECKING
 
 import pytest
 from capture_data.zs32_offline_calibration import (
     CALIBRATION_FIELDS,
     ZS32_VIEWS,
+    _completed_runtime_case,
     load_offline_cases,
     merge_calibration_rows,
+    write_case_index,
     write_yolo_annotation_calibration_rows,
 )
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+TEMPLATE_CALIBRATION_FIELDS = (*CALIBRATION_FIELDS, "threshold_version", "template_version")
 
 
 def _write_csv(path: Path, fieldnames: tuple[str, ...], rows: list[dict[str, object]]) -> None:
@@ -79,12 +85,14 @@ def _manifests(tmp_path: Path, *, missing_view: str | None = None) -> tuple[Path
                     "split": split,
                     "model_version": "template-v1",
                     "roi_version": "roi-v1",
+                    "threshold_version": "threshold-v1",
+                    "template_version": "template-generation-v1",
                 },
             )
     crop_manifest = tmp_path / "crop_manifest.csv"
     _write_csv(crop_manifest, tuple(manifest_rows[0]), manifest_rows)
     template_csv = tmp_path / "template_calibration.csv"
-    _write_csv(template_csv, CALIBRATION_FIELDS, template_rows)
+    _write_csv(template_csv, TEMPLATE_CALIBRATION_FIELDS, template_rows)
     return crop_manifest, template_csv, root
 
 
@@ -110,19 +118,29 @@ def test_load_offline_cases_rejects_incomplete_eight_view_parts(tmp_path: Path) 
         load_offline_cases(crop_manifest, template_csv, path_root=root, hand="right")
 
 
-def test_load_offline_cases_uses_template_csv_only_for_part_split(tmp_path: Path) -> None:
-    """Legacy template view-routing errors must not override semantic source basenames."""
+def test_load_offline_cases_rejects_noncanonical_template_csv_view_order(tmp_path: Path) -> None:
+    """Template split rows must preserve exact VIEW_ORDER for every physical part."""
     crop_manifest, template_csv, root = _manifests(tmp_path)
     rows = list(csv.DictReader(template_csv.open(encoding="utf-8")))
     defect_rows = [row for row in rows if row["gt_label"] == "1"]
     for row, routed_view in zip(defect_rows, reversed(ZS32_VIEWS), strict=True):
         row["view"] = routed_view
-    _write_csv(template_csv, CALIBRATION_FIELDS, rows)
+    _write_csv(template_csv, TEMPLATE_CALIBRATION_FIELDS, rows)
 
-    cases = load_offline_cases(crop_manifest, template_csv, path_root=root, hand="right")
+    with pytest.raises(ValueError, match="canonical view order"):
+        load_offline_cases(crop_manifest, template_csv, path_root=root, hand="right")
 
-    assert len(cases) == 2
-    assert set(cases[0].images) == set(ZS32_VIEWS)
+
+def test_load_offline_cases_rejects_duplicate_template_csv_view(tmp_path: Path) -> None:
+    """A repeated view cannot hide another missing view in an eight-row part."""
+    crop_manifest, template_csv, root = _manifests(tmp_path)
+    rows = list(csv.DictReader(template_csv.open(encoding="utf-8")))
+    defect_rows = [row for row in rows if row["gt_label"] == "1"]
+    defect_rows[-1]["view"] = defect_rows[-2]["view"]
+    _write_csv(template_csv, TEMPLATE_CALIBRATION_FIELDS, rows)
+
+    with pytest.raises(ValueError, match="exact canonical views"):
+        load_offline_cases(crop_manifest, template_csv, path_root=root, hand="right")
 
 
 def test_load_offline_cases_rejects_physical_part_reused_across_fit_and_test(tmp_path: Path) -> None:
@@ -133,9 +151,20 @@ def test_load_offline_cases_rejects_physical_part_reused_across_fit_and_test(tmp
     for row in rows:
         if row["split"] == "calibration":
             row["part_id"] = test_part_id
-    _write_csv(template_csv, CALIBRATION_FIELDS, rows)
+    _write_csv(template_csv, TEMPLATE_CALIBRATION_FIELDS, rows)
 
     with pytest.raises(ValueError, match="inconsistent label/split"):
+        load_offline_cases(crop_manifest, template_csv, path_root=root, hand="right")
+
+
+def test_load_offline_cases_rejects_mixed_template_csv_versions(tmp_path: Path) -> None:
+    """All Template split records must bind one complete artifact generation."""
+    crop_manifest, template_csv, root = _manifests(tmp_path)
+    rows = list(csv.DictReader(template_csv.open(encoding="utf-8")))
+    rows[-1]["template_version"] = "substituted-template-generation"
+    _write_csv(template_csv, TEMPLATE_CALIBRATION_FIELDS, rows)
+
+    with pytest.raises(ValueError, match="Template artifact versions"):
         load_offline_cases(crop_manifest, template_csv, path_root=root, hand="right")
 
 
@@ -351,3 +380,103 @@ def test_yolo_annotation_calibration_rejects_record_missing_one_view(tmp_path: P
 
     with pytest.raises(ValueError, match=r"missing YOLO score.*back_secondary"):
         write_yolo_annotation_calibration_rows(cases, model_csv, yolo_root, tmp_path / "rows.csv")
+
+
+def _sha256(path: Path) -> str:
+    """Hash one reuse fixture artifact."""
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _write_completed_case(case: object, case_dir: Path, runtime_sha256: str) -> None:
+    """Write one internally consistent runtime publication for reuse validation."""
+    case_dir.mkdir(parents=True)
+    source_images = {view: str(case.images[view]) for view in ZS32_VIEWS}
+    manifest_views = {}
+    calibration_rows = []
+    evidence_rows = {"patchcore": [], "yolo": []}
+    for family in ("patchcore", "yolo"):
+        for view in ZS32_VIEWS:
+            branch = f"anomaly_{view}" if family == "patchcore" else "yolo"
+            model_version = f"{family}-{view}-v1" if family == "patchcore" else "yolo-v1"
+            roi_version = f"{family}-roi-v1"
+            evidence = case_dir / "evidence" / family / f"{view}.png"
+            evidence.parent.mkdir(parents=True, exist_ok=True)
+            evidence.write_bytes(f"{family}-{view}".encode())
+            row = {
+                "part_id": case.part_id,
+                "hand": case.hand,
+                "view": view,
+                "branch": branch,
+                "score": "0.2",
+                "source_path": str(case.images[view]),
+                "source_hash": _sha256(case.images[view]),
+                "evidence_path": str(evidence),
+                "evidence_hash": _sha256(evidence),
+                "model_version": model_version,
+                "roi_version": roi_version,
+            }
+            evidence_rows[family].append(row)
+            calibration_rows.append(
+                {
+                    "part_id": case.part_id,
+                    "hand": case.hand,
+                    "view": view,
+                    "branch": branch,
+                    "raw_score": "0.2",
+                    "gt_label": case.gt_label,
+                    "split": case.split,
+                    "model_version": model_version,
+                    "roi_version": roi_version,
+                },
+            )
+            manifest_views.setdefault(view, {})[family] = {"score": 0.2, "evidence_path": str(evidence)}
+    for family, rows in evidence_rows.items():
+        _write_csv(case_dir / f"{family}.csv", tuple(rows[0]), rows)
+    _write_csv(case_dir / "calibration_rows.csv", CALIBRATION_FIELDS, calibration_rows)
+    (case_dir / "runtime_manifest.json").write_text(
+        json.dumps(
+            {
+                "part_id": case.part_id,
+                "capture_session": case.session_id,
+                "group_id": case.group_id,
+                "hand": case.hand,
+                "errors": [],
+                "runtime_config_sha256": runtime_sha256,
+                "source_images": source_images,
+                "views": manifest_views,
+            },
+        ),
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.parametrize("mutation", ["missing_manifest", "raw_score", "model_version", "roi_version"])
+def test_completed_runtime_case_rejects_reuse_drift(tmp_path: Path, mutation: str) -> None:
+    """Reuse must reject incomplete or altered model evidence before aggregation."""
+    crop_manifest, template_csv, root = _manifests(tmp_path)
+    case = load_offline_cases(crop_manifest, template_csv, path_root=root, hand="right")[0]
+    case_dir = tmp_path / "cases" / case.slug
+    runtime_sha256 = "a" * 64
+    _write_completed_case(case, case_dir, runtime_sha256)
+    if mutation == "missing_manifest":
+        (case_dir / "runtime_manifest.json").unlink()
+    else:
+        rows = list(csv.DictReader((case_dir / "calibration_rows.csv").open(encoding="utf-8")))
+        rows[0][mutation] = "0.9" if mutation == "raw_score" else f"tampered-{mutation}"
+        _write_csv(case_dir / "calibration_rows.csv", CALIBRATION_FIELDS, rows)
+
+    assert not _completed_runtime_case(case, case_dir, runtime_config_sha256=runtime_sha256)
+
+
+def test_write_case_index_rejects_existing_drift(tmp_path: Path) -> None:
+    """Resume must compare the full canonical source index instead of trusting existence."""
+    crop_manifest, template_csv, root = _manifests(tmp_path)
+    cases = load_offline_cases(crop_manifest, template_csv, path_root=root, hand="right")
+    output = tmp_path / "case_index.csv"
+    write_case_index(cases, output)
+    rows = list(csv.DictReader(output.open(encoding="utf-8")))
+    rows[0]["front_source_path"] = str(tmp_path / "substituted.png")
+    _write_csv(output, tuple(rows[0]), rows)
+
+    with pytest.raises(ValueError, match="case index differs"):
+        write_case_index(cases, output)

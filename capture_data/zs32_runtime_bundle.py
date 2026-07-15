@@ -352,6 +352,11 @@ def _publish_directory(output_dir: Path, writer: Callable[[Path], None]) -> None
         raise
 
 
+def publish_directory_no_replace(output_dir: Path, writer: Callable[[Path], None]) -> None:
+    """Atomically publish one immutable directory without replacing an existing generation."""
+    _publish_directory(output_dir, writer)
+
+
 def _write_json(path: Path, payload: object) -> None:
     path.write_text(json.dumps(payload, allow_nan=False, indent=2) + "\n", encoding="utf-8")
 
@@ -586,6 +591,11 @@ def _validate_assets_manifest(path: Path) -> dict[str, Any]:
     if fusion_payload.get("expected_versions") != expected_versions:
         raise ValueError("fusion profile expected_versions differ from the bound runtime and template assets")
     return manifest
+
+
+def load_runtime_assets_manifest(path: Path) -> dict[str, Any]:
+    """Load and fully revalidate a Task 2 immutable runtime-assets manifest."""
+    return _validate_assets_manifest(path)
 
 
 def _validate_threshold_binding(path: Path, assets: dict[str, Any]) -> dict[str, Any]:

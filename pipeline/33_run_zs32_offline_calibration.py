@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
+    from capture_data.zs32_model_runtime import RuntimeConfig
     from capture_data.zs32_offline_calibration import OfflineCalibrationCase
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -32,10 +33,15 @@ from capture_data.zs32_offline_calibration import (  # noqa: E402
     load_offline_cases,
     merge_calibration_rows,
     run_offline_batch,
+    validate_completed_runtime_cases,
     validate_yolo_annotation_dataset,
     validate_yolo_runtime_crop_identity,
     write_case_index,
     write_yolo_annotation_calibration_rows,
+)
+from capture_data.zs32_runtime_bundle import (  # noqa: E402
+    load_runtime_assets_manifest,
+    publish_directory_no_replace,
 )
 from capture_data.zs32_template_gate import load_model  # noqa: E402
 from capture_data.zs32_yolo_auxiliary_calibration import run_yolo_auxiliary_calibration  # noqa: E402
@@ -146,6 +152,79 @@ def _yolo_dataset_contract(root: Path) -> dict[str, Any]:
     }
 
 
+def _bound_file(binding: object, *, label: str) -> tuple[Path, str]:
+    """Revalidate one Task2 path/hash binding at Stage33 consumption time."""
+    if not isinstance(binding, dict):
+        raise TypeError(f"{label} binding must be an object")
+    path = Path(str(binding.get("path", ""))).expanduser().resolve()
+    expected_sha256 = str(binding.get("sha256", ""))
+    if not path.is_file() or _sha256(path) != expected_sha256:
+        raise ValueError(f"{label} path/SHA-256 binding is invalid")
+    return path, expected_sha256
+
+
+def _validate_strict_template_model(model: Mapping[str, Any]) -> None:
+    """Require the exact ordered right-hand Template contract only for strict Stage33."""
+    expected_groups = tuple(f"right/{view}" for view in VIEW_ORDER)
+    if (
+        model.get("required_hands") != ["right"]
+        or model.get("required_views") != list(VIEW_ORDER)
+        or not isinstance(model.get("groups"), dict)
+        or tuple(model["groups"]) != expected_groups
+    ):
+        message = "Stage33 requires the exact right-hand eight-view Template contract"
+        raise ValueError(message)
+
+
+def _template_calibration_versions(path: Path, hand: str) -> dict[str, str]:
+    """Return the one complete Template artifact generation declared by its score CSV."""
+    fields = ("model", "threshold", "roi", "template")
+    with path.open(encoding="utf-8-sig", newline="") as file:
+        rows = [row for row in csv.DictReader(file) if str(row.get("hand", "")).strip().lower() == hand]
+    versions = {
+        tuple(str(row.get(f"{field}_version", "")).strip() for field in fields)
+        for row in rows
+    }
+    if len(versions) != 1 or any(not value for value in next(iter(versions), ())):
+        message = "Template calibration CSV must bind one complete artifact generation"
+        raise ValueError(message)
+    values = next(iter(versions))
+    return dict(zip(fields, values, strict=True))
+
+
+def _validate_fit_rows(path: Path, required_views: Sequence[str]) -> None:
+    """Require both fit classes for every view before any GPU or publication work."""
+    with path.open(encoding="utf-8-sig", newline="") as file:
+        rows = list(csv.DictReader(file))
+    for view in required_views:
+        labels = {
+            str(row.get("gt_label", "")).strip()
+            for row in rows
+            if str(row.get("split", "")).strip() == "calibration"
+            and str(row.get("view", "")).strip() == view
+        }
+        if labels != {"0", "1"}:
+            message = (
+                f"view {view!r} requires both normal and defect calibration rows; found labels {sorted(labels)}"
+            )
+            raise ValueError(message)
+
+
+def _validate_yolo_auxiliary_fit_classes(
+    cases: Sequence[OfflineCalibrationCase],
+    label_index: Mapping[str, Mapping[str, tuple[str, Path, Path]]],
+) -> None:
+    """Require positive and negative YOLO val labels independently for every canonical view."""
+    classes = {view: set() for view in VIEW_ORDER}
+    for case in cases:
+        for view, (split, label_path, _image_path) in label_index[case.part_id].items():
+            if split == "val":
+                classes[view].add(bool(label_path.read_text(encoding="utf-8").strip()))
+    invalid = {view: sorted(values) for view, values in classes.items() if values != {False, True}}
+    if invalid:
+        raise ValueError(f"YOLO auxiliary requires both box/no-box val labels per view: {invalid}")
+
+
 def build_run_contract(
     args: argparse.Namespace,
     cases: Sequence[OfflineCalibrationCase],
@@ -155,8 +234,35 @@ def build_run_contract(
     if not template_model.is_file():
         raise FileNotFoundError(f"template model does not exist: {template_model}")
     template_payload = load_model(template_model.parent)
+    _validate_strict_template_model(template_payload)
     config = load_runtime_config(args.runtime_config.resolve())
     template_versions = template_payload["versions"]
+    csv_versions = _template_calibration_versions(args.template_calibration_csv.resolve(), args.hand)
+    if csv_versions != template_versions:
+        message = "Template calibration CSV versions differ from the current Template artifact"
+        raise ValueError(message)
+    assets_manifest_path = args.runtime_config.expanduser().resolve().parent / "assets_manifest.json"
+    assets = load_runtime_assets_manifest(assets_manifest_path)
+    runtime_path, runtime_sha256 = _bound_file(assets.get("runtime_assets"), label="runtime assets")
+    if runtime_path != args.runtime_config.expanduser().resolve() or config.path.resolve() != runtime_path:
+        message = "Stage33 runtime config differs from the Task2 assets manifest"
+        raise ValueError(message)
+    template_binding = assets.get("template_model")
+    if not isinstance(template_binding, dict):
+        message = "Task2 template model binding must be an object"
+        raise TypeError(message)
+    bound_template_dir = Path(str(template_binding.get("path", ""))).expanduser().resolve()
+    bound_template_model, template_model_sha256 = _bound_file(
+        template_binding.get("model_json"),
+        label="template model",
+    )
+    if bound_template_dir != template_model.parent or bound_template_model != template_model:
+        message = "Stage33 Template path differs from the Task2 assets manifest"
+        raise ValueError(message)
+    roi_path, roi_sha256 = _bound_file(assets.get("roi_config"), label="ROI config")
+    if config.patchcore_roi_config.resolve() != roi_path or config.yolo_roi_config.resolve() != roi_path:
+        message = "runtime ROI canonical path differs from the Task2 assets manifest"
+        raise ValueError(message)
     runtime_roi_versions = {config.versions.patchcore_roi, config.versions.yolo_roi}
     if runtime_roi_versions != {template_versions["roi"]}:
         raise ValueError(
@@ -168,7 +274,10 @@ def build_run_contract(
             "runtime/Template generation mismatch: "
             f"runtime={config.versions.template!r}, template={template_versions['template']!r}",
         )
-    validate_yolo_annotation_dataset(cases, args.yolo_dataset_root)
+    yolo_label_index = validate_yolo_annotation_dataset(cases, args.yolo_dataset_root)
+    if getattr(args, "yolo_aux_min_image_precision", None) is not None:
+        assert yolo_label_index is not None
+        _validate_yolo_auxiliary_fit_classes(cases, yolo_label_index)
     source_records = _source_contract(cases)
     return {
         "schema_version": "1.0",
@@ -181,9 +290,14 @@ def build_run_contract(
         "template_calibration_csv": str(args.template_calibration_csv.resolve()),
         "template_calibration_csv_sha256": _sha256(args.template_calibration_csv.resolve()),
         "template_model": str(template_model),
-        "template_model_sha256": _sha256(template_model),
+        "template_model_sha256": template_model_sha256,
+        "template_model_binding": dict(template_binding["model_json"]),
         "runtime_config": str(args.runtime_config.resolve()),
-        "runtime_config_sha256": _sha256(args.runtime_config.resolve()),
+        "runtime_config_sha256": runtime_sha256,
+        "assets_manifest": str(assets_manifest_path.resolve()),
+        "assets_manifest_sha256": _sha256(assets_manifest_path),
+        "asset_set_sha256": assets["asset_set_sha256"],
+        "roi_config": {"path": str(roi_path), "sha256": roi_sha256},
         "source_record_count": len(source_records),
         "source_records_sha256": _canonical_sha256(source_records),
         "yolo_dataset": _yolo_dataset_contract(args.yolo_dataset_root),
@@ -212,6 +326,32 @@ def prepare_output_contract(
     temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     temporary.replace(contract_path)
     return contract_path
+
+
+def validate_preflight(
+    args: argparse.Namespace,
+    cases: Sequence[OfflineCalibrationCase],
+    run_contract: Mapping[str, Any],
+    config: RuntimeConfig,
+) -> None:
+    """Perform every read-only validation that can run before model initialization."""
+    _validate_fit_rows(args.template_calibration_csv.resolve(), VIEW_ORDER)
+    output_dir = args.output_dir.expanduser().resolve()
+    if not output_dir.exists():
+        if args.reuse_existing_inference:
+            message = "--reuse-existing-inference requires an existing --output-dir"
+            raise ValueError(message)
+        return
+    if not args.resume:
+        raise FileExistsError(f"output directory already exists; pass --resume: {output_dir}")
+    contract_path = output_dir / "commissioning_run_contract.json"
+    if not contract_path.is_file() or json.loads(contract_path.read_text(encoding="utf-8")) != run_contract:
+        raise ValueError(f"existing output run contract differs from current inputs: {contract_path}")
+    case_index = output_dir / "case_index.csv"
+    if case_index.exists():
+        write_case_index(cases, case_index)
+    if args.reuse_existing_inference:
+        validate_completed_runtime_cases(cases, output_dir / "cases", config)
 
 
 def _write_metadata(
@@ -387,6 +527,12 @@ def _publication_payload(
     required_views: Sequence[str],
 ) -> dict[str, Any]:
     """Bind one Stage31-derived directory to its exact input and parameters."""
+    artifact_names = (
+        "thresholds.json",
+        "thresholds.csv",
+        "calibration_metrics.json",
+        "calibration_summary.md",
+    )
     return {
         "schema_version": "1.0",
         "commissioning_only": True,
@@ -395,8 +541,7 @@ def _publication_payload(
         "target_recall": args.target_recall,
         "normal_quantile": args.normal_quantile,
         "required_views": list(required_views),
-        "thresholds_sha256": _sha256(report_dir / "thresholds.json"),
-        "metrics_sha256": _sha256(report_dir / "calibration_metrics.json"),
+        "artifacts": {name: _sha256(report_dir / name) for name in artifact_names},
     }
 
 
@@ -408,38 +553,46 @@ def _run_or_validate_calibration(
     required_views: tuple[str, ...] = VIEW_ORDER,
 ) -> dict[str, object]:
     """Run calibration once or validate every reusable artifact against a sidecar."""
-    with input_csv.open(encoding="utf-8-sig", newline="") as file:
-        rows = list(csv.DictReader(file))
-    for view in required_views:
-        fit_labels = {
-            row.get("gt_label", "").strip()
-            for row in rows
-            if row.get("split", "").strip() == "calibration" and row.get("view", "").strip() == view
-        }
-        if fit_labels != {"0", "1"}:
-            raise ValueError(
-                f"view {view!r} requires both normal and defect calibration rows; found labels {sorted(fit_labels)}",
-            )
+    _validate_fit_rows(input_csv, required_views)
     sidecar = report_dir / "stage33_publication.json"
     if report_dir.exists():
         if not args.resume:
             raise FileExistsError(f"threshold publication already exists: {report_dir}")
         if not sidecar.is_file():
             raise ValueError(f"threshold publication has no Stage33 provenance sidecar: {sidecar}")
+        expected_files = {
+            "thresholds.json",
+            "thresholds.csv",
+            "calibration_metrics.json",
+            "calibration_summary.md",
+            sidecar.name,
+        }
+        if {path.name for path in report_dir.iterdir()} != expected_files:
+            raise ValueError(f"threshold publication has an unexpected file set: {report_dir}")
         payload = _publication_payload(input_csv, report_dir, args, required_views)
         if json.loads(sidecar.read_text(encoding="utf-8")) != payload:
             raise ValueError(f"threshold publication differs from current input or parameters: {report_dir}")
         return json.loads((report_dir / "calibration_metrics.json").read_text(encoding="utf-8"))
-    metrics = run_calibration(
-        input_csv,
-        report_dir,
-        target_recall=args.target_recall,
-        normal_quantile=args.normal_quantile,
-        required_views=required_views,
-    )
-    payload = _publication_payload(input_csv, report_dir, args, required_views)
-    sidecar.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    return metrics
+    generated_metrics: dict[str, object] = {}
+
+    def write(staging: Path) -> None:
+        nonlocal generated_metrics
+        generated = staging / "generated"
+        generated_metrics = run_calibration(
+            input_csv,
+            generated,
+            target_recall=args.target_recall,
+            normal_quantile=args.normal_quantile,
+            required_views=required_views,
+        )
+        for artifact in generated.iterdir():
+            artifact.replace(staging / artifact.name)
+        generated.rmdir()
+        payload = _publication_payload(input_csv, staging, args, required_views)
+        (staging / sidecar.name).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    publish_directory_no_replace(report_dir, write)
+    return generated_metrics
 
 
 def _run_yolo_per_view_calibration(output_dir: Path, yolo_rows: Path, args: argparse.Namespace) -> Path:
@@ -633,6 +786,7 @@ def main() -> None:
     )
     run_contract = build_run_contract(args, cases)
     config = load_runtime_config(args.runtime_config.resolve())
+    validate_preflight(args, cases, run_contract, config)
     counts = Counter((case.split, case.gt_label) for case in cases)
     print(
         "cases: "
@@ -647,6 +801,10 @@ def main() -> None:
     output_dir = args.output_dir.expanduser().resolve()
     prepare_output_contract(output_dir, run_contract, resume=args.resume)
     if args.reuse_existing_inference:
+        if not args.resume:
+            message = "--reuse-existing-inference requires --resume"
+            raise ValueError(message)
+        validate_completed_runtime_cases(cases, output_dir / "cases", config)
         stats = {"case_count": len(cases), "completed": 0, "resumed": len(cases)}
     else:
         runtime = ZS32ModelRuntime(

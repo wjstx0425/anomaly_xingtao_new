@@ -17,7 +17,9 @@ import capture_data.zs32_runtime_bundle as runtime_bundle
 import pytest
 from capture_data.zs32_runtime_bundle import (
     finalize_runtime_bundle,
+    load_runtime_assets_manifest,
     load_runtime_bundle,
+    publish_directory_no_replace,
     publish_runtime_assets,
 )
 
@@ -30,6 +32,28 @@ def _sha256(path: Path) -> str:
 
 def _canonical_sha256(payload: object) -> str:
     return hashlib.sha256(json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()).hexdigest()
+
+
+def test_public_manifest_loader_revalidates_bound_assets(source_spec: Path, tmp_path: Path) -> None:
+    publication = publish_runtime_assets(source_spec, tmp_path / "assets")
+
+    manifest = load_runtime_assets_manifest(publication.assets_manifest)
+
+    assert manifest["asset_set_sha256"] == publication.asset_set_sha256
+
+
+def test_public_no_replace_publisher_cleans_failed_generation(tmp_path: Path) -> None:
+    output = tmp_path / "publication"
+
+    def fail(staging: Path) -> None:
+        (staging / "partial.txt").write_text("partial", encoding="utf-8")
+        raise RuntimeError("injected")
+
+    with pytest.raises(RuntimeError, match="injected"):
+        publish_directory_no_replace(output, fail)
+
+    assert not output.exists()
+    assert not tuple(tmp_path.glob(".publication.*.tmp"))
 
 
 @pytest.fixture

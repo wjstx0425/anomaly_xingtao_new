@@ -181,6 +181,7 @@ def test_training_is_deterministic_and_publishes_versioned_schema(tmp_path: Path
         "roi": "roi-v1",
         "template": "template-v1",
     }
+    assert tuple(first["groups"]) == tuple(f"left/{view}" for view in VIEW_ORDER)
     assert sorted(first["groups"]) == [
         "left/back",
         "left/back_left",
@@ -241,16 +242,15 @@ def test_training_rejects_missing_secondary_calibration_class(tmp_path: Path, vi
         )
 
 
-def test_load_model_rejects_non_exact_eight_group_contract(tmp_path: Path) -> None:
-    """A digest-valid legacy six/seven-view model is not a Stage33 input."""
+def test_load_model_preserves_generic_legacy_contract_for_strict_caller_validation(tmp_path: Path) -> None:
+    """Generic loading stays schema-compatible; Stage33 owns exact-right validation."""
     model_dir = _train(tmp_path)
     model = json.loads((model_dir / "model.json").read_text(encoding="utf-8"))
     model["required_views"].remove("front_secondary")
     del model["groups"]["left/front_secondary"]
     _rewrite_model(model_dir, model)
 
-    with pytest.raises(TemplateGateError, match=r"exact .* eight-view"):
-        load_model(model_dir)
+    assert load_model(model_dir)["required_views"] != list(VIEW_ORDER)
 
 
 def test_prediction_preserves_continuous_evidence_and_best_template(tmp_path: Path) -> None:
@@ -345,6 +345,9 @@ def test_exported_calibration_rows_reproduce_model_thresholds(tmp_path: Path) ->
     with (model_dir / CALIBRATION_FILENAME).open(encoding="utf-8", newline="") as file:
         rows = list(csv.DictReader(file))
 
+    assert {"model_version", "threshold_version", "roi_version", "template_version"} <= set(rows[0])
+    assert all(row["threshold_version"] == "threshold-v1" for row in rows)
+    assert all(row["template_version"] == "template-v1" for row in rows)
     thresholds = fit_dual_thresholds(rows, target_recall=1.0, normal_quantile=1.0, required_views=())
     by_view = {record.view: record for record in thresholds}
     for view in EXPECTED_ZS32_VIEWS:
@@ -389,7 +392,7 @@ def test_prediction_rejects_template_paths_outside_model(tmp_path: Path, path_ki
 @pytest.mark.parametrize(
     ("mutation", "code"),
     [
-        ("missing_group", "MODEL_INVALID"),
+        ("missing_group", "GROUP_NOT_FOUND"),
         ("missing_template", "TEMPLATE_MISSING"),
         ("bad_template", "TEMPLATE_INVALID"),
         ("tampered_template", "TEMPLATE_HASH_MISMATCH"),

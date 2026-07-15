@@ -184,35 +184,70 @@ def test_prepare_output_contract_rejects_legacy_directory_without_contract(tmp_p
         stage33.prepare_output_contract(output, {"schema_version": "1.0"}, resume=True)
 
 
-def test_stage33_rejects_runtime_template_roi_version_mismatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Published runtime and Template assets must identify one ROI generation."""
-    stage33 = _load_stage33()
+def _contract_fixture(
+    stage33: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    runtime_roi_version: str = "roi-v1",
+) -> tuple[SimpleNamespace, dict[str, object], dict[str, object]]:
+    """Build one fully bound Task2 assets fixture for Stage33 contract tests."""
+    runtime_dir = tmp_path / "runtime-publication"
+    runtime_dir.mkdir()
+    runtime_config = runtime_dir / "runtime_assets.json"
+    assets_manifest = runtime_dir / "assets_manifest.json"
+    roi_config = tmp_path / "roi.json"
     template_dir = tmp_path / "template"
     template_dir.mkdir()
-    (template_dir / "model.json").write_text("{}", encoding="utf-8")
+    template_model = template_dir / "model.json"
     crop_manifest = tmp_path / "crop.csv"
     template_csv = tmp_path / "template.csv"
-    runtime_config = tmp_path / "runtime.json"
-    for path in (crop_manifest, template_csv, runtime_config):
-        path.write_text("fixture", encoding="utf-8")
-    monkeypatch.setattr(
-        stage33,
-        "load_model",
-        lambda _path: {"versions": {"roi": "template-roi-v1", "template": "template-v1"}},
-    )
-    monkeypatch.setattr(
-        stage33,
-        "load_runtime_config",
-        lambda _path: SimpleNamespace(
-            versions=SimpleNamespace(
-                patchcore_roi="runtime-roi-v2",
-                yolo_roi="runtime-roi-v2",
-                template="template-v1",
-            ),
+    for path, content in (
+        (runtime_config, "runtime"),
+        (assets_manifest, "manifest"),
+        (roi_config, "roi"),
+        (template_model, "template"),
+        (crop_manifest, "crop"),
+        (template_csv, "template-csv"),
+    ):
+        path.write_text(content, encoding="utf-8")
+    versions = {
+        "model": "template-model-v1",
+        "threshold": "threshold-v1",
+        "roi": "roi-v1",
+        "template": "template-generation-v1",
+    }
+    model = {
+        "required_hands": ["right"],
+        "required_views": list(stage33.VIEW_ORDER),
+        "groups": {f"right/{view}": {} for view in stage33.VIEW_ORDER},
+        "versions": versions,
+    }
+    config = SimpleNamespace(
+        path=runtime_config.resolve(),
+        patchcore_roi_config=roi_config.resolve(),
+        yolo_roi_config=roi_config.resolve(),
+        versions=SimpleNamespace(
+            patchcore_roi=runtime_roi_version,
+            yolo_roi=runtime_roi_version,
+            template=versions["template"],
         ),
     )
+    manifest = {
+        "asset_set_sha256": "c" * 64,
+        "runtime_assets": {"path": str(runtime_config.resolve()), "sha256": stage33._sha256(runtime_config)},
+        "roi_config": {"path": str(roi_config.resolve()), "sha256": stage33._sha256(roi_config)},
+        "template_model": {
+            "path": str(template_dir.resolve()),
+            "model_json": {"path": str(template_model.resolve()), "sha256": stage33._sha256(template_model)},
+        },
+    }
+    monkeypatch.setattr(stage33, "load_model", lambda _path: model)
+    monkeypatch.setattr(stage33, "load_runtime_config", lambda _path: config)
     monkeypatch.setattr(stage33, "validate_yolo_annotation_dataset", lambda *_args: None)
     monkeypatch.setattr(stage33, "_yolo_dataset_contract", lambda _path: {})
+    monkeypatch.setattr(stage33, "load_runtime_assets_manifest", lambda _path: manifest)
+    monkeypatch.setattr(stage33, "_template_calibration_versions", lambda *_args: versions, raising=False)
     args = SimpleNamespace(
         template_model_dir=template_dir,
         runtime_config=runtime_config,
@@ -223,8 +258,57 @@ def test_stage33_rejects_runtime_template_roi_version_mismatch(tmp_path: Path, m
         target_recall=1.0,
         normal_quantile=0.995,
     )
+    return args, model, manifest
+
+
+def test_stage33_rejects_runtime_template_roi_version_mismatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Published runtime and Template assets must identify one ROI generation."""
+    stage33 = _load_stage33()
+    args, _, _ = _contract_fixture(stage33, tmp_path, monkeypatch, runtime_roi_version="runtime-roi-v2")
 
     with pytest.raises(ValueError, match="ROI version mismatch"):
+        stage33.build_run_contract(args, ())
+
+
+@pytest.mark.parametrize("mutation", ["hands", "group_order"])
+def test_stage33_requires_exact_right_eight_template_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    """Strict Stage33 must reject generic or reordered Template models."""
+    stage33 = _load_stage33()
+    args, model, _ = _contract_fixture(stage33, tmp_path, monkeypatch)
+    if mutation == "hands":
+        model["required_hands"] = ["left", "right"]
+    else:
+        model["groups"] = dict(reversed(tuple(model["groups"].items())))
+
+    with pytest.raises(ValueError, match="exact right-hand eight-view Template"):
+        stage33.build_run_contract(args, ())
+
+
+def test_stage33_run_contract_binds_task2_manifest_asset_set_and_roi(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Resume provenance must bind the validated Task2 generation and physical ROI bytes."""
+    stage33 = _load_stage33()
+    args, _, manifest = _contract_fixture(stage33, tmp_path, monkeypatch)
+
+    contract = stage33.build_run_contract(args, ())
+
+    assert contract["assets_manifest"] == str((args.runtime_config.parent / "assets_manifest.json").resolve())
+    assert contract["assets_manifest_sha256"] == stage33._sha256(args.runtime_config.parent / "assets_manifest.json")
+    assert contract["asset_set_sha256"] == manifest["asset_set_sha256"]
+    assert contract["roi_config"] == manifest["roi_config"]
+    assert contract["template_model_binding"] == manifest["template_model"]["model_json"]
+
+
+def test_stage33_rejects_roi_bytes_drifting_from_task2_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Matching ROI version strings cannot hide changed physical ROI bytes."""
+    stage33 = _load_stage33()
+    args, _, manifest = _contract_fixture(stage33, tmp_path, monkeypatch)
+    Path(manifest["roi_config"]["path"]).write_text("drifted-roi", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="ROI.*SHA-256"):
         stage33.build_run_contract(args, ())
 
 
@@ -268,3 +352,53 @@ def test_stage33_calibration_requires_secondary_normal_and_defect_rows(tmp_path:
 
     with pytest.raises(ValueError, match="secondary"):
         stage33._run_or_validate_calibration(input_csv, tmp_path / "thresholds", args)  # noqa: SLF001
+
+
+def test_stage33_calibration_publication_is_atomic(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    stage33 = _load_stage33()
+    input_csv = tmp_path / "rows.csv"
+    with input_csv.open("w", encoding="utf-8", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=("view", "gt_label", "split"))
+        writer.writeheader()
+        writer.writerows(
+            {"view": view, "gt_label": str(label), "split": "calibration"}
+            for view in stage33.VIEW_ORDER
+            for label in (0, 1)
+        )
+    output = tmp_path / "thresholds"
+
+    def fail(_input: Path, report_dir: Path, **_kwargs: object) -> dict[str, object]:
+        report_dir.mkdir(parents=True, exist_ok=True)
+        (report_dir / "thresholds.json").write_text("{}", encoding="utf-8")
+        raise RuntimeError("injected")
+
+    monkeypatch.setattr(stage33, "run_calibration", fail)
+    args = SimpleNamespace(target_recall=1.0, normal_quantile=0.995, resume=False)
+
+    with pytest.raises(RuntimeError, match="injected"):
+        stage33._run_or_validate_calibration(input_csv, output, args)  # noqa: SLF001
+
+    assert not output.exists()
+    assert not tuple(tmp_path.glob(".thresholds.*.tmp"))
+
+
+def test_preflight_rejects_reuse_without_existing_cases_before_gpu(tmp_path: Path) -> None:
+    stage33 = _load_stage33()
+    calibration = tmp_path / "template.csv"
+    with calibration.open("w", encoding="utf-8", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=("view", "gt_label", "split"))
+        writer.writeheader()
+        writer.writerows(
+            {"view": view, "gt_label": str(label), "split": "calibration"}
+            for view in stage33.VIEW_ORDER
+            for label in (0, 1)
+        )
+    args = SimpleNamespace(
+        template_calibration_csv=calibration,
+        output_dir=tmp_path / "missing",
+        reuse_existing_inference=True,
+        resume=True,
+    )
+
+    with pytest.raises(ValueError, match="requires an existing"):
+        stage33.validate_preflight(args, (), {}, object())
