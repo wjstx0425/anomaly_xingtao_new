@@ -17,14 +17,30 @@ from capture_data.fusion_calibration import fit_dual_thresholds
 from capture_data.zs32_template_gate import (
     CALIBRATION_FILENAME,
     MODEL_SHA256_FILENAME,
+    ZS32_VIEWS,
     TemplateGateError,
+    load_model,
     match_template,
     predict_template_gate,
     train_template_gate,
 )
 
+from zs32_inspection.domain.views import VIEW_ORDER
+
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+EXPECTED_ZS32_VIEWS = (
+    "front",
+    "front_left",
+    "front_right",
+    "front_secondary",
+    "back",
+    "back_left",
+    "back_right",
+    "back_secondary",
+)
 
 
 def _pattern(offset: int = 0, *, defect: bool = False) -> np.ndarray:
@@ -45,11 +61,17 @@ def _write(path: Path, image: np.ndarray) -> None:
     assert cv2.imwrite(str(path), image)
 
 
-def _manifest(tmp_path: Path, *, overlap: bool = False, omit_defect: bool = False) -> Path:
-    """Create a one-hand, six-view calibration/test manifest."""
+def _manifest(
+    tmp_path: Path,
+    *,
+    overlap: bool = False,
+    omit_defect: bool = False,
+    omit_calibration: tuple[str, str] | None = None,
+    hand: str = "left",
+) -> Path:
+    """Create a one-hand, eight-view calibration/test manifest."""
     rows: list[dict[str, str]] = []
-    views = ("front", "front_left", "front_right", "back", "back_left", "back_right")
-    for view in views:
+    for view in EXPECTED_ZS32_VIEWS:
         for sample, (label, split, image) in enumerate(
             (
                 ("normal", "calibration", _pattern()),
@@ -59,7 +81,10 @@ def _manifest(tmp_path: Path, *, overlap: bool = False, omit_defect: bool = Fals
                 ("defect", "test", _pattern(defect=True)),
             ),
         ):
-            if omit_defect and view == "back" and label == "defect" and split == "calibration":
+            if (
+                split == "calibration"
+                and ((omit_defect and view == "back" and label == "defect") or omit_calibration == (view, label))
+            ):
                 continue
             path = tmp_path / "images" / f"{view}-{sample}.png"
             _write(path, image)
@@ -69,7 +94,7 @@ def _manifest(tmp_path: Path, *, overlap: bool = False, omit_defect: bool = Fals
             rows.append(
                 {
                     "part_id": part_id,
-                    "hand": "left",
+                    "hand": hand,
                     "view": view,
                     "label": label,
                     "split": split,
@@ -85,7 +110,7 @@ def _manifest(tmp_path: Path, *, overlap: bool = False, omit_defect: bool = Fals
 
 
 def _train(tmp_path: Path) -> Path:
-    """Train a complete six-view test model."""
+    """Train a complete eight-view test model."""
     output = tmp_path / "model"
     train_template_gate(
         _manifest(tmp_path),
@@ -101,6 +126,11 @@ def _train(tmp_path: Path) -> Path:
         template_version="template-v1",
     )
     return output
+
+
+def test_zs32_views_use_exact_eight_view_runtime_order() -> None:
+    """Template training and inference must share the canonical eight-view order."""
+    assert ZS32_VIEWS == EXPECTED_ZS32_VIEWS
 
 
 def _rewrite_model(model_dir: Path, model: dict[str, object]) -> None:
@@ -155,9 +185,11 @@ def test_training_is_deterministic_and_publishes_versioned_schema(tmp_path: Path
         "left/back",
         "left/back_left",
         "left/back_right",
+        "left/back_secondary",
         "left/front",
         "left/front_left",
         "left/front_right",
+        "left/front_secondary",
     ]
     front_group = first["groups"]["left/front"]
     assert front_group["template_normal_count"] == 1
@@ -168,6 +200,57 @@ def test_training_is_deterministic_and_publishes_versioned_schema(tmp_path: Path
     first_templates = sorted((outputs[0] / "templates").rglob("*.png"))
     second_templates = sorted((outputs[1] / "templates").rglob("*.png"))
     assert [path.read_bytes() for path in first_templates] == [path.read_bytes() for path in second_templates]
+
+
+def test_training_publishes_all_right_hand_eight_view_groups(tmp_path: Path) -> None:
+    """A right-hand manifest must publish one template group for every view."""
+    output = tmp_path / "right-model"
+
+    model = train_template_gate(
+        _manifest(tmp_path, hand="right"),
+        output,
+        required_hands=("right",),
+        width=90,
+        templates_per_group=2,
+        model_version="model-v1",
+        threshold_version="threshold-v1",
+        roi_version="roi-v1",
+        template_version="template-v1",
+    )
+
+    assert model["required_hands"] == ["right"]
+    assert tuple(model["required_views"]) == VIEW_ORDER
+    assert tuple(model["groups"]) == tuple(f"right/{view}" for view in VIEW_ORDER)
+
+
+@pytest.mark.parametrize(
+    ("view", "label"),
+    [("front_secondary", "normal"), ("back_secondary", "defect")],
+)
+def test_training_rejects_missing_secondary_calibration_class(tmp_path: Path, view: str, label: str) -> None:
+    """Every secondary view needs both normal and defect calibration rows."""
+    with pytest.raises(TemplateGateError, match=rf"{view}.*{label}"):
+        train_template_gate(
+            _manifest(tmp_path, hand="right", omit_calibration=(view, label)),
+            tmp_path / "model",
+            required_hands=("right",),
+            model_version="model-v1",
+            threshold_version="threshold-v1",
+            roi_version="roi-v1",
+            template_version="template-v1",
+        )
+
+
+def test_load_model_rejects_non_exact_eight_group_contract(tmp_path: Path) -> None:
+    """A digest-valid legacy six/seven-view model is not a Stage33 input."""
+    model_dir = _train(tmp_path)
+    model = json.loads((model_dir / "model.json").read_text(encoding="utf-8"))
+    model["required_views"].remove("front_secondary")
+    del model["groups"]["left/front_secondary"]
+    _rewrite_model(model_dir, model)
+
+    with pytest.raises(TemplateGateError, match=r"exact .* eight-view"):
+        load_model(model_dir)
 
 
 def test_prediction_preserves_continuous_evidence_and_best_template(tmp_path: Path) -> None:
@@ -264,7 +347,7 @@ def test_exported_calibration_rows_reproduce_model_thresholds(tmp_path: Path) ->
 
     thresholds = fit_dual_thresholds(rows, target_recall=1.0, normal_quantile=1.0, required_views=())
     by_view = {record.view: record for record in thresholds}
-    for view in ("front", "front_left", "front_right", "back", "back_left", "back_right"):
+    for view in EXPECTED_ZS32_VIEWS:
         group = model["groups"][f"left/{view}"]
         assert by_view[view].low_threshold == group["low_threshold"]
         assert by_view[view].high_threshold == group["high_threshold"]
@@ -306,7 +389,7 @@ def test_prediction_rejects_template_paths_outside_model(tmp_path: Path, path_ki
 @pytest.mark.parametrize(
     ("mutation", "code"),
     [
-        ("missing_group", "GROUP_NOT_FOUND"),
+        ("missing_group", "MODEL_INVALID"),
         ("missing_template", "TEMPLATE_MISSING"),
         ("bad_template", "TEMPLATE_INVALID"),
         ("tampered_template", "TEMPLATE_HASH_MISMATCH"),

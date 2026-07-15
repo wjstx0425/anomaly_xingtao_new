@@ -1,6 +1,6 @@
 # Copyright (C) 2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
-# ruff: noqa: EM101, EM102, PLW0717, TRY301
+# ruff: noqa: EM101, EM102, TRY301
 
 """Fail-closed whole-view template gate for ZS32 inspection."""
 
@@ -22,9 +22,11 @@ from typing import Any
 import cv2
 import numpy as np
 
+from zs32_inspection.domain.views import VIEW_ORDER
+
 SCHEMA = "anomalib.zs32_template_gate"
 SCHEMA_VERSION = "1.0"
-ZS32_VIEWS = ("front", "front_left", "front_right", "back", "back_left", "back_right")
+ZS32_VIEWS = VIEW_ORDER
 DEFAULT_HANDS = ("left", "right")
 MODEL_FILENAME = "model.json"
 MODEL_SHA256_FILENAME = "model.sha256"
@@ -559,6 +561,19 @@ def load_model(model_dir: Path) -> dict[str, Any]:
     groups = model.get("groups")
     if not isinstance(preprocessing, dict) or not isinstance(groups, dict):
         raise _error("MODEL_INVALID", "model preprocessing/groups must be objects")
+    required_hands = model.get("required_hands")
+    if (
+        not isinstance(required_hands, list)
+        or not required_hands
+        or any(not isinstance(hand, str) or not hand.strip() for hand in required_hands)
+        or len(required_hands) != len(set(required_hands))
+    ):
+        raise _error("MODEL_INVALID", "model required_hands must be a non-empty unique string list")
+    if model.get("required_views") != list(VIEW_ORDER):
+        raise _error("MODEL_INVALID", "model must declare the exact canonical eight-view order")
+    expected_groups = {f"{hand}/{view}" for hand in required_hands for view in VIEW_ORDER}
+    if set(groups) != expected_groups:
+        raise _error("MODEL_INVALID", "model must contain the exact hand by eight-view group contract")
     return model
 
 
