@@ -810,3 +810,12 @@
 
 - Stage33 reuse validates every case against the active runtime, ROI, model, source, and evidence contract; preflight performs the same available read-only checks before GPU initialization.
 - Stage31's four reports and Stage33 sidecar are one atomic no-replace generation. Task2 is consumed through its public manifest loader and binds the asset-set SHA, ROI bytes, and Template bytes; regenerate stale immutable generations instead of editing them.
+
+### ZS32 standalone classical surface-operator prototype (2026-07-26)
+
+- Keep this work isolated on branch `feat/zs32-classical-operators-prototype` and worktree `/home/yunjing/anomaly_xingtao_new/.worktrees/zs32-classical-operators`. It is not merged into Stage 32, Stage 18, Dashboard, v10, model configs, or threshold artifacts.
+- Core code is `capture_data/zs32_classical_operators.py`: `thin_line` returns Scharr/Laplacian elongated-component evidence; `pit_spot` returns multi-scale top-hat/black-hat compact-component evidence. Both produce uncalibrated continuous scores, masks, components, and overlays only—never final inspection labels.
+- Offline runner is `capture_data/zs32_classical_benchmark.py`, exposed by `pipeline/38_benchmark_zs32_classical_operators.py`. It consumes an explicit crop manifest, streams cases one at a time, retains bounded timing samples, rejects duplicate identities/views, and atomically publishes a no-clobber diagnostic generation with Linux `RENAME_NOREPLACE`.
+- The measured artifact is `/home/yunjing/anomaly_xingtao_new/results/zs32_classical_operator_benchmark_v1`: 30 full-resolution real ROIs, 60 masks, 60 overlays, 30 formal rounds. Timing p50 is 0.1691 s for `thin_line`, 0.2429 s for `pit_spot`, 2.8204 s for a six-image serial round, and 1.5489 s for a six-image two-worker round.
+- Current visual effect is not approved: fixed geometry, normal texture, high-contrast hole edges, and angled-view background create substantial false evidence. Six-view normal `thin_line` scores exceeded their same-view sampled defect medians, and labels do not distinguish scratch/crack/pit/spot. Add exact per-view material/ignore masks and region-level target-defect labels before any manual merge.
+- Detailed command, timing table, label limitations, and observations are in `docs/ZS32_CLASSICAL_OPERATORS_PROTOTYPE.md`.
