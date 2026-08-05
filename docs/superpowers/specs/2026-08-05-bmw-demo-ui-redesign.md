@@ -21,6 +21,9 @@ The canvas remains exactly 1600x900.
 2. The left card presents the complete source image with a high-visibility yellow ROI rectangle and the label
    `实时采集图像`.
 3. The upper-right card presents a magnified ROI evidence image and the label `亮痕检测区域`.
+   The narrow vertical ROI evidence is rotated 90 degrees clockwise for presentation, then fitted proportionally
+   inside the card. The UI must not stretch it non-uniformly. Rotation applies only to the dashboard evidence view;
+   detector coordinates, masks, saved ROI images, and decision metrics remain in the original camera orientation.
 4. The middle-right result card presents one large business result:
    - `OK` -> `检测通过` / `亮痕存在且连续`;
    - `NG_NO_STREAK` -> `检测不通过` / `未检测到有效亮痕`;
