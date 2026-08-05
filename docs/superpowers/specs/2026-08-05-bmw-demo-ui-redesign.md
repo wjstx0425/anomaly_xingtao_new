@@ -41,6 +41,11 @@ The canvas remains exactly 1600x900.
 - Add visual hover feedback without changing button actions.
 - Preserve the no-live-preview behavior: one software-triggered image is acquired for each inspection action.
 - Keep the OpenCV window resizable while rendering the source dashboard at 1600x900.
+- Opening the live Demo must not acquire an image, run detection, publish a result, or show the previous result.
+  It first renders a connected `等待检测` screen with an empty source/evidence surface. `开始检测` and Space are
+  enabled; `重新检测` and R are disabled until one inspection has completed.
+- After an inspection, `开始检测`, `重新检测`, Space, and R all acquire exactly one new frame and replace the current
+  presentation. Quitting from the initial waiting screen exits successfully without requiring a result object.
 
 ## Rendering Boundary
 
