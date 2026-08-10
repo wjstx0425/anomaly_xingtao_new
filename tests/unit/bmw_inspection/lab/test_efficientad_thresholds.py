@@ -15,6 +15,7 @@ from bmw_inspection.lab.efficientad_thresholds import (
     evaluate_part_thresholds,
     fit_part_thresholds,
     read_part_scores_csv,
+    read_part_scores_csv_snapshot,
 )
 from bmw_inspection.lab.eight_view_dataset import VIEW_ORDER
 
@@ -104,7 +105,7 @@ def test_fit_uses_defect_image_hits_after_defect_part_recall() -> None:
             "defect-image-tie",
             "defect",
             {VIEW_ORDER[0]: 0.5, VIEW_ORDER[1]: 0.5, VIEW_ORDER[2]: 0.5},
-        )[:3]
+        )
     )
 
     fit = fit_part_thresholds(rows, views=VIEW_ORDER, target_part_fpr=0.05)
@@ -128,10 +129,8 @@ def test_general_budget_can_allow_two_false_positive_parts() -> None:
         )
         for row in rows
     ]
-    rows.extend((
-        _part_rows("defect-a", "defect", {VIEW_ORDER[0]: 0.5})[0],
-        _part_rows("defect-b", "defect", {VIEW_ORDER[1]: 0.5})[1],
-    ))
+    rows.extend(_part_rows("defect-a", "defect", {VIEW_ORDER[0]: 0.5}))
+    rows.extend(_part_rows("defect-b", "defect", {VIEW_ORDER[1]: 0.5}))
 
     fit = fit_part_thresholds(rows, views=VIEW_ORDER, target_part_fpr=0.1)
 
@@ -157,14 +156,12 @@ def test_fit_rejects_incomplete_or_inconsistently_grouped_parts() -> None:
         fit_part_thresholds(inconsistent, views=VIEW_ORDER, target_part_fpr=0.05)
 
 
-def test_fit_groups_sparse_defect_views_while_requiring_complete_normals() -> None:
+def test_fit_rejects_incomplete_defect_parts() -> None:
     rows = list(_eight_view_rows(normal_parts=20, defect_parts=0))
     rows.append(_part_rows("defect-sparse", "defect", {VIEW_ORDER[0]: 0.9})[0])
 
-    fit = fit_part_thresholds(rows, views=VIEW_ORDER, target_part_fpr=0.05)
-
-    assert fit.defect_part_count == 1
-    assert fit.defect_detected_count == 1
+    with pytest.raises(ValueError, match="exactly one row for each requested view"):
+        fit_part_thresholds(rows, views=VIEW_ORDER, target_part_fpr=0.05)
 
 
 def test_floor_budget_and_tie_breaking_are_deterministic() -> None:
@@ -202,10 +199,7 @@ def test_final_tie_break_prefers_the_stable_higher_threshold_tuple() -> None:
         )
         for row in rows
     ]
-    rows.extend((
-        _part_rows("defect-tie", "defect", {VIEW_ORDER[0]: 0.5})[0],
-        _part_rows("defect-tie", "defect", {VIEW_ORDER[1]: 0.5})[1],
-    ))
+    rows.extend(_part_rows("defect-tie", "defect", {VIEW_ORDER[0]: 0.5, VIEW_ORDER[1]: 0.5}))
 
     fit = fit_part_thresholds(rows, views=VIEW_ORDER, target_part_fpr=0.05)
 
@@ -214,7 +208,7 @@ def test_final_tie_break_prefers_the_stable_higher_threshold_tuple() -> None:
 
 def test_evaluation_counts_union_of_view_hits_and_threshold_equality() -> None:
     rows = _part_rows("normal-000", "normal", {VIEW_ORDER[0]: 0.5, VIEW_ORDER[1]: 0.9})
-    rows.append(_part_rows("defect-sparse", "defect", {VIEW_ORDER[0]: 0.5})[0])
+    rows.extend(_part_rows("defect-000", "defect", {VIEW_ORDER[0]: 0.5, VIEW_ORDER[1]: 0.1}))
 
     evaluation = evaluate_part_thresholds(rows, dict.fromkeys(VIEW_ORDER, 0.5))
 
@@ -301,7 +295,42 @@ def test_score_csv_rejects_ambiguous_images_parent_without_sample_identity(tmp_p
         read_part_scores_csv(score_csv)
 
 
-def test_cli_writes_hash_bound_demo_only_assets(tmp_path: Path) -> None:
+def test_score_csv_snapshot_hashes_the_same_bytes_it_parses(tmp_path: Path, monkeypatch) -> None:
+    score_csv = tmp_path / "efficientad_scores.csv"
+    rows = _eight_view_rows(normal_parts=1, defect_parts=1)
+    with score_csv.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=("view_id", "label", "score", "image_path"))
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({
+                "view_id": row.view_id,
+                "label": row.label,
+                "score": row.score,
+                "image_path": row.image_path,
+            })
+    original_bytes = score_csv.read_bytes()
+    original_read_bytes = Path.read_bytes
+    read_count = 0
+
+    def mutate_after_read(path: Path) -> bytes:
+        nonlocal read_count
+        data = original_read_bytes(path)
+        if path == score_csv:
+            read_count += 1
+            path.write_text("tampered-after-snapshot\n", encoding="utf-8")
+        return data
+
+    monkeypatch.setattr(Path, "read_bytes", mutate_after_read)
+
+    parsed, digest = read_part_scores_csv_snapshot(score_csv)
+
+    assert read_count == 1
+    assert len(parsed) == 16
+    assert digest == hashlib.sha256(original_bytes).hexdigest()
+    assert score_csv.read_text(encoding="utf-8") == "tampered-after-snapshot\n"
+
+
+def test_cli_writes_hash_bound_demo_only_assets(tmp_path: Path, monkeypatch) -> None:
     root = Path(__file__).resolve().parents[4]
     score_csv = tmp_path / "efficientad_scores.csv"
     rows = _eight_view_rows(normal_parts=20, defect_parts=2)
@@ -315,9 +344,21 @@ def test_cli_writes_hash_bound_demo_only_assets(tmp_path: Path) -> None:
                 "score": row.score,
                 "image_path": row.image_path,
             })
-    expected_sha256 = hashlib.sha256(score_csv.read_bytes()).hexdigest()
+    score_bytes = score_csv.read_bytes()
+    expected_sha256 = hashlib.sha256(score_bytes).hexdigest()
     namespace = runpy.run_path(root / "pipeline/bmw_lab_calibrate_efficientad_thresholds.py")
     output_dir = tmp_path / "thresholds"
+    original_snapshot = namespace["read_part_scores_csv_snapshot"]
+    snapshot_calls = 0
+
+    def snapshot_then_mutate(path: Path) -> tuple[tuple[PartScore, ...], str]:
+        nonlocal snapshot_calls
+        snapshot_calls += 1
+        snapshot = original_snapshot(path)
+        Path(path).write_text("tampered-after-cli-snapshot\n", encoding="utf-8")
+        return snapshot
+
+    monkeypatch.setitem(namespace["calibrate"].__globals__, "read_part_scores_csv_snapshot", snapshot_then_mutate)
 
     defaults = namespace["build_parser"]().parse_args([])
     assert defaults.scores_csv.name == "efficientad_scores.csv"
@@ -326,6 +367,7 @@ def test_cli_writes_hash_bound_demo_only_assets(tmp_path: Path) -> None:
     assert tuple(defaults.views) == VIEW_ORDER
 
     assert namespace["main"](["--scores-csv", str(score_csv), "--output-dir", str(output_dir)]) == 0
+    assert snapshot_calls == 1
 
     thresholds = json.loads((output_dir / "part_thresholds.json").read_text(encoding="utf-8"))
     report = json.loads((output_dir / "part_threshold_report.json").read_text(encoding="utf-8"))
@@ -351,6 +393,7 @@ def test_cli_writes_hash_bound_demo_only_assets(tmp_path: Path) -> None:
         assert isinstance(payload["observed_normal_part_fpr"], float)
         assert all(isinstance(value, float) for value in payload["thresholds"].values())
     assert tuple(thresholds["thresholds"]) == VIEW_ORDER
+    score_csv.write_bytes(score_bytes)
     assert (
         namespace["main"]([
             "--scores-csv",

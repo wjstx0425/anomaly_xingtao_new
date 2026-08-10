@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import math
 import sys
@@ -15,7 +14,10 @@ SRC_ROOT = REPO_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from bmw_inspection.lab.efficientad_thresholds import fit_part_thresholds, read_part_scores_csv  # noqa: E402
+from bmw_inspection.lab.efficientad_thresholds import (  # noqa: E402
+    fit_part_thresholds,
+    read_part_scores_csv_snapshot,
+)
 from bmw_inspection.lab.eight_view_dataset import VIEW_ORDER  # noqa: E402
 
 DEFAULT_SCORE_CSV = (
@@ -34,14 +36,6 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        while chunk := stream.read(1024 * 1024):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def calibrate(args: argparse.Namespace) -> dict[str, object]:
     """Fit thresholds and write immutable, leakage-labelled JSON assets."""
     score_csv = Path(args.scores_csv).expanduser().resolve()
@@ -53,7 +47,7 @@ def calibrate(args: argparse.Namespace) -> dict[str, object]:
     views = tuple(args.views)
     if views != VIEW_ORDER:
         raise ValueError(f"--views must contain the complete BMW eight-view order: {VIEW_ORDER}")
-    rows = read_part_scores_csv(score_csv)
+    rows, source_csv_sha256 = read_part_scores_csv_snapshot(score_csv)
     fit = fit_part_thresholds(rows, views=views, target_part_fpr=target)
     output_dir = Path(args.output_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -61,7 +55,7 @@ def calibrate(args: argparse.Namespace) -> dict[str, object]:
     shared = {
         **fit.to_dict(),
         "source_csv": str(score_csv),
-        "source_csv_sha256": _sha256(score_csv),
+        "source_csv_sha256": source_csv_sha256,
     }
     threshold_path = output_dir / "part_thresholds.json"
     report_path = output_dir / "part_threshold_report.json"

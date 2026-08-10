@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import csv
+import hashlib
+import io
 import itertools
 import math
 import re
@@ -87,7 +89,8 @@ class PartThresholdFit:
         }
 
 
-def _part_id_from_image_path(image_path: Path, view_id: str) -> str:
+def part_id_from_image_path(image_path: Path, view_id: str) -> str:
+    """Recover the physical-part identity from a frozen score-image filename."""
     pieces = image_path.stem.rsplit("__", 2)
     if len(pieces) == 3 and pieces[-1] == view_id:
         match = _SAMPLE_INDEX.fullmatch(pieces[-2])
@@ -96,11 +99,10 @@ def _part_id_from_image_path(image_path: Path, view_id: str) -> str:
     raise ValueError(f"cannot derive physical part identity from image_path: {image_path}")
 
 
-def read_part_scores_csv(path: Path) -> tuple[PartScore, ...]:
-    """Read score analysis CSV rows and recover their physical-part identities."""
-    input_path = Path(path)
+def _part_scores_from_bytes(content: bytes) -> tuple[PartScore, ...]:
+    """Parse an immutable score CSV snapshot."""
     required = {"view_id", "label", "score", "image_path"}
-    with input_path.open(newline="", encoding="utf-8") as stream:
+    with io.StringIO(content.decode("utf-8"), newline="") as stream:
         reader = csv.DictReader(stream)
         if not required.issubset(reader.fieldnames or ()):
             raise ValueError(f"score CSV must contain fields: {sorted(required)}")
@@ -120,7 +122,7 @@ def read_part_scores_csv(path: Path) -> tuple[PartScore, ...]:
                 raise ValueError(f"score CSV row {row_number} has invalid score") from error
             rows.append(
                 PartScore(
-                    part_id=_part_id_from_image_path(image_path, view_id),
+                    part_id=part_id_from_image_path(image_path, view_id),
                     view_id=view_id,
                     label=label,
                     score=score,
@@ -130,6 +132,18 @@ def read_part_scores_csv(path: Path) -> tuple[PartScore, ...]:
     if not rows:
         raise ValueError("score CSV must contain at least one row")
     return tuple(rows)
+
+
+def read_part_scores_csv_snapshot(path: Path) -> tuple[tuple[PartScore, ...], str]:
+    """Read score rows and SHA256 from one immutable byte snapshot."""
+    content = Path(path).read_bytes()
+    return _part_scores_from_bytes(content), hashlib.sha256(content).hexdigest()
+
+
+def read_part_scores_csv(path: Path) -> tuple[PartScore, ...]:
+    """Read score analysis CSV rows and recover their physical-part identities."""
+    rows, _sha256 = read_part_scores_csv_snapshot(path)
+    return rows
 
 
 def _validated_views(views: Sequence[str]) -> tuple[str, ...]:
@@ -162,7 +176,7 @@ def _group_parts(rows: Sequence[PartScore], views: Sequence[str]) -> dict[str, t
         actual_views = {row.view_id for row in part_rows}
         if len(actual_views) != len(part_rows):
             raise ValueError(f"physical part {part_id} must not repeat a requested view")
-        if part_rows[0].label == "normal" and actual_views != expected_views:
+        if actual_views != expected_views:
             raise ValueError(f"physical part {part_id} must contain exactly one row for each requested view")
         if len({row.image_path for row in part_rows}) != len(part_rows):
             raise ValueError(f"physical part {part_id} must have distinct image paths")
@@ -285,5 +299,7 @@ __all__ = [
     "PartThresholdFit",
     "evaluate_part_thresholds",
     "fit_part_thresholds",
+    "part_id_from_image_path",
     "read_part_scores_csv",
+    "read_part_scores_csv_snapshot",
 ]
