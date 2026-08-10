@@ -102,6 +102,14 @@ def _two_pixel_step_streak_image() -> np.ndarray:
     return image
 
 
+def _laterally_jumping_streak_image() -> np.ndarray:
+    yy, xx = np.indices((120, 160))
+    image = (76 + ((3 * xx + 5 * yy) % 9)).astype(np.uint8)
+    image[15:45, 72:75] = 210
+    image[45:105, 86:89] = 210
+    return image
+
+
 def test_curved_variable_width_streak_is_tracked(tmp_path: Path) -> None:
     config_path = tmp_path / "config.json"
     _write_synthetic_config(config_path)
@@ -158,6 +166,19 @@ def test_two_pixel_local_steps_within_allowance_are_tracked(tmp_path: Path) -> N
     assert decision.status is DemoStatus.OK
     assert decision.metrics is not None
     assert decision.metrics.coverage_ratio >= 0.75
+
+
+def test_contiguous_lateral_jump_does_not_start_a_false_ridge(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+    _write_synthetic_config(config_path)
+    config = load_config(config_path)
+
+    decision = detect_bright_streak_evidence(_laterally_jumping_streak_image(), config)
+
+    assert decision.status is DemoStatus.NG_NO_STREAK
+    assert decision.metrics is not None
+    assert decision.metrics.coverage_ratio < config.min_coverage_ratio
+    assert not decision.mask[35:].any()
 
 
 def test_unstructured_center_texture_is_not_a_streak(tmp_path: Path) -> None:

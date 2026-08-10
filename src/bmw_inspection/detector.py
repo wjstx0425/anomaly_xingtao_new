@@ -201,16 +201,19 @@ def _decision(
 
 def _coherent_ridge_rows(peaks: np.ndarray, present: np.ndarray, *, max_step: int) -> np.ndarray:
     accepted = present.astype(bool, copy=True)
-    previous: int | None = None
+    previous_candidate: int | None = None
+    previous_accepted: int | None = None
     for row in np.flatnonzero(present):
         if (
-            previous is not None
-            and row - previous == 1
-            and abs(int(peaks[row]) - int(peaks[previous])) > max_step
+            previous_candidate is not None
+            and row - previous_candidate == 1
+            and previous_accepted is not None
+            and abs(int(peaks[row]) - int(peaks[previous_accepted])) > max_step
         ):
             accepted[row] = False
-            continue
-        previous = int(row)
+        else:
+            previous_accepted = int(row)
+        previous_candidate = int(row)
     return accepted
 
 
