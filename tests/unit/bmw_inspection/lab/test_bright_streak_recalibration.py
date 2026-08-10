@@ -9,6 +9,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import pytest
 
 from bmw_inspection.contracts import load_config
 from bmw_inspection.lab.bright_streak_recalibration import recalibrate_bright_streak
@@ -219,6 +220,24 @@ def test_bold_continuity_relaxes_only_continuity_with_final_normals(tmp_path: Pa
         "NG_NO_STREAK",
     ]
     assert json.loads(Path(bold["report_json"]).read_text(encoding="utf-8")) == bold
+
+
+@pytest.mark.parametrize("invalid", [1, "false"])
+def test_recalibration_rejects_non_boolean_bold_continuity_before_io(
+    tmp_path: Path,
+    invalid: object,
+) -> None:
+    output_dir = tmp_path / "must-not-exist"
+
+    with pytest.raises(TypeError, match="bold_continuity must be bool"):
+        recalibrate_bright_streak(
+            tmp_path / "missing-manifest.csv",
+            tmp_path / "missing-config.json",
+            output_dir,
+            bold_continuity=invalid,
+        )
+
+    assert not output_dir.exists()
 
 
 def test_cli_defaults_match_the_eight_view_handoff() -> None:

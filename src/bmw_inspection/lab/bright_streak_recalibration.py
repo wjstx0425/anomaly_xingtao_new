@@ -127,8 +127,11 @@ def recalibrate_bright_streak(
     Raises:
         FileExistsError: If ``output_dir`` already exists.
         OSError: If an artifact or evidence image cannot be written.
+        TypeError: If ``bold_continuity`` is not a boolean.
         ValueError: If inputs, manifest rows, images, metrics, or class coverage are invalid.
     """
+    if not isinstance(bold_continuity, bool):
+        raise TypeError("bold_continuity must be bool")
     manifest_path = Path(manifest_path).expanduser().resolve()
     base_config_path = Path(base_config_path).expanduser().resolve()
     output_dir = Path(output_dir).expanduser().resolve()
