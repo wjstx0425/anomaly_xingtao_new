@@ -227,9 +227,18 @@ def _track_center_ridge(
     median = float(np.median(response))
     mad = float(np.median(np.abs(response.astype(np.float32) - median)))
     threshold = median + config.response_mad_scale * max(1.0, mad)
+    core_mask = (response.astype(np.float32) >= threshold).astype(np.uint8)
+    count, labels, stats, _centroids = cv2.connectedComponentsWithStats(core_mask, 8)
+    supported_components = np.zeros(count, dtype=bool)
+    maximum_support_width = config.max_component_width_px + config.center_tolerance_px
+    for index in range(1, count):
+        width = int(stats[index, cv2.CC_STAT_WIDTH])
+        height = int(stats[index, cv2.CC_STAT_HEIGHT])
+        supported_components[index] = height >= width and width <= maximum_support_width
     peaks = corridor.argmax(axis=1) + left
     strengths = corridor.max(axis=1)
-    present = strengths >= threshold
+    peak_components = labels[np.arange(roi.shape[0]), peaks]
+    present = (strengths >= threshold) & supported_components[peak_components]
     # Retain coherent runs; short row gaps are handled later by `_metrics`.
     # Build a one-pixel decision mask at each accepted peak so width variation
     # cannot discard an otherwise valid line.
@@ -240,11 +249,6 @@ def _track_center_ridge(
         present,
         max_step=max_step,
     )
-    adjacent_rows = present[:-1] & present[1:]
-    if adjacent_rows.any():
-        local_steps = np.abs(np.diff(peaks.astype(np.int32)))[adjacent_rows]
-        if float(local_steps.mean()) > 1.0:
-            accepted_rows[:] = False
     mask[np.flatnonzero(accepted_rows), peaks[accepted_rows]] = True
     raw_median = float(np.median(roi))
     raw_mad = float(np.median(np.abs(roi.astype(np.float32) - raw_median)))

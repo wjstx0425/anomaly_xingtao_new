@@ -93,6 +93,15 @@ def _gradually_drifting_streak_image() -> np.ndarray:
     return image
 
 
+def _two_pixel_step_streak_image() -> np.ndarray:
+    yy, xx = np.indices((120, 160))
+    image = (76 + ((3 * xx + 5 * yy) % 9)).astype(np.uint8)
+    for y in range(15, 105):
+        center = 78 + 2 * ((y - 15) % 2)
+        image[y, center - 1 : center + 2] = 210
+    return image
+
+
 def test_curved_variable_width_streak_is_tracked(tmp_path: Path) -> None:
     config_path = tmp_path / "config.json"
     _write_synthetic_config(config_path)
@@ -109,6 +118,19 @@ def test_gradual_drift_beyond_width_allowance_is_tracked(tmp_path: Path) -> None
         _gradually_drifting_streak_image(),
         load_config(config_path),
     )
+    assert decision.status is DemoStatus.OK
+    assert decision.metrics is not None
+    assert decision.metrics.coverage_ratio >= 0.75
+
+
+def test_two_pixel_local_steps_within_allowance_are_tracked(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+    _write_synthetic_config(config_path)
+    config = load_config(config_path)
+    assert config.max_component_width_px >= 2
+
+    decision = detect_bright_streak_evidence(_two_pixel_step_streak_image(), config)
+
     assert decision.status is DemoStatus.OK
     assert decision.metrics is not None
     assert decision.metrics.coverage_ratio >= 0.75
