@@ -457,21 +457,13 @@ def render_evidence(image: np.ndarray, result: BrightStreakResult | BrightStreak
         DemoStatus.ERROR: (255, 0, 255),
     }[result.status]
     cv2.rectangle(canvas, (x1, y1), (x2 - 1, y2 - 1), status_color, 3)
-    if result.metrics is not None:
-        roi_center = (x2 - x1 - 1) / 2.0
-        center = int(round(x1 + roi_center + result.metrics.lateral_offset_px))
-        half_width = max(1, int(round(result.metrics.mean_width_px / 2.0)))
-        runs = decision.runs if decision is not None else ()
-        gaps = decision.gaps if decision is not None else ()
-        for start, end in runs:
-            cv2.rectangle(
-                canvas,
-                (max(x1, center - half_width), y1 + start),
-                (min(x2 - 1, center + half_width), y1 + max(start, end - 1)),
-                (0, 255, 0),
-                1,
-            )
-        for start, end in gaps:
+    if result.metrics is not None and decision is not None:
+        roi_shape = (y2 - y1, x2 - x1)
+        if decision.mask.shape == roi_shape:
+            accepted = decision.mask.astype(bool)
+            roi_canvas = canvas[y1:y2, x1:x2]
+            roi_canvas[accepted] = (0, 255, 0)
+        for start, end in decision.gaps:
             cv2.rectangle(
                 canvas,
                 (x1, y1 + start),
