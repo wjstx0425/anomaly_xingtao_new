@@ -61,6 +61,13 @@ def _streak_image(*, present: bool) -> np.ndarray:
     return image
 
 
+def _broken_but_present_streak_image() -> np.ndarray:
+    image = _streak_image(present=False)
+    image[15:55, 78:82] = 210
+    image[60:105, 78:82] = 210
+    return image
+
+
 def _synthetic_recalibration_inputs(
     root: Path,
     *,
@@ -96,6 +103,37 @@ def _synthetic_recalibration_inputs(
     return manifest_path, config_path
 
 
+def _bold_continuity_inputs(root: Path) -> tuple[Path, Path]:
+    root.mkdir(parents=True)
+    config_path = root / "base_config.json"
+    _write_synthetic_config(config_path)
+    rows = (
+        ("calibration-normal", "calibration", "OK", _streak_image(present=True)),
+        ("calibration-no-streak", "calibration", "NG_NO_STREAK", _streak_image(present=False)),
+        ("final-normal-with-gap", "final_test", "OK", _broken_but_present_streak_image()),
+        ("final-no-streak", "final_test", "NG_NO_STREAK", _streak_image(present=False)),
+    )
+    manifest_path = root / "bright_streak.csv"
+    with manifest_path.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(
+            stream,
+            fieldnames=("sample_id", "split", "expected_status", "source_path"),
+        )
+        writer.writeheader()
+        for index, (sample_id, split, expected_status, image) in enumerate(rows):
+            image_path = root / f"image_{index}.png"
+            assert cv2.imwrite(str(image_path), image)
+            writer.writerow(
+                {
+                    "sample_id": sample_id,
+                    "split": split,
+                    "expected_status": expected_status,
+                    "source_path": image_path,
+                }
+            )
+    return manifest_path, config_path
+
+
 def test_recalibration_fits_calibration_and_reports_final_test(tmp_path: Path) -> None:
     manifest, config = _synthetic_recalibration_inputs(tmp_path / "inputs")
 
@@ -103,6 +141,11 @@ def test_recalibration_fits_calibration_and_reports_final_test(tmp_path: Path) -
 
     assert report["fit_split"] == "calibration"
     assert report["final_test_used_for_fit"] is False
+    assert report["demo_only"] is False
+    assert report["presence_fit_split"] == "calibration"
+    assert report["final_test_used_for_presence_fit"] is False
+    assert report["continuity_fit_split"] == "calibration"
+    assert report["final_test_normal_used_for_continuity_fit"] is False
     calibrated_path = Path(report["config"])
     assert calibrated_path.is_file()
     assert load_config(calibrated_path).roi_xyxy is not None
@@ -140,6 +183,44 @@ def test_sample_ids_do_not_change_thresholds_or_decisions(tmp_path: Path) -> Non
     ]
 
 
+def test_bold_continuity_relaxes_only_continuity_with_final_normals(tmp_path: Path) -> None:
+    manifest, config = _bold_continuity_inputs(tmp_path / "inputs")
+
+    default = recalibrate_bright_streak(manifest, config, tmp_path / "default")
+    bold = recalibrate_bright_streak(
+        manifest,
+        config,
+        tmp_path / "bold",
+        bold_continuity=True,
+    )
+
+    assert bold["demo_only"] is True
+    assert bold["presence_fit_split"] == "calibration"
+    assert bold["final_test_used_for_presence_fit"] is False
+    assert bold["continuity_fit_split"] == "calibration+final_test_normal"
+    assert bold["final_test_normal_used_for_continuity_fit"] is True
+    for name in ("min_contrast_snr", "min_coverage_ratio"):
+        assert bold["fitted_thresholds"][name] == default["fitted_thresholds"][name]
+    assert bold["fitted_thresholds"]["min_longest_run_ratio"] < (
+        default["fitted_thresholds"]["min_longest_run_ratio"]
+    )
+    assert bold["fitted_thresholds"]["max_gap_ratio"] > (
+        default["fitted_thresholds"]["max_gap_ratio"]
+    )
+    assert bold["fitted_thresholds"]["max_gap_count"] > (
+        default["fitted_thresholds"]["max_gap_count"]
+    )
+    assert [row["predicted_status"] for row in default["final_test_outcomes"]] == [
+        "NG_BROKEN",
+        "NG_NO_STREAK",
+    ]
+    assert [row["predicted_status"] for row in bold["final_test_outcomes"]] == [
+        "OK",
+        "NG_NO_STREAK",
+    ]
+    assert json.loads(Path(bold["report_json"]).read_text(encoding="utf-8")) == bold
+
+
 def test_cli_defaults_match_the_eight_view_handoff() -> None:
     script = REPO_ROOT / "pipeline/bmw_lab_recalibrate_bright_streak.py"
     spec = importlib.util.spec_from_file_location("bmw_lab_recalibrate_bright_streak_cli", script)
@@ -159,3 +240,5 @@ def test_cli_defaults_match_the_eight_view_handoff() -> None:
     assert args.output_dir == (
         REPO_ROOT / "results/bmw_lab_one_click/bmw_lab_eight_view_v1/bright_streak_ridge_v2"
     )
+    assert args.bold_continuity is False
+    assert module.build_parser().parse_args(["--bold-continuity"]).bold_continuity is True

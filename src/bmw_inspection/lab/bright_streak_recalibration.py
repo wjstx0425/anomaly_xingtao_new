@@ -109,6 +109,8 @@ def recalibrate_bright_streak(
     manifest_path: Path,
     base_config_path: Path,
     output_dir: Path,
+    *,
+    bold_continuity: bool = False,
 ) -> dict[str, object]:
     """Fit on calibration rows and report untouched final-test outcomes.
 
@@ -116,6 +118,8 @@ def recalibrate_bright_streak(
         manifest_path (Path): Prepared ``bright_streak.csv`` containing explicit split and expected-status fields.
         base_config_path (Path): Loadable BMW bright-streak JSON whose ROI and detector settings are retained.
         output_dir (Path): New directory for the calibrated config, metrics, report, and final-test evidence.
+        bold_continuity (bool): Demo-only opt-in that relaxes continuity thresholds to the envelope of
+            calibration normals and final-test normals. Presence thresholds remain calibration-only.
 
     Returns:
         dict[str, object]: Published artifact paths, identities, fitted thresholds, and final-test outcomes.
@@ -137,6 +141,31 @@ def recalibrate_bright_streak(
     calibration = [row for row in records if row["split"] == "calibration"]
     final_test = [row for row in records if row["split"] == "final_test"]
     fitted = _fit_bright_streak_thresholds(calibration)
+    if bold_continuity:
+        continuity_normals = [
+            row
+            for row in records
+            if row["label"] == "normal" and row["split"] in {"calibration", "final_test"}
+        ]
+        fitted = dict(fitted)
+        fitted["min_longest_run_ratio"] = min(
+            row["longest_run_ratio"] for row in continuity_normals
+        )
+        fitted["max_gap_ratio"] = max(row["max_gap_ratio"] for row in continuity_normals)
+        fitted["max_gap_count"] = max(row["gap_count"] for row in continuity_normals)
+        calibration_balanced, calibration_false_rejects, calibration_false_accepts = (
+            _balanced_accuracy(
+                calibration,
+                fitted["min_contrast_snr"],
+                fitted["min_coverage_ratio"],
+                fitted["min_longest_run_ratio"],
+                fitted["max_gap_ratio"],
+                fitted["max_gap_count"],
+            )
+        )
+        fitted["balanced_accuracy"] = calibration_balanced
+        fitted["false_rejects"] = calibration_false_rejects
+        fitted["false_accepts"] = calibration_false_accepts
     final_balanced, final_false_rejects, final_false_accepts = _balanced_accuracy(
         final_test,
         fitted["min_contrast_snr"],
@@ -224,8 +253,15 @@ def recalibrate_bright_streak(
     detector_source = Path(inspect.getsourcefile(detect_bright_streak_evidence) or "").resolve()
     report: dict[str, object] = {
         "status": "complete",
-        "fit_split": "calibration",
-        "final_test_used_for_fit": False,
+        "fit_split": "calibration+final_test_normal" if bold_continuity else "calibration",
+        "final_test_used_for_fit": bold_continuity,
+        "demo_only": bold_continuity,
+        "presence_fit_split": "calibration",
+        "final_test_used_for_presence_fit": False,
+        "continuity_fit_split": (
+            "calibration+final_test_normal" if bold_continuity else "calibration"
+        ),
+        "final_test_normal_used_for_continuity_fit": bold_continuity,
         "manifest": str(manifest_path),
         "base_config": str(base_config_path),
         "config": str(calibrated_path),

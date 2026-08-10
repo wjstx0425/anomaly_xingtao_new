@@ -36,6 +36,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument("--base-config", type=Path, default=DEFAULT_BASE_CONFIG)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
+    parser.add_argument(
+        "--bold-continuity",
+        action="store_true",
+        help=(
+            "demo-only: keep presence calibration-only, but relax continuity with "
+            "calibration and final-test normals"
+        ),
+    )
     return parser
 
 
@@ -54,6 +62,7 @@ def main(argv: list[str] | None = None) -> int:
             args.manifest,
             args.base_config,
             args.output_dir,
+            bold_continuity=args.bold_continuity,
         )
     except (FileExistsError, OSError, RuntimeError, TypeError, ValueError) as error:
         print(f"BMW bright-streak recalibration failed: {type(error).__name__}: {error}", file=sys.stderr)

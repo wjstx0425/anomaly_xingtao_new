@@ -264,6 +264,16 @@ uv run --no-sync python pipeline/bmw_lab_recalibrate_bright_streak.py
 
 默认输出到 `results/bmw_lab_one_click/bmw_lab_eight_view_v1/bright_streak_ridge_v2/`。命令只使用 `split=calibration` 拟合阈值，`split=final_test` 始终只用于最终报告；`sample_id` 只作为追溯元数据，不参与判定。输出包含 `calibrated_config.json`、逐图 `metrics.csv`、`report.json`，以及每个 final-test 错误对应的 `final_test_errors/*.png` 证据图。需要改路径时使用 `--manifest`、`--base-config` 和 `--output-dir`；输出目录必须是新目录，避免覆盖旧标定结果。
 
+实验室演示若需要显式放宽断续性，可另选新输出目录并启用：
+
+```bash
+uv run --no-sync python pipeline/bmw_lab_recalibrate_bright_streak.py \
+  --bold-continuity \
+  --output-dir results/bmw_lab_one_click/bmw_lab_eight_view_v1/bright_streak_ridge_v2_bold
+```
+
+`--bold-continuity` 是 **demo-only** 模式：`min_contrast_snr` 与 `min_coverage_ratio` 仍只由 calibration 拟合，但三个 continuity 阈值会使用 calibration normal 与 final-test normal 的包络，因此 final test 不再是完全隔离的无泄漏评估集。报告会分别记录 presence 与 continuity 的拟合 split。该开关默认关闭，不应用于正式验收指标。
+
 ## 12. 模型目录与当前效果
 
 ```text
