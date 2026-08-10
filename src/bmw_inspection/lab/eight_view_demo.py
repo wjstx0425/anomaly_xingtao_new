@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import json
 import math
+import re
 from dataclasses import dataclass
 from enum import Enum
 from numbers import Real
@@ -117,6 +118,8 @@ class EightViewDemoConfig:
     template_models: Mapping[str, Path]
     efficientad_checkpoints: Mapping[str, Path]
     efficientad_thresholds: Mapping[str, float]
+    efficientad_threshold_source_csv: str
+    efficientad_threshold_source_csv_sha256: str
     bright_streak_config: Path
     yolo_checkpoint: Path
     yolo_candidate_conf: float
@@ -228,7 +231,7 @@ def _probability(value: object, name: str) -> float:
     return parsed
 
 
-def _load_efficientad_thresholds(path: Path) -> Mapping[str, float]:
+def _load_efficientad_thresholds(path: Path) -> tuple[Mapping[str, float], str, str]:
     """Load the Task 3 threshold contract and reject unsafe Demo assets."""
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -236,6 +239,12 @@ def _load_efficientad_thresholds(path: Path) -> Mapping[str, float]:
         raise ValueError(f"无法读取EfficientAD整件阈值资产：{path}: {error}") from error
     if not isinstance(payload, dict):
         raise ValueError("EfficientAD整件阈值资产必须是JSON对象")
+    source_csv = payload.get("source_csv")
+    if not isinstance(source_csv, str) or not source_csv.strip():
+        raise ValueError("EfficientAD整件阈值资产source_csv必须是非空字符串")
+    source_csv_sha256 = payload.get("source_csv_sha256")
+    if not isinstance(source_csv_sha256, str) or re.fullmatch(r"[0-9a-f]{64}", source_csv_sha256) is None:
+        raise ValueError("EfficientAD整件阈值资产source_csv_sha256必须是64位小写十六进制")
     for flag in ("demo_only", "test_used_for_selection"):
         if payload.get(flag) is not True:
             raise ValueError(f"EfficientAD整件阈值资产必须显式标记{flag}=true")
@@ -255,7 +264,7 @@ def _load_efficientad_thresholds(path: Path) -> Mapping[str, float]:
         raise ValueError("EfficientAD整件阈值必须是有限数值") from error
     if views != VIEW_ORDER:
         raise ValueError("EfficientAD整件阈值资产必须按标准顺序覆盖八个视角")
-    return MappingProxyType(parsed)
+    return MappingProxyType(parsed), source_csv, source_csv_sha256
 
 
 def load_demo_config(path: Path) -> EightViewDemoConfig:
@@ -304,7 +313,9 @@ def load_demo_config(path: Path) -> EightViewDemoConfig:
     roi_config = resolve(payload["roi_config"])
     training_run = resolve(payload["training_run"])
     bright = resolve(bright_streak_config["config"])
-    efficientad_thresholds = _load_efficientad_thresholds(resolve(efficientad_config["threshold_artifact"]))
+    efficientad_thresholds, efficientad_source_csv, efficientad_source_csv_sha256 = _load_efficientad_thresholds(
+        resolve(efficientad_config["threshold_artifact"])
+    )
     for label, asset in (("capture_config", capture_config), ("roi_config", roi_config)):
         if not asset.is_file():
             raise ValueError(f"{label}不存在：{asset}")
@@ -333,6 +344,8 @@ def load_demo_config(path: Path) -> EightViewDemoConfig:
         template_models=template_models,
         efficientad_checkpoints=efficientad,
         efficientad_thresholds=efficientad_thresholds,
+        efficientad_threshold_source_csv=efficientad_source_csv,
+        efficientad_threshold_source_csv_sha256=efficientad_source_csv_sha256,
         bright_streak_config=bright,
         yolo_checkpoint=yolo_checkpoint,
         yolo_candidate_conf=candidate,

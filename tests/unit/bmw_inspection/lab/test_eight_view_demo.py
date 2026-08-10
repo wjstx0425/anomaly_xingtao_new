@@ -70,6 +70,8 @@ def _write_demo_assets(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
                 "defect_image_hits": 10,
                 "demo_only": True,
                 "test_used_for_selection": True,
+                "source_csv": "/retired-calibration-host/efficientad_scores.csv",
+                "source_csv_sha256": "a" * 64,
             }
         ),
         encoding="utf-8",
@@ -150,6 +152,55 @@ def test_demo_config_resolves_current_model_assets(tmp_path: Path) -> None:
     assert tuple(config.efficientad_thresholds.values()) == pytest.approx(
         tuple((index + 1) / 10 for index in range(len(VIEW_ORDER)))
     )
+    assert config.efficientad_threshold_source_csv == "/retired-calibration-host/efficientad_scores.csv"
+    assert config.efficientad_threshold_source_csv_sha256 == "a" * 64
+
+
+@pytest.mark.parametrize("invalid", [None, "", "   ", 123])
+def test_demo_config_rejects_missing_or_invalid_efficientad_source_csv(tmp_path: Path, invalid: object) -> None:
+    _roi, _capture, _run, threshold_artifact = _write_demo_assets(tmp_path)
+    payload = json.loads(threshold_artifact.read_text(encoding="utf-8"))
+    if invalid is None:
+        del payload["source_csv"]
+    else:
+        payload["source_csv"] = invalid
+    threshold_artifact.write_text(json.dumps(payload), encoding="utf-8")
+    config_path = tmp_path / "demo.json"
+    config_path.write_text(
+        json.dumps(_demo_payload(tmp_path, threshold_artifact=threshold_artifact)),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="source_csv"):
+        load_demo_config(config_path)
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        None,
+        "a" * 63,
+        "A" * 64,
+        "g" * 64,
+        123,
+    ],
+)
+def test_demo_config_rejects_invalid_efficientad_source_sha256(tmp_path: Path, invalid: object) -> None:
+    _roi, _capture, _run, threshold_artifact = _write_demo_assets(tmp_path)
+    payload = json.loads(threshold_artifact.read_text(encoding="utf-8"))
+    if invalid is None:
+        del payload["source_csv_sha256"]
+    else:
+        payload["source_csv_sha256"] = invalid
+    threshold_artifact.write_text(json.dumps(payload), encoding="utf-8")
+    config_path = tmp_path / "demo.json"
+    config_path.write_text(
+        json.dumps(_demo_payload(tmp_path, threshold_artifact=threshold_artifact)),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="source_csv_sha256"):
+        load_demo_config(config_path)
 
 
 @pytest.mark.parametrize(

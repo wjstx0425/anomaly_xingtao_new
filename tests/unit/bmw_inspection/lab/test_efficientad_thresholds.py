@@ -6,6 +6,7 @@ import csv
 import hashlib
 import json
 import runpy
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -381,6 +382,7 @@ def test_cli_writes_hash_bound_demo_only_assets(tmp_path: Path, monkeypatch) -> 
         "defect_detected_count",
         "demo_only",
         "test_used_for_selection",
+        "calibrated_at_utc",
         "source_csv_sha256",
     }
     for payload in (thresholds, report):
@@ -394,6 +396,11 @@ def test_cli_writes_hash_bound_demo_only_assets(tmp_path: Path, monkeypatch) -> 
         assert isinstance(payload["observed_normal_part_fpr"], float)
         assert all(isinstance(value, float) for value in payload["thresholds"].values())
     assert tuple(thresholds["thresholds"]) == VIEW_ORDER
+    assert thresholds["calibrated_at_utc"] == report["calibrated_at_utc"]
+    calibrated_at = datetime.strptime(thresholds["calibrated_at_utc"], "%Y-%m-%dT%H:%M:%SZ").replace(
+        tzinfo=timezone.utc
+    )
+    assert calibrated_at.utcoffset().total_seconds() == 0
     score_csv.write_bytes(score_bytes)
     assert (
         namespace["main"]([

@@ -7,6 +7,7 @@ import argparse
 import json
 import math
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -52,9 +53,11 @@ def calibrate(args: argparse.Namespace) -> dict[str, object]:
     fit = fit_part_thresholds(rows, views=views, target_part_fpr=target)
     output_dir = Path(args.output_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
+    calibrated_at_utc = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
     shared = {
         **fit.to_dict(),
+        "calibrated_at_utc": calibrated_at_utc,
         "source_csv": str(score_csv),
         "source_csv_sha256": source_csv_sha256,
     }
