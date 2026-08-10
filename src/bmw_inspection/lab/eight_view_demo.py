@@ -270,6 +270,7 @@ def load_demo_config(path: Path) -> EightViewDemoConfig:
         "prepared_manifest",
         "training_run",
         "result_root",
+        "bright_streak",
         "efficientad",
         "yolo",
     }
@@ -285,6 +286,9 @@ def load_demo_config(path: Path) -> EightViewDemoConfig:
     imgsz = yolo["imgsz"]
     if isinstance(imgsz, bool) or not isinstance(imgsz, int) or imgsz <= 0:
         raise ValueError("yolo.imgsz必须是正整数")
+    bright_streak_config = payload["bright_streak"]
+    if not isinstance(bright_streak_config, dict) or set(bright_streak_config) != {"config"}:
+        raise ValueError("bright_streak配置字段不正确")
     efficientad_config = payload["efficientad"]
     if not isinstance(efficientad_config, dict) or set(efficientad_config) != {"threshold_artifact"}:
         raise ValueError("efficientad配置字段不正确")
@@ -299,13 +303,13 @@ def load_demo_config(path: Path) -> EightViewDemoConfig:
     capture_config = resolve(payload["capture_config"])
     roi_config = resolve(payload["roi_config"])
     training_run = resolve(payload["training_run"])
+    bright = resolve(bright_streak_config["config"])
     efficientad_thresholds = _load_efficientad_thresholds(resolve(efficientad_config["threshold_artifact"]))
     for label, asset in (("capture_config", capture_config), ("roi_config", roi_config)):
         if not asset.is_file():
             raise ValueError(f"{label}不存在：{asset}")
     template_models = {view: training_run / "template" / view / "model.json" for view in VIEW_ORDER}
     efficientad = {view: training_run / "efficientad" / view / "model.ckpt" for view in VIEW_ORDER}
-    bright = training_run / "bright_streak/calibrated_config.json"
     yolo_checkpoint = training_run / "yolo/train/weights/best.pt"
     for label, asset in {
         **{f"Template {view}": model for view, model in template_models.items()},

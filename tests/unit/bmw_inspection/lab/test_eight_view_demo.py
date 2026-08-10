@@ -49,7 +49,7 @@ def _write_demo_assets(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
         checkpoint.parent.mkdir(parents=True)
         model.write_text("{}", encoding="utf-8")
         checkpoint.write_bytes(b"checkpoint")
-    bright = run / "bright_streak/calibrated_config.json"
+    bright = tmp_path / "bright_streak_asset/calibrated_config.json"
     yolo = run / "yolo/train/weights/best.pt"
     bright.parent.mkdir(parents=True)
     yolo.parent.mkdir(parents=True)
@@ -89,6 +89,7 @@ def _demo_payload(tmp_path: Path, *, threshold_artifact: Path) -> dict[str, obje
         "prepared_manifest": str(tmp_path / "manifest.csv"),
         "training_run": str(run),
         "result_root": str(tmp_path / "results"),
+        "bright_streak": {"config": str(tmp_path / "bright_streak_asset/calibrated_config.json")},
         "efficientad": {"threshold_artifact": str(threshold_artifact)},
         "yolo": {"candidate_conf": 0.1, "final_threshold": 0.25, "imgsz": 640},
     }
@@ -131,7 +132,7 @@ def test_manifest_sample_loads_all_views_in_canonical_order(tmp_path: Path) -> N
 def test_demo_config_resolves_current_model_assets(tmp_path: Path) -> None:
     roi, capture, run, threshold_artifact = _write_demo_assets(tmp_path)
     yolo = run / "yolo/train/weights/best.pt"
-    bright = run / "bright_streak/calibrated_config.json"
+    bright = tmp_path / "bright_streak_asset/calibrated_config.json"
     config_path = tmp_path / "demo.json"
     config_path.write_text(
         json.dumps(_demo_payload(tmp_path, threshold_artifact=threshold_artifact)),
@@ -149,6 +150,51 @@ def test_demo_config_resolves_current_model_assets(tmp_path: Path) -> None:
     assert tuple(config.efficientad_thresholds.values()) == pytest.approx(
         tuple((index + 1) / 10 for index in range(len(VIEW_ORDER)))
     )
+
+
+@pytest.mark.parametrize(
+    "bright_streak",
+    [
+        {},
+        {"path": "calibrated_config.json"},
+        {"config": "calibrated_config.json", "unexpected": True},
+    ],
+)
+def test_demo_config_rejects_non_exact_bright_streak_asset_fields(
+    tmp_path: Path,
+    bright_streak: dict[str, object],
+) -> None:
+    _roi, _capture, _run, threshold_artifact = _write_demo_assets(tmp_path)
+    payload = _demo_payload(tmp_path, threshold_artifact=threshold_artifact)
+    payload["bright_streak"] = bright_streak
+    config_path = tmp_path / "demo.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="bright_streak配置字段"):
+        load_demo_config(config_path)
+
+
+def test_demo_config_fails_closed_when_bright_streak_asset_is_missing(tmp_path: Path) -> None:
+    _roi, _capture, _run, threshold_artifact = _write_demo_assets(tmp_path)
+    payload = _demo_payload(tmp_path, threshold_artifact=threshold_artifact)
+    payload["bright_streak"] = {"config": str(tmp_path / "missing_bright_streak.json")}
+    config_path = tmp_path / "demo.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="bright_streak模型不存在"):
+        load_demo_config(config_path)
+
+
+def test_repository_demo_config_selects_the_bold_bright_streak_asset() -> None:
+    config_path = Path(__file__).resolve().parents[4] / "configs/bmw/experiments/bmw_eight_view_demo_v1.json"
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+
+    assert payload["bright_streak"] == {
+        "config": (
+            "../../../results/bmw_lab_one_click/bmw_lab_eight_view_v1/"
+            "bright_streak_ridge_v2_bold/calibrated_config.json"
+        )
+    }
 
 
 def test_demo_config_rejects_efficientad_threshold_artifact_missing_view(tmp_path: Path) -> None:
@@ -210,6 +256,7 @@ def test_demo_config_rejects_candidate_threshold_above_final(tmp_path: Path) -> 
                 "prepared_manifest": "missing.csv",
                 "training_run": "missing",
                 "result_root": "results",
+                "bright_streak": {"config": "missing.json"},
                 "efficientad": {"threshold_artifact": "missing.json"},
                 "yolo": {"candidate_conf": 0.5, "final_threshold": 0.25, "imgsz": 640},
             }
