@@ -281,7 +281,9 @@ results/bmw_lab_one_click/bmw_lab_eight_view_v1/
 ├── run_report.json
 ├── template/<view>/model.json
 ├── bright_streak/calibrated_config.json
+├── bright_streak_ridge_v2_bold/calibrated_config.json
 ├── efficientad/<view>/model.ckpt
+├── efficientad/score_analysis/part_thresholds.json
 └── yolo/train/weights/best.pt
 ```
 
@@ -295,7 +297,7 @@ results/bmw_lab_one_click/bmw_lab_eight_view_v1/
 - `F1` 同时考虑精确率和召回率，并受当前判定阈值直接影响。AUROC较高但F1较低通常说明分数有区分度，但阈值或样本分布仍需重新标定。
 - YOLO的 `Precision` 表示模型画出的框中有多少与标注匹配，`Recall` 表示标注缺陷中有多少被模型找出；`mAP50-95` 对框位置要求比 `mAP50` 更严格。
 
-所有表格中的final-test都没有参与阈值拟合，但样本量仍然很小。因此这些数字只能用于当前实验室数据上的模型比较，不能直接作为甲方量产验收指标。
+Template和YOLO表格仍来自原有独立final-test。本轮为了快速演示，亮痕的大胆连续性阈值使用了final-test normal，EfficientAD整件阈值也直接用了当前测试分数；两者都在产物中标记为 `demo_only`。因此这些数字只能说明当前数据上的调参效果，不是独立验证，更不能直接作为甲方量产验收指标。
 
 ### 12.2 Template：当前最稳定的结构基线
 
@@ -322,45 +324,65 @@ Template对位置和成像变化敏感。后续如果出现相机轻微移动、
 
 | 证据 | 当前阈值 | 含义 |
 |---|---:|---|
-| 对比度信噪比 | `>= 3.2895` | 光痕必须明显高于局部背景 |
-| 覆盖率 | `>= 0.1900` | 有效光痕必须覆盖足够长度 |
-| 最长连续段比例 | `>= 0.3312` | 至少存在一段足够长的连续亮区 |
-| 最大断口比例 | `<= 0.07015` | 单个断口不能过长 |
-| 断口数量 | `<= 2` | 不能出现过多断续段 |
+| 对比度信噪比 | `>= 3.2897` | 光痕必须明显高于局部背景，只用calibration拟合 |
+| 覆盖率 | `>= 0.25775` | 有效光痕必须覆盖足够长度，只用calibration拟合 |
+| 最长连续段比例 | `>= 0.22023` | 大胆模式的最短可接受连续段 |
+| 最大断口比例 | `<= 0.39315` | 大胆模式允许的最大断口 |
+| 断口数量 | `<= 12` | 大胆模式允许的最多断续段 |
 
-calibration平衡准确率为1.000，0正常误拒、0无光痕误放行。独立final-test平衡准确率为0.8824：3张无光痕图全部被拒绝，没有漏检；17张正常有光痕图中有4张被误判NG。因此当前规则的特点是宁可过检，也不放过完全无光痕件。
+新的中心脊线跟踪替代了“整条光痕必须是一个连通域”的旧候选筛选。默认不泄漏重标定时，正常图已不再被判成“几乎没有光痕”，剩余4个误判全部是 `NG_BROKEN`。开启 `--bold-continuity` 后，20个calibration样本和20个final-test样本全部正确：17个正常有光痕件全部通过，3个完全无光痕件仍全部输出 `NG_NO_STREAK`。
+
+这个100%不是独立测试成绩：存在性两个阈值仍只用calibration，但连续性三个阈值用了calibration normal和final-test normal的包络。实验报告为 `bright_streak_ridge_v2_bold/report.json`，并明确记录 `demo_only=true`。
 
 当前最重要的限制是：数据中只有“连续正常光痕”和“完全无光痕”，没有足够的“光痕存在但中间断续”实物样本。因此最长连续段、断口比例和断口数量阈值只是按正常光痕的严格包络确定，尚未证明能稳定区分各种真实断续形态。演示时可以显示这些连续性证据，但不能宣称断续缺陷已经完成独立验证。
 
-### 12.4 EfficientAD：部分视角有排序能力，固定阈值仍不稳定
+### 12.4 EfficientAD：按八视图整件目标联合标定
 
 每个视角各训练一个EfficientAD-S，仅用该视角的正常外观学习分布；`no_streak`在这个分支中按正常件处理，因为它没有其他外观缺陷。模型输入为256×256，训练30 epochs，框架训练batch固定为1。
 
-原训练报告中的AUROC可以由逐图运行时分数完整复现；但重新执行 `engine.test` 时，TorchMetrics明确警告F1在更新状态前被计算，因此原 `image_F1Score` 不应继续用于判断部署阈值。下表的运行时F1、平衡准确率、正常误拒和缺陷漏检均由Demo同路径的逐图 `predict` 输出重新计算。
+原训练报告中的AUROC可以由逐图运行时分数复现；但原来的缺陷数据每个视角只放了“当前视角看得见缺陷”的图，不能直接做八视图整件融合。新脚本先取各视角可见缺陷物理件并集，再从统一ROI crops为每个缺陷件补齐八个视角。本轮重新推理共208张：20个正常物理件×8视图和6个缺陷物理件×8视图。下表是统一 `0.5` 诊断阈值的逐视角表现。
 
 | 视角 | AUROC | 运行时F1 | 平衡准确率 | 正常误拒 | 缺陷漏检 |
 |---|---:|---:|---:|---:|---:|
-| `front` | 0.9625 | 0.8000 | 0.9500 | 2 / 20 | 0 / 4 |
-| `front_left` | 0.8250 | 0.8000 | 0.8333 | 0 / 20 | 1 / 3 |
-| `front_right` | 0.8333 | 0.8000 | 0.8333 | 0 / 20 | 1 / 3 |
-| `front_secondary` | 1.0000 | 0.8000 | 0.8333 | 0 / 20 | 1 / 3 |
-| `back` | 0.9125 | 0.5714 | 0.9250 | 3 / 20 | 0 / 2 |
-| `back_left` | 0.9750 | 0.8000 | 0.9750 | 1 / 20 | 0 / 2 |
-| `back_right` | 0.7375 | 0.6667 | 0.7500 | 0 / 20 | 1 / 2 |
-| `back_secondary` | 0.8875 | 0.6667 | 0.8250 | 2 / 20 | 1 / 4 |
+| `front` | 0.9333 | 0.6667 | 0.7833 | 2 / 20 | 2 / 6 |
+| `front_left` | 0.6500 | 0.5000 | 0.6667 | 0 / 20 | 4 / 6 |
+| `front_right` | 0.7750 | 0.5000 | 0.6667 | 0 / 20 | 4 / 6 |
+| `front_secondary` | 0.9917 | 0.6667 | 0.7500 | 0 / 20 | 3 / 6 |
+| `back` | 0.7042 | 0.5000 | 0.6750 | 3 / 20 | 3 / 6 |
+| `back_left` | 0.6917 | 0.4444 | 0.6417 | 1 / 20 | 4 / 6 |
+| `back_right` | 0.5625 | 0.2857 | 0.5833 | 0 / 20 | 5 / 6 |
+| `back_secondary` | 0.8833 | 0.5455 | 0.7000 | 2 / 20 | 3 / 6 |
 
-这里不能只看AUROC。例如 `back_right` 的AUROC为0.7375，表示异常分数并非完全随机，但2张缺陷只检出1张。`front_secondary` 的AUROC为1.0也只代表当前3张缺陷与20张正常的分数排序完全分开；其中仍有1张缺陷落在运行判定阈值下，不能理解为量产100%。
+这里不能只看AUROC。例如 `back_right` 只有0.5625，而 `front_secondary` 为0.9917，说明各视角能力明显不同。按“任一视角超阈值则整件NG”联合优化后，Demo实际使用：
+
+| 视角 | Demo阈值 | 正常视图触发 | 缺陷视图触发 |
+|---|---:|---:|---:|
+| `front` | 0.68034 | 0 / 20 | 2 / 6 |
+| `front_left` | 0.00940 | 0 / 20 | 2 / 6 |
+| `front_right` | 0.48633 | 0 / 20 | 2 / 6 |
+| `front_secondary` | 0.11119 | 0 / 20 | 5 / 6 |
+| `back` | 1.0000000000000002 | 0 / 20 | 0 / 6 |
+| `back_left` | 0.45750 | 1 / 20 | 3 / 6 |
+| `back_right` | 0.23041 | 0 / 20 | 1 / 6 |
+| `back_secondary` | 0.57521 | 0 / 20 | 2 / 6 |
+
+`back` 阈值略大于1，是优化器显式关闭该噪声视角否决权的方式，不是浮点错误。联合结果为：20个正常整件中1个NG（`bmw_normal_group051` 的 `back_left`），整件误判率恰好5%；6个缺陷整件全部至少有一个视角触发，当前缺陷整件召回率100%（17个缺陷视图触发）。
+
+该阈值直接在这20个正常件和6个缺陷件上选择，`part_thresholds.json` 标记 `demo_only=true` 和 `test_used_for_selection=true`，所以100%缺陷整件召回率不是独立测试结论。新数据到来后应固定这份阈值，只做验证，不再使用新数据重选阈值。
 
 逐图分数和热力图可重新导出：
 
 ```bash
 uv run --no-sync python pipeline/bmw_lab_visualize_efficientad_scores.py
+uv run --no-sync python pipeline/bmw_lab_calibrate_efficientad_thresholds.py
 ```
 
 默认输出到 `results/bmw_lab_one_click/bmw_lab_eight_view_v1/efficientad/score_analysis/`：
 
-- `efficientad_scores.csv`：183张测试图的视角、真实标签、运行判定、异常分数、阈值和图片路径。
+- `efficientad_scores.csv`：208张图的视角、真实标签、0.5诊断判定、异常分数和图片路径。
 - `efficientad_score_distributions.png`：八视角正常/缺陷散点分布及0.5阈值线。
+- `efficientad_calibrated_score_distributions.png`：同一批分数与Demo实际逐视角阈值线。
+- `part_thresholds.json`、`part_threshold_report.json`：八视图阈值、整件误判/召回和泄漏标记。
 - `examples/<view>.png`：每视角高分正常和低分缺陷样本的热力图。
 - `report.json`：从逐图运行时输出重新计算的AUROC、F1、平衡准确率、误拒和漏检。
 
@@ -368,7 +390,7 @@ uv run --no-sync python pipeline/bmw_lab_visualize_efficientad_scores.py
 
 当前热力图复查还显示：部分 `front` 正常误拒主要高亮零件外侧亮斑、孔位或ROI边缘，而不是稳定的缺陷区域；`back_right` 有一张真实缺陷的分数接近0且几乎没有有效热点。这说明当前EfficientAD既受背景/反光正常波动影响，也会漏掉训练中覆盖不足的局部缺陷。后续应先收紧或遮罩无关背景，并增加对应视角的正常反光变化和漏检缺陷，不应只靠降低0.5阈值。
 
-因此当前EfficientAD适合在Demo中提供第二种异常证据，不适合作为单独放行依据。优先工作应是补充 `back_right`、`back_secondary`、`front_left` 的正常波动和真实缺陷，然后只用calibration重新选阈值，再在未参与调参的物理件上报告F1、误放行和误拒。
+因此当前EfficientAD适合在Demo中提供第二种异常证据，不适合作为单独放行依据。优先工作应是补充 `back_right`、`back_secondary`、`front_left` 的正常波动和真实缺陷，然后只用calibration选阈值，再在未参与调参的物理件上报告整件误放行和误拒。
 
 ### 12.5 YOLO26n：可以画框，但漏检是当前主要问题
 
@@ -389,7 +411,7 @@ YOLO训练集共632张图，其中77张有框、99个缺陷框；验证集208张
 
 Demo对一个零件执行8个Template、1个光痕、8个YOLO和8个EfficientAD，共25项检查。只要任一项为NG，整件就是NG。因此单模型“没有缺陷误放行”不等于整套系统良率高：多个偏保守分支叠加后，任一视角的正常误拒都会把整件拦下。
 
-当前正常样本 `bmw_normal_group072_000001` 的25项全部PASS，只能证明模型、配置、GPU推理和界面融合链路可以跑通，不能代表正常件误拒率。下一步真正有价值的系统指标应以物理件为单位，在全新批次上统计：整件正常放行率、整件缺陷拦截率、各分支触发次数、重复拍摄一致性和单件耗时分位数。
+当前正常样本 `bmw_normal_group072_000001` 的25项全部PASS，只能证明模型、配置、推理和界面融合链路可以跑通，不能代表整套系统的正常件误拒率。下一步真正有价值的系统指标应以物理件为单位，在全新批次上统计：整件正常放行率、整件缺陷拦截率、各分支触发次数、重复拍摄一致性和单件耗时分位数。
 
 ## 13. 离线部署测试
 
@@ -433,7 +455,7 @@ uv run --no-sync python pipeline/bmw_lab_eight_view_demo.py \
   --save-screenshot results/bmw_eight_view_demo/smoke.png
 ```
 
-当前RTX 4090真实样本 `bmw_normal_group072_000001` 为25 PASS、最终OK，总推理约3.4秒。
+当前真实样本 `bmw_normal_group072_000001` 为25 PASS、最终OK。本轮受限会话中PyTorch未获得CUDA，CPU实测总推理为4.048秒；截图为 `artifacts/bmw_eight_view_threshold_demo/group072_bold_efficientad_5pct.png`。
 
 ## 14. 四相机实时Demo
 
