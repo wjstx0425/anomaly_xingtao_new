@@ -7,6 +7,7 @@ import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from types import ModuleType
 
 import cv2
 import numpy as np
@@ -96,7 +97,19 @@ def _validated_threshold(threshold: float) -> float:
     return value
 
 
-def _pyplot():
+def _thresholds_for_views(
+    threshold: float | Mapping[str, float],
+    views: Sequence[str],
+) -> dict[str, float]:
+    if isinstance(threshold, Mapping):
+        if set(threshold) != set(views):
+            raise ValueError("threshold mapping must contain exactly the requested views")
+        return {view: _validated_threshold(threshold[view]) for view in views}
+    value = _validated_threshold(threshold)
+    return dict.fromkeys(views, value)
+
+
+def _pyplot() -> ModuleType:
     import matplotlib
 
     matplotlib.use("Agg", force=True)
@@ -142,23 +155,24 @@ def render_score_distributions(
     records: Sequence[EfficientAdScore],
     *,
     views: Sequence[str],
-    threshold: float,
+    threshold: float | Mapping[str, float],
 ) -> Path:
     """Render comparable normal/defect score panels for every requested view."""
-    threshold = _validated_threshold(threshold)
     view_order = tuple(views)
     if not view_order or len(set(view_order)) != len(view_order):
         raise ValueError("views must be non-empty and unique")
+    thresholds = _thresholds_for_views(threshold, view_order)
     pyplot = _pyplot()
     columns = min(2, len(view_order))
     rows = math.ceil(len(view_order) / columns)
     figure, raw_axes = pyplot.subplots(rows, columns, figsize=(7.2 * columns, 4.2 * rows), squeeze=False)
     axes = raw_axes.ravel()
-    score_values = [item.score for item in records]
+    score_values = [item.score for item in records] + list(thresholds.values())
     lower = min(0.0, min(score_values, default=0.0))
     upper = max(1.0, max(score_values, default=1.0))
     padding = max(0.03, (upper - lower) * 0.05)
     for axis, view in zip(axes, view_order, strict=False):
+        view_threshold = thresholds[view]
         view_records = [item for item in records if item.view_id == view]
         for x_position, label, color, chinese in (
             (0.0, "normal", "#2E8B57", "正常"),
@@ -174,7 +188,13 @@ def render_score_distributions(
                 color=color,
                 label=f"{chinese} n={len(values)}",
             )
-        axis.axhline(threshold, color="#202124", linestyle="--", linewidth=1.4, label=f"阈值 {threshold:.2f}")
+        axis.axhline(
+            view_threshold,
+            color="#202124",
+            linestyle="--",
+            linewidth=1.4,
+            label=f"阈值 {view_threshold:.2f}",
+        )
         axis.set_title(view)
         axis.set_xticks((0, 1), ("正常", "缺陷"))
         axis.set_ylabel("EfficientAD异常分数")

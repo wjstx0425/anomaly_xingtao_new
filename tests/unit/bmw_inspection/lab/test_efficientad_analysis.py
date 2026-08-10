@@ -5,6 +5,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+from matplotlib.axes import Axes
 
 from bmw_inspection.lab.efficientad_analysis import (
     EfficientAdScore,
@@ -95,6 +96,30 @@ def test_score_report_writes_csv_distribution_and_fixed_scale_examples(tmp_path:
     ]
     assert distribution_path.stat().st_size > 0
     assert example_path.stat().st_size > 0
+
+
+def test_score_distribution_uses_each_views_actual_threshold(tmp_path: Path, monkeypatch) -> None:
+    records = (
+        EfficientAdScore("front", "normal", Path("front.png"), 0.1, False),
+        EfficientAdScore("back", "defect", Path("back.png"), 0.9, True),
+    )
+    threshold_lines: list[float] = []
+    original_axhline = Axes.axhline
+
+    def record_axhline(self, y=0, xmin=0, xmax=1, **kwargs) -> object:
+        threshold_lines.append(float(y))
+        return original_axhline(self, y=y, xmin=xmin, xmax=xmax, **kwargs)
+
+    monkeypatch.setattr(Axes, "axhline", record_axhline)
+
+    render_score_distributions(
+        tmp_path / "distribution.png",
+        records,
+        views=("front", "back"),
+        threshold={"front": 0.2, "back": 0.8},
+    )
+
+    assert threshold_lines == [0.2, 0.8]
 
 
 def test_analysis_cli_has_reproducible_report_defaults() -> None:
