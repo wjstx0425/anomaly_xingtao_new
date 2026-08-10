@@ -36,6 +36,64 @@ def _branch_result(status: BranchStatus) -> DemoBranchResult:
     )
 
 
+def _write_demo_assets(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
+    roi = tmp_path / "roi.json"
+    capture = tmp_path / "capture.json"
+    run = tmp_path / "run"
+    roi.write_text("{}", encoding="utf-8")
+    capture.write_text("{}", encoding="utf-8")
+    for view in VIEW_ORDER:
+        model = run / "template" / view / "model.json"
+        checkpoint = run / "efficientad" / view / "model.ckpt"
+        model.parent.mkdir(parents=True)
+        checkpoint.parent.mkdir(parents=True)
+        model.write_text("{}", encoding="utf-8")
+        checkpoint.write_bytes(b"checkpoint")
+    bright = run / "bright_streak/calibrated_config.json"
+    yolo = run / "yolo/train/weights/best.pt"
+    bright.parent.mkdir(parents=True)
+    yolo.parent.mkdir(parents=True)
+    bright.write_text("{}", encoding="utf-8")
+    yolo.write_bytes(b"checkpoint")
+    threshold_artifact = tmp_path / "part_thresholds.json"
+    threshold_artifact.write_text(
+        json.dumps(
+            {
+                "thresholds": {view: (index + 1) / 10 for index, view in enumerate(VIEW_ORDER)},
+                "target_part_fpr": 0.05,
+                "allowed_normal_false_positive_count": 1,
+                "normal_part_count": 20,
+                "normal_false_positive_count": 1,
+                "observed_normal_part_fpr": 0.05,
+                "defect_part_count": 6,
+                "defect_detected_count": 6,
+                "defect_image_hits": 10,
+                "demo_only": True,
+                "test_used_for_selection": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return roi, capture, run, threshold_artifact
+
+
+def _demo_payload(tmp_path: Path, *, threshold_artifact: Path) -> dict[str, object]:
+    roi = tmp_path / "roi.json"
+    capture = tmp_path / "capture.json"
+    run = tmp_path / "run"
+    return {
+        "schema_version": 1,
+        "demo_id": "bmw-eight-view-demo-test",
+        "capture_config": str(capture),
+        "roi_config": str(roi),
+        "prepared_manifest": str(tmp_path / "manifest.csv"),
+        "training_run": str(run),
+        "result_root": str(tmp_path / "results"),
+        "efficientad": {"threshold_artifact": str(threshold_artifact)},
+        "yolo": {"candidate_conf": 0.1, "final_threshold": 0.25, "imgsz": 640},
+    }
+
+
 def test_fusion_runs_as_all_pass_ng_or_error() -> None:
     assert fuse_demo_status((_branch_result(BranchStatus.PASS),)) is DemoFinalStatus.OK
     assert fuse_demo_status((_branch_result(BranchStatus.NG),)) is DemoFinalStatus.NG
@@ -71,38 +129,12 @@ def test_manifest_sample_loads_all_views_in_canonical_order(tmp_path: Path) -> N
 
 
 def test_demo_config_resolves_current_model_assets(tmp_path: Path) -> None:
-    roi = tmp_path / "roi.json"
-    capture = tmp_path / "capture.json"
-    run = tmp_path / "run"
-    roi.write_text("{}", encoding="utf-8")
-    capture.write_text("{}", encoding="utf-8")
-    for view in VIEW_ORDER:
-        model = run / "template" / view / "model.json"
-        checkpoint = run / "efficientad" / view / "model.ckpt"
-        model.parent.mkdir(parents=True)
-        checkpoint.parent.mkdir(parents=True)
-        model.write_text("{}", encoding="utf-8")
-        checkpoint.write_bytes(b"checkpoint")
-    bright = run / "bright_streak/calibrated_config.json"
+    roi, capture, run, threshold_artifact = _write_demo_assets(tmp_path)
     yolo = run / "yolo/train/weights/best.pt"
-    bright.parent.mkdir(parents=True)
-    yolo.parent.mkdir(parents=True)
-    bright.write_text("{}", encoding="utf-8")
-    yolo.write_bytes(b"checkpoint")
+    bright = run / "bright_streak/calibrated_config.json"
     config_path = tmp_path / "demo.json"
     config_path.write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "demo_id": "bmw-eight-view-demo-test",
-                "capture_config": str(capture),
-                "roi_config": str(roi),
-                "prepared_manifest": str(tmp_path / "manifest.csv"),
-                "training_run": str(run),
-                "result_root": str(tmp_path / "results"),
-                "yolo": {"candidate_conf": 0.1, "final_threshold": 0.25, "imgsz": 640},
-            }
-        ),
+        json.dumps(_demo_payload(tmp_path, threshold_artifact=threshold_artifact)),
         encoding="utf-8",
     )
 
@@ -113,6 +145,57 @@ def test_demo_config_resolves_current_model_assets(tmp_path: Path) -> None:
     assert config.bright_streak_config == bright.resolve()
     assert tuple(config.template_models) == VIEW_ORDER
     assert tuple(config.efficientad_checkpoints) == VIEW_ORDER
+    assert tuple(config.efficientad_thresholds) == VIEW_ORDER
+    assert tuple(config.efficientad_thresholds.values()) == pytest.approx(
+        tuple((index + 1) / 10 for index in range(len(VIEW_ORDER)))
+    )
+
+
+def test_demo_config_rejects_efficientad_threshold_artifact_missing_view(tmp_path: Path) -> None:
+    _roi, _capture, _run, threshold_artifact = _write_demo_assets(tmp_path)
+    payload = json.loads(threshold_artifact.read_text(encoding="utf-8"))
+    del payload["thresholds"]["back_secondary"]
+    threshold_artifact.write_text(json.dumps(payload), encoding="utf-8")
+    config_path = tmp_path / "demo.json"
+    config_path.write_text(
+        json.dumps(_demo_payload(tmp_path, threshold_artifact=threshold_artifact)),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="八个视角"):
+        load_demo_config(config_path)
+
+
+@pytest.mark.parametrize("flag", ["demo_only", "test_used_for_selection"])
+def test_demo_config_requires_explicit_efficientad_leakage_flags(tmp_path: Path, flag: str) -> None:
+    _roi, _capture, _run, threshold_artifact = _write_demo_assets(tmp_path)
+    payload = json.loads(threshold_artifact.read_text(encoding="utf-8"))
+    payload[flag] = False
+    threshold_artifact.write_text(json.dumps(payload), encoding="utf-8")
+    config_path = tmp_path / "demo.json"
+    config_path.write_text(
+        json.dumps(_demo_payload(tmp_path, threshold_artifact=threshold_artifact)),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=flag):
+        load_demo_config(config_path)
+
+
+@pytest.mark.parametrize("invalid", [True, "0.5", float("nan")])
+def test_demo_config_rejects_non_numeric_efficientad_thresholds(tmp_path: Path, invalid: object) -> None:
+    _roi, _capture, _run, threshold_artifact = _write_demo_assets(tmp_path)
+    payload = json.loads(threshold_artifact.read_text(encoding="utf-8"))
+    payload["thresholds"]["front"] = invalid
+    threshold_artifact.write_text(json.dumps(payload), encoding="utf-8")
+    config_path = tmp_path / "demo.json"
+    config_path.write_text(
+        json.dumps(_demo_payload(tmp_path, threshold_artifact=threshold_artifact)),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="有限数值"):
+        load_demo_config(config_path)
 
 
 def test_demo_config_rejects_candidate_threshold_above_final(tmp_path: Path) -> None:
@@ -127,6 +210,7 @@ def test_demo_config_rejects_candidate_threshold_above_final(tmp_path: Path) -> 
                 "prepared_manifest": "missing.csv",
                 "training_run": "missing",
                 "result_root": "results",
+                "efficientad": {"threshold_artifact": "missing.json"},
                 "yolo": {"candidate_conf": 0.5, "final_threshold": 0.25, "imgsz": 640},
             }
         ),

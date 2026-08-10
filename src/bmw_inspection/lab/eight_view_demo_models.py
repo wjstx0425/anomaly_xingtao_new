@@ -8,6 +8,7 @@ import tempfile
 import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from numbers import Real
 from pathlib import Path
 from time import perf_counter
 from types import MappingProxyType
@@ -17,6 +18,7 @@ import cv2
 import numpy as np
 
 from bmw_inspection.lab.eight_view_dataset import VIEW_ORDER
+from bmw_inspection.lab.efficientad_analysis import fixed_scale_heatmap
 from bmw_inspection.lab.eight_view_demo import (
     BranchStatus,
     DemoBranch,
@@ -37,6 +39,7 @@ class ModelOutput:
     threshold: float | None
     reason: str
     overlay: np.ndarray | None
+    raw_pred_label: bool | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.status, BranchStatus):
@@ -47,6 +50,8 @@ class ModelOutput:
                 raise ValueError(f"{name} must be finite or None")
         if not self.reason.strip():
             raise ValueError("reason must not be empty")
+        if self.raw_pred_label is not None and not isinstance(self.raw_pred_label, bool):
+            raise TypeError("raw_pred_label must be bool or None")
 
 
 ViewPredictor = Callable[[str, np.ndarray], ModelOutput]
@@ -359,10 +364,22 @@ class EightViewEfficientAdPredictor:
         self,
         checkpoints: Mapping[str, Path],
         *,
+        thresholds: Mapping[str, float],
         predictor_factory: EfficientPredictorFactory = _AnomalibEfficientPredictor,
     ) -> None:
         if tuple(checkpoints) != VIEW_ORDER:
             raise ValueError("EfficientAD模型必须按标准顺序覆盖八个视角")
+        if tuple(thresholds) != VIEW_ORDER:
+            raise ValueError("EfficientAD阈值必须按标准顺序覆盖八个视角")
+        if any(isinstance(value, bool) or not isinstance(value, Real) for value in thresholds.values()):
+            raise ValueError("EfficientAD阈值必须是有限数值")
+        from bmw_inspection.lab.efficientad_thresholds import _validated_thresholds
+
+        try:
+            _views, threshold_values = _validated_thresholds(thresholds)
+        except ValueError as error:
+            raise ValueError("EfficientAD阈值必须是有限数值") from error
+        self._thresholds = MappingProxyType(threshold_values)
         predictors: dict[str, Callable[[np.ndarray], EfficientPrediction]] = {}
         for view in VIEW_ORDER:
             checkpoint = Path(checkpoints[view]).expanduser().resolve()
@@ -374,24 +391,21 @@ class EightViewEfficientAdPredictor:
 
     def predict(self, view: str, image: np.ndarray) -> ModelOutput:
         with self._lock:
-            score, anomalous, anomaly_map = self._predictors[view](image)
+            score, raw_pred_label, anomaly_map = self._predictors[view](image)
         if not math.isfinite(score) or not np.isfinite(anomaly_map).all():
             raise ValueError("EfficientAD输出包含非有限数值")
-        minimum = float(anomaly_map.min())
-        spread = float(np.ptp(anomaly_map))
-        normalized = np.zeros(anomaly_map.shape, dtype=np.uint8)
-        if spread > 0:
-            normalized = np.rint((anomaly_map - minimum) * 255.0 / spread).astype(np.uint8)
-        heatmap = cv2.applyColorMap(normalized, cv2.COLORMAP_TURBO)
+        threshold = self._thresholds[view]
+        heatmap = fixed_scale_heatmap(anomaly_map)
         base = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR) if image.ndim == 2 else image.copy()
         heatmap = cv2.resize(heatmap, (base.shape[1], base.shape[0]), interpolation=cv2.INTER_LINEAR)
         overlay = cv2.addWeighted(base, 0.6, heatmap, 0.4, 0.0)
         return ModelOutput(
-            BranchStatus.NG if anomalous else BranchStatus.PASS,
+            BranchStatus.NG if score >= threshold else BranchStatus.PASS,
             score,
-            0.5,
-            f"EfficientAD异常分数 {score:.4f}",
+            threshold,
+            f"EfficientAD异常分数 {score:.4f}，部署阈值 {threshold:.4f}",
             overlay,
+            raw_pred_label=raw_pred_label,
         )
 
 
@@ -478,6 +492,7 @@ class EightViewModelSuite:
                 elapsed_ms=(perf_counter() - started) * 1000.0,
                 reason=output.reason,
                 overlay=output.overlay,
+                raw_pred_label=output.raw_pred_label,
             )
         except Exception as error:
             return DemoBranchResult(
@@ -502,7 +517,10 @@ def build_model_suite(config: EightViewDemoConfig) -> EightViewModelSuite:
         final_threshold=config.yolo_final_threshold,
         imgsz=config.yolo_imgsz,
     )
-    efficientad = EightViewEfficientAdPredictor(config.efficientad_checkpoints)
+    efficientad = EightViewEfficientAdPredictor(
+        config.efficientad_checkpoints,
+        thresholds=config.efficientad_thresholds,
+    )
     return EightViewModelSuite(
         rois=load_part_rois(config.roi_config),
         template_predictor=template.predict,

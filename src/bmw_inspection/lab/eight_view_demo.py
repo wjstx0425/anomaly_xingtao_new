@@ -7,6 +7,7 @@ import json
 import math
 from dataclasses import dataclass
 from enum import Enum
+from numbers import Real
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping
@@ -55,6 +56,7 @@ class DemoBranchResult:
     elapsed_ms: float
     reason: str
     overlay: np.ndarray | None
+    raw_pred_label: bool | None = None
 
     def __post_init__(self) -> None:
         if self.view_id not in VIEW_ORDER:
@@ -69,6 +71,8 @@ class DemoBranchResult:
             raise ValueError("elapsed_ms must be finite and non-negative")
         if not self.reason.strip():
             raise ValueError("reason must not be empty")
+        if self.raw_pred_label is not None and not isinstance(self.raw_pred_label, bool):
+            raise TypeError("raw_pred_label must be bool or None")
         if self.overlay is not None:
             if not isinstance(self.overlay, np.ndarray) or self.overlay.size == 0:
                 raise TypeError("overlay must be a non-empty numpy image or None")
@@ -112,6 +116,7 @@ class EightViewDemoConfig:
     result_root: Path
     template_models: Mapping[str, Path]
     efficientad_checkpoints: Mapping[str, Path]
+    efficientad_thresholds: Mapping[str, float]
     bright_streak_config: Path
     yolo_checkpoint: Path
     yolo_candidate_conf: float
@@ -122,6 +127,7 @@ class EightViewDemoConfig:
     def __post_init__(self) -> None:
         object.__setattr__(self, "template_models", MappingProxyType(dict(self.template_models)))
         object.__setattr__(self, "efficientad_checkpoints", MappingProxyType(dict(self.efficientad_checkpoints)))
+        object.__setattr__(self, "efficientad_thresholds", MappingProxyType(dict(self.efficientad_thresholds)))
 
 
 def fuse_demo_status(results: tuple[DemoBranchResult, ...]) -> DemoFinalStatus:
@@ -222,6 +228,36 @@ def _probability(value: object, name: str) -> float:
     return parsed
 
 
+def _load_efficientad_thresholds(path: Path) -> Mapping[str, float]:
+    """Load the Task 3 threshold contract and reject unsafe Demo assets."""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"无法读取EfficientAD整件阈值资产：{path}: {error}") from error
+    if not isinstance(payload, dict):
+        raise ValueError("EfficientAD整件阈值资产必须是JSON对象")
+    for flag in ("demo_only", "test_used_for_selection"):
+        if payload.get(flag) is not True:
+            raise ValueError(f"EfficientAD整件阈值资产必须显式标记{flag}=true")
+    thresholds = payload.get("thresholds")
+    if not isinstance(thresholds, dict) or tuple(thresholds) != VIEW_ORDER:
+        raise ValueError("EfficientAD整件阈值资产必须按标准顺序覆盖八个视角")
+    if any(isinstance(value, bool) or not isinstance(value, Real) for value in thresholds.values()):
+        raise ValueError("EfficientAD整件阈值必须是有限数值")
+
+    # Reuse the Task 3 threshold contract rather than maintaining a second
+    # numerical validator in the Demo loader.
+    from bmw_inspection.lab.efficientad_thresholds import _validated_thresholds
+
+    try:
+        views, parsed = _validated_thresholds(thresholds)
+    except ValueError as error:
+        raise ValueError("EfficientAD整件阈值必须是有限数值") from error
+    if views != VIEW_ORDER:
+        raise ValueError("EfficientAD整件阈值资产必须按标准顺序覆盖八个视角")
+    return MappingProxyType(parsed)
+
+
 def load_demo_config(path: Path) -> EightViewDemoConfig:
     """Load the small profile and resolve the exact trained model assets."""
     resolved = Path(path).expanduser().resolve()
@@ -234,6 +270,7 @@ def load_demo_config(path: Path) -> EightViewDemoConfig:
         "prepared_manifest",
         "training_run",
         "result_root",
+        "efficientad",
         "yolo",
     }
     if set(payload) != required or payload["schema_version"] != 1:
@@ -248,6 +285,9 @@ def load_demo_config(path: Path) -> EightViewDemoConfig:
     imgsz = yolo["imgsz"]
     if isinstance(imgsz, bool) or not isinstance(imgsz, int) or imgsz <= 0:
         raise ValueError("yolo.imgsz必须是正整数")
+    efficientad_config = payload["efficientad"]
+    if not isinstance(efficientad_config, dict) or set(efficientad_config) != {"threshold_artifact"}:
+        raise ValueError("efficientad配置字段不正确")
     base = resolved.parent
 
     def resolve(raw: object) -> Path:
@@ -259,6 +299,7 @@ def load_demo_config(path: Path) -> EightViewDemoConfig:
     capture_config = resolve(payload["capture_config"])
     roi_config = resolve(payload["roi_config"])
     training_run = resolve(payload["training_run"])
+    efficientad_thresholds = _load_efficientad_thresholds(resolve(efficientad_config["threshold_artifact"]))
     for label, asset in (("capture_config", capture_config), ("roi_config", roi_config)):
         if not asset.is_file():
             raise ValueError(f"{label}不存在：{asset}")
@@ -287,6 +328,7 @@ def load_demo_config(path: Path) -> EightViewDemoConfig:
         result_root=resolve(payload["result_root"]),
         template_models=template_models,
         efficientad_checkpoints=efficientad,
+        efficientad_thresholds=efficientad_thresholds,
         bright_streak_config=bright,
         yolo_checkpoint=yolo_checkpoint,
         yolo_candidate_conf=candidate,

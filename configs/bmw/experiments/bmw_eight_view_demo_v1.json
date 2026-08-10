@@ -6,6 +6,9 @@
   "prepared_manifest": "../../../dataset/bmw_lab_prepared/bmw_hdr_eight_view_v1/manifests/dataset_manifest.csv",
   "training_run": "../../../results/bmw_lab_one_click/bmw_lab_eight_view_v1",
   "result_root": "../../../results/bmw_eight_view_demo",
+  "efficientad": {
+    "threshold_artifact": "../../../results/bmw_lab_one_click/bmw_lab_eight_view_v1/efficientad/score_analysis/part_thresholds.json"
+  },
   "yolo": {
     "candidate_conf": 0.1,
     "final_threshold": 0.25,
