@@ -269,7 +269,7 @@ uv run --no-sync python pipeline/bmw_lab_recalibrate_bright_streak.py
 ```bash
 uv run --no-sync python pipeline/bmw_lab_recalibrate_bright_streak.py \
   --bold-continuity \
-  --output-dir results/bmw_lab_one_click/bmw_lab_eight_view_v1/bright_streak_ridge_v2_bold
+  --output-dir results/bmw_lab_one_click/bmw_lab_eight_view_v1/bright_streak_ridge_v3_bold
 ```
 
 `--bold-continuity` 是 **demo-only** 模式：`min_contrast_snr` 与 `min_coverage_ratio` 仍只由 calibration 拟合，但三个 continuity 阈值会使用 calibration normal 与 final-test normal 的包络，因此 final test 不再是完全隔离的无泄漏评估集。报告会分别记录 presence 与 continuity 的拟合 split。该开关默认关闭，不应用于正式验收指标。
@@ -281,7 +281,7 @@ results/bmw_lab_one_click/bmw_lab_eight_view_v1/
 ├── run_report.json
 ├── template/<view>/model.json
 ├── bright_streak/calibrated_config.json
-├── bright_streak_ridge_v2_bold/calibrated_config.json
+├── bright_streak_ridge_v3_bold/calibrated_config.json
 ├── efficientad/<view>/model.ckpt
 ├── efficientad/score_analysis/part_thresholds.json
 └── yolo/train/weights/best.pt
@@ -332,7 +332,7 @@ Template对位置和成像变化敏感。后续如果出现相机轻微移动、
 
 新的中心脊线跟踪替代了“整条光痕必须是一个连通域”的旧候选筛选。默认不泄漏重标定时，正常图已不再被判成“几乎没有光痕”，剩余4个误判全部是 `NG_BROKEN`。开启 `--bold-continuity` 后，20个calibration样本和20个final-test样本全部正确：17个正常有光痕件全部通过，3个完全无光痕件仍全部输出 `NG_NO_STREAK`。
 
-这个100%不是独立测试成绩：存在性两个阈值仍只用calibration，但连续性三个阈值用了calibration normal和final-test normal的包络。实验报告为 `bright_streak_ridge_v2_bold/report.json`，并明确记录 `demo_only=true`。
+这个100%不是独立测试成绩：存在性两个阈值仍只用calibration，但连续性三个阈值用了calibration normal和final-test normal的包络。实验报告为 `bright_streak_ridge_v3_bold/report.json`，并明确记录 `demo_only=true`。
 
 当前最重要的限制是：数据中只有“连续正常光痕”和“完全无光痕”，没有足够的“光痕存在但中间断续”实物样本。因此最长连续段、断口比例和断口数量阈值只是按正常光痕的严格包络确定，尚未证明能稳定区分各种真实断续形态。演示时可以显示这些连续性证据，但不能宣称断续缺陷已经完成独立验证。
 
@@ -382,7 +382,7 @@ uv run --no-sync python pipeline/bmw_lab_calibrate_efficientad_thresholds.py
 - `efficientad_scores.csv`：208张图的视角、真实标签、0.5诊断判定、异常分数和图片路径。
 - `efficientad_score_distributions.png`：八视角正常/缺陷散点分布及0.5阈值线。
 - `efficientad_calibrated_score_distributions.png`：同一批分数与Demo实际逐视角阈值线。
-- `part_thresholds.json`、`part_threshold_report.json`：八视图阈值、整件误判/召回和泄漏标记。
+- `part_thresholds.json`、`part_threshold_report.json`：八视图阈值、整件误判/召回、泄漏标记、分数CSV路径/SHA-256和UTC标定时间。
 - `examples/<view>.png`：每视角高分正常和低分缺陷样本的热力图。
 - `report.json`：从逐图运行时输出重新计算的AUROC、F1、平衡准确率、误拒和漏检。
 

@@ -243,7 +243,7 @@ def test_repository_demo_config_selects_the_bold_bright_streak_asset() -> None:
     assert payload["bright_streak"] == {
         "config": (
             "../../../results/bmw_lab_one_click/bmw_lab_eight_view_v1/"
-            "bright_streak_ridge_v2_bold/calibrated_config.json"
+            "bright_streak_ridge_v3_bold/calibrated_config.json"
         )
     }
 
