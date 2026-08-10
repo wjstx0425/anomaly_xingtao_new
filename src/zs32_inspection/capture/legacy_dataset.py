@@ -234,7 +234,7 @@ def _write_exclusive(path: Path, content: bytes) -> None:
         | os.O_WRONLY
         | getattr(os, "O_CLOEXEC", 0)
         | getattr(os, "O_NOFOLLOW", 0),
-        0o640,
+        0o600,
     )
     try:
         with os.fdopen(descriptor, "wb", closefd=False) as stream:
