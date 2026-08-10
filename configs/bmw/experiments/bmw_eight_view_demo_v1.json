@@ -7,7 +7,7 @@
   "training_run": "../../../results/bmw_lab_one_click/bmw_lab_eight_view_v1",
   "result_root": "../../../results/bmw_eight_view_demo",
   "bright_streak": {
-    "config": "../../../results/bmw_lab_one_click/bmw_lab_eight_view_v1/bright_streak_ridge_v3_bold/calibrated_config.json"
+    "config": "../../../results/bmw_lab_one_click/bmw_lab_eight_view_v1/bright_streak_ridge_v4_bold/calibrated_config.json"
   },
   "efficientad": {
     "threshold_artifact": "../../../results/bmw_lab_one_click/bmw_lab_eight_view_v1/efficientad/score_analysis/part_thresholds.json"
