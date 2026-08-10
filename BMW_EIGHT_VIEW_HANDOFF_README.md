@@ -311,18 +311,37 @@ calibration平衡准确率为1.000，0正常误拒、0无光痕误放行。独�
 
 每个视角各训练一个EfficientAD-S，仅用该视角的正常外观学习分布；`no_streak`在这个分支中按正常件处理，因为它没有其他外观缺陷。模型输入为256×256，训练30 epochs，框架训练batch固定为1。
 
-| 视角 | image AUROC | image F1 | 解释 |
-|---|---:|---:|---|
-| `front` | 0.9625 | 0.6667 | 排序能力较好，阈值仍有改进空间 |
-| `front_left` | 0.8250 | 0.5000 | 中等，正常变化与异常有重叠 |
-| `front_right` | 0.8333 | 0.5000 | 中等，需补充该视角样本 |
-| `front_secondary` | 1.0000 | 0.8000 | 当前测试集最好，但样本少，不能理解为量产100% |
-| `back` | 0.9125 | 0.3333 | 分数排序尚可，当前阈值下分类效果偏弱 |
-| `back_left` | 0.9750 | 0.5000 | 排序能力较好，固定阈值仍偏弱 |
-| `back_right` | 0.7375 | 0.0000 | 当前最弱；固定阈值下没有形成有效F1 |
-| `back_secondary` | 0.8875 | 0.5000 | 有一定区分度，但仍需重新标定 |
+原训练报告中的AUROC可以由逐图运行时分数完整复现；但重新执行 `engine.test` 时，TorchMetrics明确警告F1在更新状态前被计算，因此原 `image_F1Score` 不应继续用于判断部署阈值。下表的运行时F1、平衡准确率、正常误拒和缺陷漏检均由Demo同路径的逐图 `predict` 输出重新计算。
 
-这里不能只看AUROC。例如 `back_right` 的AUROC为0.7375，表示异常分数并非完全随机，但F1为0，说明当前阈值下实际OK/NG分类不可用；它可能把异常和正常全部压在阈值同一侧。`front_secondary` 的AUROC为1.0也只代表当前小测试集排序完全分开，不代表面对新批次、轻微位姿变化和新缺陷仍能保持1.0。
+| 视角 | AUROC | 运行时F1 | 平衡准确率 | 正常误拒 | 缺陷漏检 |
+|---|---:|---:|---:|---:|---:|
+| `front` | 0.9625 | 0.8000 | 0.9500 | 2 / 20 | 0 / 4 |
+| `front_left` | 0.8250 | 0.8000 | 0.8333 | 0 / 20 | 1 / 3 |
+| `front_right` | 0.8333 | 0.8000 | 0.8333 | 0 / 20 | 1 / 3 |
+| `front_secondary` | 1.0000 | 0.8000 | 0.8333 | 0 / 20 | 1 / 3 |
+| `back` | 0.9125 | 0.5714 | 0.9250 | 3 / 20 | 0 / 2 |
+| `back_left` | 0.9750 | 0.8000 | 0.9750 | 1 / 20 | 0 / 2 |
+| `back_right` | 0.7375 | 0.6667 | 0.7500 | 0 / 20 | 1 / 2 |
+| `back_secondary` | 0.8875 | 0.6667 | 0.8250 | 2 / 20 | 1 / 4 |
+
+这里不能只看AUROC。例如 `back_right` 的AUROC为0.7375，表示异常分数并非完全随机，但2张缺陷只检出1张。`front_secondary` 的AUROC为1.0也只代表当前3张缺陷与20张正常的分数排序完全分开；其中仍有1张缺陷落在运行判定阈值下，不能理解为量产100%。
+
+逐图分数和热力图可重新导出：
+
+```bash
+uv run --no-sync python pipeline/bmw_lab_visualize_efficientad_scores.py
+```
+
+默认输出到 `results/bmw_lab_one_click/bmw_lab_eight_view_v1/efficientad/score_analysis/`：
+
+- `efficientad_scores.csv`：183张测试图的视角、真实标签、运行判定、异常分数、阈值和图片路径。
+- `efficientad_score_distributions.png`：八视角正常/缺陷散点分布及0.5阈值线。
+- `examples/<view>.png`：每视角高分正常和低分缺陷样本的热力图。
+- `report.json`：从逐图运行时输出重新计算的AUROC、F1、平衡准确率、误拒和漏检。
+
+分数是Anomalib后处理后的0–1归一化分数，同一视角内比较最有意义；不同视角由不同模型独立标定，不能把两个视角相同的0.6理解为缺陷严重度完全相同。热力图固定使用0–1色标，不再对每张图单独拉伸颜色，因此正常图和缺陷图可以直观对比。
+
+当前热力图复查还显示：部分 `front` 正常误拒主要高亮零件外侧亮斑、孔位或ROI边缘，而不是稳定的缺陷区域；`back_right` 有一张真实缺陷的分数接近0且几乎没有有效热点。这说明当前EfficientAD既受背景/反光正常波动影响，也会漏掉训练中覆盖不足的局部缺陷。后续应先收紧或遮罩无关背景，并增加对应视角的正常反光变化和漏检缺陷，不应只靠降低0.5阈值。
 
 因此当前EfficientAD适合在Demo中提供第二种异常证据，不适合作为单独放行依据。优先工作应是补充 `back_right`、`back_secondary`、`front_left` 的正常波动和真实缺陷，然后只用calibration重新选阈值，再在未参与调参的物理件上报告F1、误放行和误拒。
 
@@ -519,6 +538,7 @@ for script in \
   pipeline/bmw_lab_prepare_labeling_package.py \
   pipeline/bmw_lab_materialize_training_data.py \
   pipeline/bmw_lab_train_all.py \
+  pipeline/bmw_lab_visualize_efficientad_scores.py \
   pipeline/bmw_lab_eight_view_demo.py
 do
   uv run --no-sync python "$script" --help >/dev/null || exit 1
