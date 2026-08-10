@@ -455,7 +455,7 @@ uv run --no-sync python pipeline/bmw_lab_eight_view_demo.py \
   --save-screenshot results/bmw_eight_view_demo/smoke.png
 ```
 
-当前真实样本 `bmw_normal_group072_000001` 为25 PASS、最终OK。本轮受限会话中PyTorch未获得CUDA，CPU实测总推理为4.048秒；截图为 `artifacts/bmw_eight_view_threshold_demo/group072_bold_efficientad_5pct.png`。
+当前真实样本 `bmw_normal_group072_000001` 为25 PASS、最终OK，RTX 4090实测总推理为3.431秒；截图为 `artifacts/bmw_eight_view_threshold_demo/group072_bold_efficientad_5pct.png`。这只是单样本离线冒烟，不是节拍基准。
 
 ## 14. 四相机实时Demo
 
