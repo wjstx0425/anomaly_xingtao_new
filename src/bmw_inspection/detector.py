@@ -240,8 +240,11 @@ def _track_center_ridge(
         present,
         max_step=max_step,
     )
-    if accepted_rows.any() and int(np.ptp(peaks[accepted_rows])) > max_step:
-        accepted_rows[:] = False
+    adjacent_rows = present[:-1] & present[1:]
+    if adjacent_rows.any():
+        local_steps = np.abs(np.diff(peaks.astype(np.int32)))[adjacent_rows]
+        if float(local_steps.mean()) > 1.0:
+            accepted_rows[:] = False
     mask[np.flatnonzero(accepted_rows), peaks[accepted_rows]] = True
     raw_median = float(np.median(roi))
     raw_mad = float(np.median(np.abs(roi.astype(np.float32) - raw_median)))
