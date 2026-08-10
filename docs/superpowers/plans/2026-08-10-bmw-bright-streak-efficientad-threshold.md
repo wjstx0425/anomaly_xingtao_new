@@ -4,7 +4,9 @@
 
 **Goal:** Replace the brittle BMW bright-streak connected-component selector with a center-ridge tracker and make the eight-view EfficientAD branch meet an observed whole-part normal false-positive rate of at most 5% on the current laboratory score set.
 
-**Architecture:** Keep the existing fixed ROI, image-quality checks, branch results, and Fusion rule. Bright-streak extraction becomes a row-wise center-corridor tracker but continues to publish the existing `BrightStreakDecision` contract. EfficientAD gains a small offline joint-threshold module and immutable JSON artifact; the Demo loads eight per-view thresholds and applies them to runtime scores instead of checkpoint `pred_label`.
+> 状态：已实施。下方未勾选框保留的是原始执行步骤，不是当前进度记录；实测数据、产物路径和限制以 `BMW_EIGHT_VIEW_HANDOFF_README.md` 为准。
+
+**Architecture:** Keep the existing fixed ROI, image-quality checks, branch results, and Fusion rule. Bright-streak extraction becomes a row-wise center-corridor tracker but continues to publish the existing `BrightStreakDecision` contract. EfficientAD gains a small offline joint-threshold module and hash-bound JSON artifact; the Demo loads eight per-view thresholds and applies them to runtime scores instead of checkpoint `pred_label`.
 
 **Tech Stack:** Python 3.11+, OpenCV, NumPy, Anomalib EfficientAD, pytest, `uv`.
 
