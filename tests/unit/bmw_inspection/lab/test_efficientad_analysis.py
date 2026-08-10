@@ -1,6 +1,7 @@
 """Offline EfficientAD score-report helpers."""
 
 import csv
+import math
 import runpy
 from pathlib import Path
 from types import SimpleNamespace
@@ -118,10 +119,12 @@ def test_score_distribution_uses_each_views_actual_threshold(tmp_path: Path, mon
         EfficientAdScore("back", "defect", Path("back.png"), 0.9, True),
     )
     threshold_lines: list[float] = []
+    threshold_labels: list[str] = []
     original_axhline = Axes.axhline
 
     def record_axhline(self, y=0, xmin=0, xmax=1, **kwargs) -> object:
         threshold_lines.append(float(y))
+        threshold_labels.append(str(kwargs["label"]))
         return original_axhline(self, y=y, xmin=xmin, xmax=xmax, **kwargs)
 
     monkeypatch.setattr(Axes, "axhline", record_axhline)
@@ -130,10 +133,11 @@ def test_score_distribution_uses_each_views_actual_threshold(tmp_path: Path, mon
         tmp_path / "distribution.png",
         records,
         views=("front", "back"),
-        threshold={"front": 0.2, "back": 0.8},
+        threshold={"front": 0.2, "back": math.nextafter(1.0, math.inf)},
     )
 
-    assert threshold_lines == [0.2, 0.8]
+    assert threshold_lines == [0.2, math.nextafter(1.0, math.inf)]
+    assert threshold_labels == ["阈值 0.20", "阈值 1.0000000000000002 (>1)"]
 
 
 def test_analysis_cli_has_reproducible_report_defaults() -> None:

@@ -12,6 +12,7 @@ import pytest
 
 from bmw_inspection.lab.efficientad_thresholds import (
     PartScore,
+    PartThresholdFit,
     evaluate_part_thresholds,
     fit_part_thresholds,
     read_part_scores_csv,
@@ -405,3 +406,71 @@ def test_cli_writes_hash_bound_demo_only_assets(tmp_path: Path, monkeypatch) -> 
         ])
         == 2
     )
+
+
+def test_calibration_cli_renders_final_per_view_thresholds_without_inference(tmp_path: Path, monkeypatch) -> None:
+    root = Path(__file__).resolve().parents[4]
+    score_csv = tmp_path / "efficientad_scores.csv"
+    rows = _eight_view_rows(normal_parts=1, defect_parts=1)
+    with score_csv.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=("view_id", "label", "score", "image_path"))
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({
+                "view_id": row.view_id,
+                "label": row.label,
+                "score": row.score,
+                "image_path": row.image_path,
+            })
+    thresholds = {view: 0.2 + index / 100 for index, view in enumerate(VIEW_ORDER)}
+    thresholds["back"] = 1.0000000000000002
+    fit = PartThresholdFit(
+        thresholds=thresholds,
+        target_part_fpr=0.05,
+        allowed_normal_false_positive_count=0,
+        normal_part_count=1,
+        normal_false_positive_count=0,
+        observed_normal_part_fpr=0.0,
+        defect_part_count=1,
+        defect_detected_count=1,
+        defect_image_hits=1,
+    )
+    namespace = runpy.run_path(root / "pipeline/bmw_lab_calibrate_efficientad_thresholds.py")
+    captured: dict[str, object] = {}
+
+    def render(
+        output_path: Path,
+        records: tuple[object, ...],
+        *,
+        views: tuple[str, ...],
+        threshold: object,
+    ) -> Path:
+        captured.update(output_path=output_path, records=records, views=views, threshold=threshold)
+        output_path.write_bytes(b"calibrated-plot")
+        return output_path
+
+    monkeypatch.setitem(namespace["calibrate"].__globals__, "fit_part_thresholds", lambda *_args, **_kwargs: fit)
+    monkeypatch.setitem(namespace["calibrate"].__globals__, "render_score_distributions", render)
+    output_dir = tmp_path / "thresholds"
+    args = namespace["build_parser"]().parse_args([
+        "--scores-csv",
+        str(score_csv),
+        "--output-dir",
+        str(output_dir),
+    ])
+
+    report = namespace["calibrate"](args)
+
+    plot_path = output_dir.resolve() / "efficientad_calibrated_score_distributions.png"
+    assert captured["output_path"] == plot_path
+    assert captured["views"] == VIEW_ORDER
+    assert captured["threshold"] == thresholds
+    plotted = captured["records"]
+    assert [item.view_id for item in plotted] == [row.view_id for row in rows]
+    assert [item.label for item in plotted] == [row.label for row in rows]
+    assert [item.score for item in plotted] == [row.score for row in rows]
+    assert [item.image_path for item in plotted] == [row.image_path for row in rows]
+    assert all(item.predicted_anomalous is (item.score >= thresholds[item.view_id]) for item in plotted)
+    assert report["calibrated_score_distributions"] == str(plot_path)
+    persisted = json.loads((output_dir / "part_threshold_report.json").read_text(encoding="utf-8"))
+    assert persisted["calibrated_score_distributions"] == str(plot_path)

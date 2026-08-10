@@ -14,6 +14,7 @@ SRC_ROOT = REPO_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
+from bmw_inspection.lab.efficientad_analysis import EfficientAdScore, render_score_distributions  # noqa: E402
 from bmw_inspection.lab.efficientad_thresholds import (  # noqa: E402
     fit_part_thresholds,
     read_part_scores_csv_snapshot,
@@ -59,11 +60,27 @@ def calibrate(args: argparse.Namespace) -> dict[str, object]:
     }
     threshold_path = output_dir / "part_thresholds.json"
     report_path = output_dir / "part_threshold_report.json"
+    distribution_path = render_score_distributions(
+        output_dir / "efficientad_calibrated_score_distributions.png",
+        tuple(
+            EfficientAdScore(
+                view_id=row.view_id,
+                label=row.label,
+                image_path=row.image_path,
+                score=row.score,
+                predicted_anomalous=row.score >= fit.thresholds[row.view_id],
+            )
+            for row in rows
+        ),
+        views=views,
+        threshold=fit.thresholds,
+    )
     threshold_path.write_text(json.dumps(shared, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     report = {
         "status": "complete",
         **shared,
         "threshold_asset": str(threshold_path),
+        "calibrated_score_distributions": str(distribution_path),
     }
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return {**report, "report": str(report_path)}

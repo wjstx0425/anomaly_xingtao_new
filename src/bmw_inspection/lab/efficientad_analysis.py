@@ -173,6 +173,7 @@ def render_score_distributions(
     padding = max(0.03, (upper - lower) * 0.05)
     for axis, view in zip(axes, view_order, strict=False):
         view_threshold = thresholds[view]
+        threshold_text = f"{view_threshold:.2f}" if view_threshold <= 1.0 else f"{view_threshold!r} (>1)"
         view_records = [item for item in records if item.view_id == view]
         for x_position, label, color, chinese in (
             (0.0, "normal", "#2E8B57", "正常"),
@@ -193,7 +194,7 @@ def render_score_distributions(
             color="#202124",
             linestyle="--",
             linewidth=1.4,
-            label=f"阈值 {view_threshold:.2f}",
+            label=f"阈值 {threshold_text}",
         )
         axis.set_title(view)
         axis.set_xticks((0, 1), ("正常", "缺陷"))
