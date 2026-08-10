@@ -199,6 +199,60 @@ def _decision(
     )
 
 
+def _coherent_ridge_rows(peaks: np.ndarray, present: np.ndarray, *, max_step: int) -> np.ndarray:
+    accepted = present.astype(bool, copy=True)
+    previous: int | None = None
+    for row in np.flatnonzero(present):
+        if (
+            previous is not None
+            and row - previous == 1
+            and abs(int(peaks[row]) - int(peaks[previous])) > max_step
+        ):
+            accepted[row] = False
+            continue
+        previous = int(row)
+    return accepted
+
+
+def _track_center_ridge(
+    roi: np.ndarray,
+    response: np.ndarray,
+    config: BrightStreakConfig,
+) -> tuple[np.ndarray, float]:
+    smoothed = cv2.GaussianBlur(response, (3, 1), 0)
+    center = (roi.shape[1] - 1) / 2.0
+    left = max(0, int(math.floor(center - config.center_tolerance_px)))
+    right = min(roi.shape[1], int(math.ceil(center + config.center_tolerance_px + 1)))
+    corridor = smoothed[:, left:right].astype(np.float32)
+    median = float(np.median(response))
+    mad = float(np.median(np.abs(response.astype(np.float32) - median)))
+    threshold = median + config.response_mad_scale * max(1.0, mad)
+    peaks = corridor.argmax(axis=1) + left
+    strengths = corridor.max(axis=1)
+    present = strengths >= threshold
+    # Retain coherent runs; short row gaps are handled later by `_metrics`.
+    # Build a one-pixel decision mask at each accepted peak so width variation
+    # cannot discard an otherwise valid line.
+    mask = np.zeros_like(roi, dtype=bool)
+    max_step = max(2, int(config.max_component_width_px))
+    accepted_rows = _coherent_ridge_rows(
+        peaks,
+        present,
+        max_step=max_step,
+    )
+    if accepted_rows.any() and int(np.ptp(peaks[accepted_rows])) > max_step:
+        accepted_rows[:] = False
+    mask[np.flatnonzero(accepted_rows), peaks[accepted_rows]] = True
+    raw_median = float(np.median(roi))
+    raw_mad = float(np.median(np.abs(roi.astype(np.float32) - raw_median)))
+    contrast = (
+        float(max(0.0, (float(strengths[accepted_rows].mean()) - median) / max(1.0, raw_mad)))
+        if accepted_rows.any()
+        else 0.0
+    )
+    return mask, contrast
+
+
 def detect_bright_streak_evidence(
     image: np.ndarray,
     config: BrightStreakConfig,
@@ -265,28 +319,9 @@ def detect_bright_streak_evidence(
     kernel_width = max(1, kernel_width)
     background_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_width, 3))
     response = cv2.morphologyEx(roi, cv2.MORPH_TOPHAT, background_kernel)
-    response_median = float(np.median(response))
-    response_mad = float(np.median(np.abs(response.astype(np.float32) - response_median)))
-    core_threshold = response_median + config.response_mad_scale * max(1.0, response_mad)
-    core_mask = (response.astype(np.float32) >= core_threshold).astype(np.uint8)
-
-    count, labels, stats, centroids = cv2.connectedComponentsWithStats(core_mask, 8)
     center_x = (roi.shape[1] - 1) / 2.0
-    candidates: list[int] = []
-    for index in range(1, count):
-        _x, _y, width, height, area = (int(value) for value in stats[index])
-        component_center = float(centroids[index, 0])
-        if area < config.min_component_area_px:
-            continue
-        if not config.min_component_width_px <= width <= config.max_component_width_px:
-            continue
-        if abs(component_center - center_x) > config.center_tolerance_px:
-            continue
-        if height < width:
-            continue
-        candidates.append(index)
 
-    selected_mask = np.zeros_like(core_mask, dtype=bool)
+    selected_mask = np.zeros_like(roi, dtype=bool)
     contrast_snr = 0.0
     saturated_mask = roi >= _BRIGHT_CLIP_LEVEL
     saturated_presence = saturated_mask.any(axis=1)
@@ -319,22 +354,8 @@ def detect_bright_streak_evidence(
         contrast_snr = float(
             max(0.0, (float(roi[saturated_mask].mean()) - raw_median) / max(1.0, raw_mad))
         )
-    elif candidates:
-        anchor = max(candidates, key=lambda index: int(stats[index, cv2.CC_STAT_AREA]))
-        anchor_center = float(centroids[anchor, 0])
-        alignment_tolerance = max(1.0, config.max_component_width_px / 2.0)
-        aligned = [
-            index
-            for index in candidates
-            if abs(float(centroids[index, 0]) - anchor_center) <= alignment_tolerance
-        ]
-        selected_mask = np.isin(labels, np.asarray(aligned, dtype=labels.dtype))
-        raw_median = float(np.median(roi))
-        raw_mad = float(np.median(np.abs(roi.astype(np.float32) - raw_median)))
-        anchor_values = response[labels == anchor].astype(np.float32)
-        contrast_snr = float(
-            max(0.0, (float(anchor_values.mean()) - response_median) / max(1.0, raw_mad))
-        )
+    else:
+        selected_mask, contrast_snr = _track_center_ridge(roi, response, config)
 
     mask = selected_mask.astype(np.uint8) * 255
     metrics, runs, gaps = _metrics(
