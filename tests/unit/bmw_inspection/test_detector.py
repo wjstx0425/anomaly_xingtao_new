@@ -111,6 +111,30 @@ def test_curved_variable_width_streak_is_tracked(tmp_path: Path) -> None:
     assert decision.metrics.coverage_ratio >= 0.75
 
 
+def test_evidence_overlay_follows_the_curved_decision_mask(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+    _write_synthetic_config(config_path)
+    image = _curved_streak_image()
+    decision = detect_bright_streak_evidence(image, load_config(config_path))
+
+    overlay = render_evidence(image, decision)
+
+    x1, y1, x2, y2 = decision.result.roi_xyxy
+    accepted = decision.mask.astype(bool)
+    accepted_rows = np.flatnonzero(accepted.any(axis=1))
+    tracked_columns = np.array(
+        [int(np.flatnonzero(accepted[row])[0]) for row in accepted_rows],
+        dtype=np.int32,
+    )
+    assert np.ptp(tracked_columns) >= 6
+    overlay_roi = overlay[y1:y2, x1:x2]
+    accepted_green = np.all(overlay_roi == np.array([0, 255, 0], dtype=np.uint8), axis=2)
+    accepted_below_status_text = accepted.copy()
+    accepted_below_status_text[:20] = False
+    assert accepted_below_status_text.any()
+    assert accepted_green[accepted_below_status_text].all()
+
+
 def test_gradual_drift_beyond_width_allowance_is_tracked(tmp_path: Path) -> None:
     config_path = tmp_path / "config.json"
     _write_synthetic_config(config_path)
