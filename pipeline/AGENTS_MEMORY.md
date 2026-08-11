@@ -1,5 +1,16 @@
 # Pipeline Memory
 
+## BMW 21-point Template-only diagnostic candidate (2026-08-11)
+
+- `bmw_lab_train_template_fixed_thresholds.py` is the isolated offline entrypoint. It accepts only the five
+  21-point sessions by default, extracts the source session from every crop filename, trains templates only from
+  `train/normal`, reuses each morning `template/<view>/model.json` numerical threshold, and refuses an existing
+  output directory.
+- The candidate writes `template/<view>` models plus `template_report.json` with normal-only calibration/final-test
+  per-view metrics and eight-view physical-part pass rates. It does not update `bmw_eight_view_demo_v1.json`.
+- The real fixed-threshold candidate reports 13/21 calibration parts passing and 8/20 final-test parts passing; changing only the template source did not fix the low whole-part pass rate. `front_right` and `front_secondary` are the dominant final-test rejection views.
+- The corrected 21:00 bright-streak candidate uses `--roi-xyxy 1792 1180 1873 1793` by default and writes `bmw_right_batch_20260810_21_bright_v2_roi_corrected`. Its held-out result is 19/20 versus 10/20 for the unchanged current detector; broken-but-present evidence is still absent.
+
 ## Cropped six-view PatchCore retraining
 
 - `run_patchcore_roi_six_views.sh` is the minimal user-run entrypoint.

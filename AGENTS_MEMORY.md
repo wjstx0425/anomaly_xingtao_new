@@ -568,3 +568,23 @@
 - GitHub backup target is branch `agent/bmw-eight-view-handoff`; the snapshot includes BMW code, configs, pipeline entrypoints, and tests but excludes `dataset/`, `results/`, images, and model checkpoints.
 - Keep the latest right-hand training entrypoints in the backup: `pipeline/bmw_lab_train_right.py`, `pipeline/bmw_lab_train_right_multisource.py`, `src/bmw_inspection/lab/right_train_all.py`, and `src/bmw_inspection/lab/multisource_training_data.py`, together with their unit tests.
 - Local recoverable backup is a complete Git bundle under `/home/yunjing/anomaly_xingtao_new/local_backups/`; verify it with `git bundle verify` and use its recorded SHA-256 before restoration.
+
+## BMW 21:00 EfficientAD-only diagnostic entrypoint (2026-08-11)
+
+- Use `pipeline/bmw_lab_train_efficientad_only.py` for the published `bmw_right_batch_20260810_21_roi_v1` ROI release. It runs only EfficientAD-S with 30 epochs, batch 1, 256x256, GPU 0, and seed 42; it then scores the 21 `normal_test` physical parts and fits a normal-only whole-part threshold asset with at most 1/21 false NG. It neither materializes data nor invokes Template, bright-streak, or YOLO stages.
+- The release has pending YOLO labels (`yolo_training_ready=false`), which must not block this diagnostic path. The isolated preflight validates only all eight EfficientAD `normal` and `normal_test` directories.
+- The candidate threshold asset is `efficientad/score_analysis/part_thresholds.json`, explicitly marked `normal_test_only`, `candidate_only`, and `defect_metrics=not_evaluated`; it does not update the default Demo. The default candidate output is `results/bmw_lab_one_click/bmw_right_batch_20260810_21_efficientad_v1`; a non-dry run rejects any existing directory or symlink, so choose a new `--run-id` for every retry. `--dry-run` is safe for layout and plan verification and does not start GPU training.
+- The real 2026-08-11 run completed all eight 30-epoch checkpoints and 168 `normal_test` scores. `part_thresholds.json` reports 21 normal parts, 0 false NG, observed whole-part FPR 0.0, and an allowed budget of 1/21. Per-view thresholds are approximately 0.5 after each checkpoint's EfficientAD post-processing. There are no defect rows, so defect recall/AUROC remain unverified and this candidate must not replace the Demo merely from the normal-FPR result.
+
+## BMW 21:00 raw-profile bright-streak v2 diagnostic (2026-08-11)
+
+- `src/bmw_inspection/lab/bright_streak_raw_profile.py` is an offline-only v2 candidate. It calculates a median-smoothed, per-row centre-band minus left/right-background contrast profile, then publishes coverage, longest run, internal max gap, and gap count.
+- Calibration-only class-mean inspection proved the morning base ROI `[1872,1180,1953,1793]` is shifted about 80 pixels right of the 21:00 streak. The corrected candidate ROI is `[1792,1180,1873,1793]`; the base/current detector still uses its unchanged ROI for the A/B comparison.
+- `pipeline/bmw_lab_evaluate_bright_streak_raw_profile.py` defaults to the corrected ROI and immutable output `results/bmw_lab_one_click/bmw_right_batch_20260810_21_bright_v2_roi_corrected`. It fits thresholds only from calibration rows, compares v2 and the unchanged current detector only on final_test, and rejects an already-existing output directory.
+- Each evaluated sample writes `profiles/profile_<manifest-row>.npz` with `row_scores` and `mask`; `metrics.csv` links that artifact and records all continuity statistics. The code does not alter `src/bmw_inspection/detector.py` or the default Demo configuration.
+- Real final-test A/B on 20 held-out rows: corrected raw-profile v2 is 19/20 (95%), with 15/16 normal accepted and 4/4 no-streak detected; the unchanged current algorithm is 10/20 (50%). No real broken-but-present samples exist, so interrupted-streak recall remains unverified even though synthetic continuity tests pass.
+
+## BMW 21:00 Template fixed-threshold diagnostic result (2026-08-11)
+
+- The isolated candidate changed only the five selected templates per view and reused the morning numeric thresholds, 512x512 preprocessing, and max shift 12. It used only 21:00 `train/normal` rows and did not update the Demo.
+- Whole-part normal pass rate is 13/21 (61.9%) on calibration and 8/20 (40.0%) on final_test. The worst final-test false-reject views are `front_right` (8/20) and `front_secondary` (5/20). Therefore replacing afternoon templates with 21:00 templates alone does not solve Template instability; threshold/registration sensitivity remains the main follow-up.

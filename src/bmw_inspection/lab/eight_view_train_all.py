@@ -133,6 +133,43 @@ def build_training_plan(config: LabTrainingConfig) -> tuple[TrainingStep, ...]:
     )
 
 
+def build_efficientad_only_plan(config: LabTrainingConfig) -> tuple[TrainingStep, ...]:
+    """Return the isolated EfficientAD-S plan for an existing ROI release.
+
+    The 21:00 diagnostic release has pending YOLO labels, so this plan must
+    not select materialization or any branch that depends on YOLO readiness.
+    """
+    return (
+        TrainingStep(
+            "efficientad",
+            {
+                "views": list(config.views),
+                "model_size": "small",
+                "batch": config.efficientad_batch,
+                "epochs": config.efficientad_epochs,
+                "image_size": list(config.efficientad_image_size),
+                "seed": config.seed,
+            },
+        ),
+        TrainingStep(
+            "score_normal_test",
+            {
+                "views": list(config.views),
+                "split": "normal_test",
+                "expected_normal_part_count": 21,
+            },
+        ),
+        TrainingStep(
+            "calibrate_normal_thresholds",
+            {
+                "target_part_fpr": 1 / 21,
+                "allowed_normal_false_positive_count": 1,
+                "defect_metrics": "not_evaluated",
+            },
+        ),
+    )
+
+
 StageHandler = Callable[[LabTrainingConfig], dict[str, Any]]
 
 
@@ -279,6 +316,42 @@ def preflight_training(config: LabTrainingConfig) -> dict[str, Any]:
             f"expected={len(expected_label_names)}, actual={len(actual_label_names)}, missing={missing}, extra={extra}"
         )
     return {**assets, "reviewed_label_count": len(label_files)}
+
+
+def preflight_efficientad_only(config: LabTrainingConfig) -> dict[str, Any]:
+    """Validate only the published EfficientAD data layout.
+
+    This deliberately does not read ``report.json`` or invoke the shared
+    preflight because both include YOLO/materialization requirements that are
+    irrelevant to the 21:00 EfficientAD-only diagnostic.
+    """
+    if config.views != VIEW_ORDER:
+        raise ValueError("BMW laboratory training requires the canonical eight-view order")
+    if config.efficientad_batch != 1:
+        raise ValueError("EfficientAD train batch is fixed to 1 by the model implementation")
+    if isinstance(config.efficientad_epochs, bool) or not isinstance(config.efficientad_epochs, int):
+        raise ValueError("efficientad_epochs must be a positive integer")
+    if config.efficientad_epochs <= 0:
+        raise ValueError("efficientad_epochs must be a positive integer")
+    if isinstance(config.workers, bool) or not isinstance(config.workers, int) or config.workers <= 0:
+        raise ValueError("workers must be a positive integer")
+    dataset_root = config.training_release / "efficientad"
+    image_counts: dict[str, dict[str, int]] = {}
+    for view in config.views:
+        counts = {
+            split: len(_image_paths(dataset_root / view / split))
+            for split in ("normal", "normal_test")
+        }
+        if not all(counts.values()):
+            raise ValueError(f"EfficientAD release is missing normal data for {view}: {dataset_root / view}")
+        image_counts[view] = counts
+    return {
+        "status": "ready",
+        "training_release": str(config.training_release),
+        "views": list(config.views),
+        "image_counts": image_counts,
+        "yolo_training_ready_checked": False,
+    }
 
 
 def _materialize_stage(config: LabTrainingConfig) -> dict[str, Any]:
@@ -701,6 +774,158 @@ def _efficientad_stage(config: LabTrainingConfig) -> dict[str, Any]:
     return summary
 
 
+def _score_efficientad_normal_test(config: LabTrainingConfig) -> dict[str, Any]:
+    """Score the 21 held-out normal physical parts from the new checkpoints."""
+    from anomalib.engine import Engine
+    from anomalib.models import EfficientAd
+
+    from bmw_inspection.lab.efficientad_thresholds import PartScore, part_id_from_image_path
+
+    output_dir = config.run_dir / "efficientad" / "score_analysis"
+    score_path = output_dir / "efficientad_normal_test_scores.csv"
+    report_path = output_dir / "normal_test_score_report.json"
+    if output_dir.exists():
+        raise FileExistsError(f"EfficientAD score output already exists; choose a new --run-id: {output_dir}")
+    output_dir.mkdir(parents=True)
+    records: list[PartScore] = []
+    try:
+        for view in config.views:
+            checkpoint = config.run_dir / "efficientad" / view / "model.ckpt"
+            normal_test_dir = config.training_release / "efficientad" / view / "normal_test"
+            if not checkpoint.is_file():
+                raise ValueError(f"EfficientAD checkpoint does not exist: {checkpoint}")
+            if not _image_paths(normal_test_dir):
+                raise ValueError(f"EfficientAD normal_test data is missing: {normal_test_dir}")
+            model = EfficientAd.load_from_checkpoint(
+                checkpoint,
+                map_location="cpu",
+                weights_only=False,
+                visualizer=False,
+            )
+            engine = Engine(accelerator="gpu", devices=1, logger=False)
+            predictions = engine.predict(
+                model=model,
+                data_path=normal_test_dir,
+                ckpt_path=None,
+                return_predictions=True,
+            )
+            for batch in predictions or []:
+                paths = tuple(Path(path) for path in batch.image_path)
+                scores = tuple(float(score) for score in batch.pred_score.reshape(-1))
+                if len(paths) != len(scores):
+                    raise RuntimeError(f"EfficientAD score output count mismatch: {view}")
+                records.extend(
+                    PartScore(
+                        part_id=part_id_from_image_path(path, view),
+                        view_id=view,
+                        label="normal",
+                        score=score,
+                        image_path=path,
+                    )
+                    for path, score in zip(paths, scores, strict=True)
+                )
+            del engine, model
+            gc.collect()
+            try:
+                import torch
+
+                torch.cuda.empty_cache()
+            except (ImportError, RuntimeError):
+                pass
+        expected_count = len(config.views) * 21
+        if len(records) != expected_count:
+            raise ValueError(
+                f"EfficientAD normal_test score count must be {expected_count}, got {len(records)}"
+            )
+        with score_path.open("w", newline="", encoding="utf-8") as stream:
+            writer = csv.DictWriter(stream, fieldnames=("part_id", "view_id", "label", "score", "image_path"))
+            writer.writeheader()
+            writer.writerows(
+                {
+                    "part_id": row.part_id,
+                    "view_id": row.view_id,
+                    "label": row.label,
+                    "score": f"{row.score:.12g}",
+                    "image_path": str(row.image_path),
+                }
+                for row in sorted(records, key=lambda row: (row.part_id, row.view_id))
+            )
+        report = {
+            "status": "complete",
+            "calibration_source": "normal_test_only",
+            "normal_part_count": 21,
+            "score_count": len(records),
+            "views": list(config.views),
+            "scores_csv": str(score_path),
+            "defect_metrics": "not_evaluated",
+        }
+        _write_json(report_path, report)
+        return report
+    except BaseException:
+        raise
+
+
+def _calibrate_efficientad_normal_thresholds(
+    config: LabTrainingConfig,
+    score_report: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Fit a <=1/21 false-NG threshold artifact from normal-test scores only."""
+    from bmw_inspection.lab.efficientad_thresholds import PartScore, fit_part_thresholds
+
+    raw_score_path = score_report.get("scores_csv")
+    score_path = Path(raw_score_path) if isinstance(raw_score_path, str) else None
+    if score_path is None or not score_path.is_file():
+        raise ValueError("EfficientAD normal-test score report has no readable scores_csv")
+    rows: list[PartScore] = []
+    with score_path.open("r", newline="", encoding="utf-8") as stream:
+        reader = csv.DictReader(stream)
+        required = {"part_id", "view_id", "label", "score", "image_path"}
+        if not required.issubset(reader.fieldnames or ()):
+            raise ValueError("EfficientAD normal-test score CSV is missing required fields")
+        for row_number, row in enumerate(reader, start=2):
+            if row.get("label") != "normal":
+                raise ValueError(f"EfficientAD normal-only score CSV has non-normal row {row_number}")
+            try:
+                score = float(row.get("score") or "")
+            except ValueError as error:
+                raise ValueError(f"EfficientAD normal-only score CSV has invalid score at row {row_number}") from error
+            rows.append(
+                PartScore(
+                    part_id=row.get("part_id") or "",
+                    view_id=row.get("view_id") or "",
+                    label="normal",
+                    score=score,
+                    image_path=Path(row.get("image_path") or ""),
+                )
+            )
+    fit = fit_part_thresholds(rows, views=config.views, target_part_fpr=1 / 21)
+    if fit.normal_part_count != 21:
+        raise ValueError(f"EfficientAD normal-test calibration requires exactly 21 parts, got {fit.normal_part_count}")
+    output_dir = config.run_dir / "efficientad" / "score_analysis"
+    threshold_path = output_dir / "part_thresholds.json"
+    report_path = output_dir / "part_threshold_report.json"
+    if threshold_path.exists() or report_path.exists():
+        raise FileExistsError(f"EfficientAD threshold output already exists: {output_dir}")
+    checkpoint_sha256_by_view = {
+        view: _sha256(config.run_dir / "efficientad" / view / "model.ckpt") for view in config.views
+    }
+    payload = {
+        "schema_version": "bmw.efficientad_normal_only_thresholds/1.0",
+        **fit.to_dict(),
+        "calibration_source": "normal_test_only",
+        "source_csv": str(score_path),
+        "source_csv_sha256": _sha256(score_path),
+        "checkpoint_sha256_by_view": checkpoint_sha256_by_view,
+        "defect_metrics": "not_evaluated",
+        "candidate_only": True,
+        "default_demo_config_updated": False,
+    }
+    _write_json(threshold_path, payload)
+    report = {"status": "complete", **payload, "threshold_asset": str(threshold_path)}
+    _write_json(report_path, report)
+    return report
+
+
 def _yolo_stage(config: LabTrainingConfig) -> dict[str, Any]:
     from ultralytics import YOLO
 
@@ -760,6 +985,80 @@ def default_stage_handlers() -> Mapping[str, StageHandler]:
             "yolo": _yolo_stage,
         }
     )
+
+
+def run_efficientad_only_training(
+    config: LabTrainingConfig,
+    *,
+    dry_run: bool = False,
+    stage_handler: StageHandler | None = None,
+    score_handler: StageHandler | None = None,
+    threshold_handler: Callable[[LabTrainingConfig, Mapping[str, Any]], dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Train only EfficientAD-S from an already-published ROI release.
+
+    Existing output directories are rejected even when they contain complete
+    checkpoints. This keeps each diagnostic candidate immutable and prevents
+    accidental reuse of a different run identity.
+    """
+    plan = build_efficientad_only_plan(config)
+    if dry_run:
+        return {
+            "status": "dry_run",
+            "experimental_only": True,
+            "run_dir": str(config.run_dir),
+            "steps": [
+                {"name": step.name, "parameters": step.parameters, "status": step.status}
+                for step in plan
+            ],
+        }
+    if config.run_dir.exists() or config.run_dir.is_symlink():
+        raise FileExistsError(f"EfficientAD-only output already exists; choose a new --run-id: {config.run_dir}")
+    efficientad_handler = _efficientad_stage if stage_handler is None else stage_handler
+    normal_score_handler = _score_efficientad_normal_test if score_handler is None else score_handler
+    normal_threshold_handler = (
+        _calibrate_efficientad_normal_thresholds if threshold_handler is None else threshold_handler
+    )
+    config.run_dir.mkdir(parents=True)
+    report: dict[str, Any] = {
+        "status": "running",
+        "experimental_only": True,
+        "run_dir": str(config.run_dir),
+        "steps": [],
+    }
+    report_path = config.run_dir / "run_report.json"
+    score_result: dict[str, Any] | None = None
+    for step, handler in (
+        ("efficientad", efficientad_handler),
+        ("score_normal_test", normal_score_handler),
+    ):
+        try:
+            result = handler(config)
+        except BaseException as error:
+            report["status"] = "failed"
+            report["failed_step"] = step
+            report["error"] = f"{type(error).__name__}: {error}"
+            _write_json(report_path, report)
+            raise
+        report["steps"].append({"name": step, "status": "complete", "result": result})
+        _write_json(report_path, report)
+        if step == "score_normal_test":
+            score_result = result
+    assert score_result is not None
+    try:
+        threshold_result = normal_threshold_handler(config, score_result)
+    except BaseException as error:
+        report["status"] = "failed"
+        report["failed_step"] = "calibrate_normal_thresholds"
+        report["error"] = f"{type(error).__name__}: {error}"
+        _write_json(report_path, report)
+        raise
+    report["steps"].append(
+        {"name": "calibrate_normal_thresholds", "status": "complete", "result": threshold_result}
+    )
+    report["status"] = "complete"
+    _write_json(report_path, report)
+    return report
 
 
 def run_training(
