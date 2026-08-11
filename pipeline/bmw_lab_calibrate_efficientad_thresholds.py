@@ -4,6 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import csv
+import hashlib
+import io
 import json
 import math
 import sys
@@ -17,6 +20,8 @@ if str(SRC_ROOT) not in sys.path:
 
 from bmw_inspection.lab.efficientad_analysis import EfficientAdScore, render_score_distributions  # noqa: E402
 from bmw_inspection.lab.efficientad_thresholds import (  # noqa: E402
+    PartScore,
+    evaluate_part_thresholds,
     fit_part_thresholds,
     read_part_scores_csv_snapshot,
 )
@@ -26,6 +31,7 @@ DEFAULT_SCORE_CSV = (
     REPO_ROOT / "results/bmw_lab_one_click/bmw_lab_eight_view_v1/efficientad/score_analysis/efficientad_scores.csv"
 )
 DEFAULT_OUTPUT_DIR = DEFAULT_SCORE_CSV.parent
+DEFAULT_MODEL_ROOT = DEFAULT_SCORE_CSV.parent.parent
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -33,9 +39,62 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--scores-csv", type=Path, default=DEFAULT_SCORE_CSV)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
+    parser.add_argument("--model-root", type=Path, default=DEFAULT_MODEL_ROOT)
+    parser.add_argument("--business-manifest", type=Path)
     parser.add_argument("--target-part-fpr", type=float, default=0.05)
     parser.add_argument("--views", nargs="+", choices=VIEW_ORDER, default=list(VIEW_ORDER))
     return parser
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _checkpoint_hashes(model_root: Path, views: tuple[str, ...]) -> dict[str, str]:
+    hashes: dict[str, str] = {}
+    for view in views:
+        checkpoint = model_root / view / "model.ckpt"
+        if not checkpoint.is_file():
+            raise ValueError(f"EfficientAD checkpoint does not exist: {checkpoint}")
+        hashes[view] = _sha256(checkpoint)
+    return hashes
+
+
+def _business_normal_metrics(
+    rows: tuple[PartScore, ...],
+    manifest_path: Path,
+    thresholds: dict[str, float],
+) -> dict[str, object]:
+    """Report true business-normal FPR separately from branch negatives."""
+    content = manifest_path.read_bytes()
+    labels: dict[str, str] = {}
+    with io.StringIO(content.decode("utf-8"), newline="") as stream:
+        reader = csv.DictReader(stream)
+        required = {"physical_part_id", "business_label"}
+        if not required.issubset(reader.fieldnames or ()):
+            raise ValueError(f"business manifest must contain fields: {sorted(required)}")
+        for row in reader:
+            part_id = (row.get("physical_part_id") or "").strip()
+            label = (row.get("business_label") or "").strip()
+            if not part_id or label not in {"OK", "NG"}:
+                raise ValueError("business manifest contains invalid identity or label")
+            previous = labels.setdefault(part_id, label)
+            if previous != label:
+                raise ValueError(f"business manifest has conflicting labels for {part_id}")
+    score_part_ids = {row.part_id for row in rows}
+    missing = sorted(score_part_ids - labels.keys())
+    if missing:
+        raise ValueError(f"business manifest is missing score parts: {missing[:3]}")
+    business_normal_ids = {part_id for part_id in score_part_ids if labels[part_id] == "OK"}
+    business_normal_rows = tuple(row for row in rows if row.part_id in business_normal_ids)
+    evaluation = evaluate_part_thresholds(business_normal_rows, thresholds)
+    return {
+        "business_manifest": str(manifest_path),
+        "business_manifest_sha256": hashlib.sha256(content).hexdigest(),
+        "business_normal_part_count": evaluation.normal_part_count,
+        "business_normal_false_positive_count": evaluation.normal_false_positive_count,
+        "business_normal_part_fpr": evaluation.observed_normal_part_fpr,
+    }
 
 
 def calibrate(args: argparse.Namespace) -> dict[str, object]:
@@ -51,6 +110,8 @@ def calibrate(args: argparse.Namespace) -> dict[str, object]:
         raise ValueError(f"--views must contain the complete BMW eight-view order: {VIEW_ORDER}")
     rows, source_csv_sha256 = read_part_scores_csv_snapshot(score_csv)
     fit = fit_part_thresholds(rows, views=views, target_part_fpr=target)
+    model_root = Path(args.model_root).expanduser().resolve()
+    checkpoint_sha256_by_view = _checkpoint_hashes(model_root, views)
     output_dir = Path(args.output_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     calibrated_at_utc = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
@@ -60,7 +121,16 @@ def calibrate(args: argparse.Namespace) -> dict[str, object]:
         "calibrated_at_utc": calibrated_at_utc,
         "source_csv": str(score_csv),
         "source_csv_sha256": source_csv_sha256,
+        "checkpoint_sha256_by_view": checkpoint_sha256_by_view,
+        "branch_negative_part_count": fit.normal_part_count,
+        "branch_negative_false_positive_count": fit.normal_false_positive_count,
+        "branch_negative_part_fpr": fit.observed_normal_part_fpr,
     }
+    if args.business_manifest is not None:
+        business_manifest = Path(args.business_manifest).expanduser().resolve()
+        if not business_manifest.is_file():
+            raise ValueError(f"business manifest does not exist: {business_manifest}")
+        shared.update(_business_normal_metrics(rows, business_manifest, dict(fit.thresholds)))
     threshold_path = output_dir / "part_thresholds.json"
     report_path = output_dir / "part_threshold_report.json"
     distribution_path = render_score_distributions(

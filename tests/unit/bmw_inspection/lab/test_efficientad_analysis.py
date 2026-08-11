@@ -21,6 +21,7 @@ from bmw_inspection.lab.efficientad_analysis import (
     write_score_csv,
 )
 from bmw_inspection.lab.eight_view_dataset import VIEW_ORDER
+from bmw_inspection.lab.efficientad_thresholds import read_part_scores_csv
 
 
 def _placeholder_image(path: Path) -> Path:
@@ -198,6 +199,94 @@ def test_analysis_selects_visible_defect_part_union_and_complete_crops(tmp_path:
             f"session__{part_id}_000001__{view}.png" for part_id in selected_parts
         )
         assert all(unconfirmed_part not in path.name for path in selected[view])
+
+
+def test_analysis_completes_multisource_defects_from_source_release_crops(tmp_path: Path) -> None:
+    root = Path(__file__).resolve().parents[4]
+    namespace = runpy.run_path(root / "pipeline/bmw_lab_visualize_efficientad_scores.py")
+    release = tmp_path / "training" / "combined"
+    source_id = "right_release_v1"
+    part_id = "bmw_edge_group014"
+    for view in VIEW_ORDER:
+        (release / "efficientad" / view / "defect").mkdir(parents=True)
+        _placeholder_image(_score_image(release.parent / source_id / "crops" / view, part_id, view))
+    _placeholder_image(
+        _score_image(
+            release / "efficientad" / "front" / "defect" / source_id / "edge" / part_id / "images",
+            part_id,
+            "front",
+        )
+    )
+
+    selected = namespace["_complete_defect_crop_paths"](release, VIEW_ORDER)
+
+    assert tuple(selected) == VIEW_ORDER
+    assert all(paths[0].parents[2].name == source_id for paths in selected.values())
+
+
+def test_analysis_keeps_multisource_identity_when_combined_root_has_local_crops(tmp_path: Path) -> None:
+    root = Path(__file__).resolve().parents[4]
+    namespace = runpy.run_path(root / "pipeline/bmw_lab_visualize_efficientad_scores.py")
+    release = tmp_path / "training" / "combined"
+    source_id = "right_release_v1"
+    part_id = "bmw_edge_group014"
+    for view in VIEW_ORDER:
+        (release / "efficientad" / view / "defect").mkdir(parents=True)
+        _placeholder_image(_score_image(release / "crops" / view, part_id, view))
+        _placeholder_image(_score_image(release.parent / source_id / "crops" / view, part_id, view))
+    _placeholder_image(
+        _score_image(
+            release / "efficientad" / "front" / "defect" / source_id / "edge" / part_id / "images",
+            part_id,
+            "front",
+        )
+    )
+
+    selected = namespace["_complete_defect_crop_paths"](release, VIEW_ORDER)
+
+    assert all(paths[0].parents[2].name == source_id for paths in selected.values())
+
+
+def test_score_csv_records_explicit_multisource_physical_part_identity(tmp_path: Path) -> None:
+    image_path = tmp_path / "session__bmw_normal_group001_000001__front.png"
+    record = EfficientAdScore(
+        "front",
+        "normal",
+        image_path,
+        0.2,
+        False,
+        part_id="right_release_v1::bmw_normal_group001",
+    )
+
+    csv_path = write_score_csv(tmp_path / "scores.csv", (record,), threshold=0.5)
+
+    assert csv_path.read_text(encoding="utf-8").splitlines() == [
+        "part_id,view_id,label,prediction,score,threshold,image_path",
+        f"right_release_v1::bmw_normal_group001,front,normal,OK,0.2,0.5,{image_path}",
+    ]
+
+
+def test_legacy_single_release_generated_identity_roundtrips_through_parser(tmp_path: Path) -> None:
+    root = Path(__file__).resolve().parents[4]
+    namespace = runpy.run_path(root / "pipeline/bmw_lab_visualize_efficientad_scores.py")
+    image_path = (
+        tmp_path
+        / "legacy_release"
+        / "efficientad"
+        / "front"
+        / "normal_test"
+        / "bmw_normal_group001"
+        / "images"
+        / "session__bmw_normal_group001_000001__front.png"
+    )
+    part_id = namespace["_report_part_id"](image_path, "front", "normal")
+    record = EfficientAdScore("front", "normal", image_path, 0.2, False, part_id=part_id)
+
+    csv_path = write_score_csv(tmp_path / "scores.csv", (record,), threshold=0.5)
+    rows = read_part_scores_csv(csv_path)
+
+    assert part_id == "legacy_release::bmw_normal_group001"
+    assert rows[0].part_id == part_id
 
 
 def test_analysis_rejects_selected_defect_part_missing_any_crop_view(tmp_path: Path) -> None:
@@ -416,7 +505,7 @@ def test_analysis_writes_strict_complete_part_csv_without_unconfirmed_crops(tmp_
     assert len(rows) == (len(normal_parts) + len(defect_parts)) * len(VIEW_ORDER)
     assert report["complete_eight_view"] is True
     assert report["defect_input_policy"] == "visible_defect_part_union_completed_from_crops"
-    assert report["defect_part_ids"] == list(defect_parts)
+    assert report["defect_part_ids"] == [f"{release.name}::{part_id}" for part_id in defect_parts]
     defect_rows = [row for row in rows if row["label"] == "defect"]
     assert len(defect_rows) == len(defect_parts) * len(VIEW_ORDER)
     for part_id in defect_parts:

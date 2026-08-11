@@ -22,6 +22,7 @@ class EfficientAdScore:
     image_path: Path
     score: float
     predicted_anomalous: bool
+    part_id: str | None = None
 
     def __post_init__(self) -> None:
         """Reject incomplete report rows before publication."""
@@ -33,6 +34,8 @@ class EfficientAdScore:
             raise TypeError("image_path must be a Path")
         if not math.isfinite(float(self.score)):
             raise ValueError("score must be finite")
+        if self.part_id is not None and (not isinstance(self.part_id, str) or not self.part_id.strip()):
+            raise ValueError("part_id must be a non-empty string or None")
 
 
 def fixed_scale_heatmap(anomaly_map: np.ndarray) -> np.ndarray:
@@ -133,20 +136,23 @@ def write_score_csv(
     threshold = _validated_threshold(threshold)
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
+    include_part_id = any(item.part_id is not None for item in records)
+    if include_part_id and any(item.part_id is None for item in records):
+        raise ValueError("part_id must be present for every score row when publishing explicit identities")
     with output.open("w", newline="", encoding="utf-8") as stream:
         writer = csv.writer(stream, lineterminator="\n")
-        writer.writerow(("view_id", "label", "prediction", "score", "threshold", "image_path"))
+        header = ("view_id", "label", "prediction", "score", "threshold", "image_path")
+        writer.writerow((("part_id", *header) if include_part_id else header))
         for item in sorted(records, key=lambda row: (row.view_id, row.label, row.image_path.name)):
-            writer.writerow(
-                (
-                    item.view_id,
-                    item.label,
-                    "NG" if item.predicted_anomalous else "OK",
-                    f"{item.score:.12g}",
-                    f"{threshold:.12g}",
-                    str(item.image_path),
-                )
+            row = (
+                item.view_id,
+                item.label,
+                "NG" if item.predicted_anomalous else "OK",
+                f"{item.score:.12g}",
+                f"{threshold:.12g}",
+                str(item.image_path),
             )
+            writer.writerow(((item.part_id, *row) if include_part_id else row))
     return output
 
 

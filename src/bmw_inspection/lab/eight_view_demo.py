@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import math
 import re
@@ -231,7 +232,14 @@ def _probability(value: object, name: str) -> float:
     return parsed
 
 
-def _load_efficientad_thresholds(path: Path) -> tuple[Mapping[str, float], str, str]:
+def _sha256(path: Path) -> str:
+    """Hash one immutable deployment asset."""
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _load_efficientad_thresholds(
+    path: Path,
+) -> tuple[Mapping[str, float], str, str, Mapping[str, str]]:
     """Load the Task 3 threshold contract and reject unsafe Demo assets."""
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -264,7 +272,17 @@ def _load_efficientad_thresholds(path: Path) -> tuple[Mapping[str, float], str, 
         raise ValueError("EfficientAD整件阈值必须是有限数值") from error
     if views != VIEW_ORDER:
         raise ValueError("EfficientAD整件阈值资产必须按标准顺序覆盖八个视角")
-    return MappingProxyType(parsed), source_csv, source_csv_sha256
+    checkpoint_sha256 = payload.get("checkpoint_sha256_by_view")
+    if (
+        not isinstance(checkpoint_sha256, dict)
+        or tuple(checkpoint_sha256) != VIEW_ORDER
+        or any(
+            not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None
+            for value in checkpoint_sha256.values()
+        )
+    ):
+        raise ValueError("EfficientAD阈值资产checkpoint_sha256_by_view必须按标准顺序覆盖八个视角")
+    return MappingProxyType(parsed), source_csv, source_csv_sha256, MappingProxyType(dict(checkpoint_sha256))
 
 
 def load_demo_config(path: Path) -> EightViewDemoConfig:
@@ -299,7 +317,10 @@ def load_demo_config(path: Path) -> EightViewDemoConfig:
     if not isinstance(bright_streak_config, dict) or set(bright_streak_config) != {"config"}:
         raise ValueError("bright_streak配置字段不正确")
     efficientad_config = payload["efficientad"]
-    if not isinstance(efficientad_config, dict) or set(efficientad_config) != {"threshold_artifact"}:
+    if not isinstance(efficientad_config, dict) or set(efficientad_config) != {
+        "threshold_artifact",
+        "threshold_artifact_sha256",
+    }:
         raise ValueError("efficientad配置字段不正确")
     base = resolved.parent
 
@@ -313,9 +334,18 @@ def load_demo_config(path: Path) -> EightViewDemoConfig:
     roi_config = resolve(payload["roi_config"])
     training_run = resolve(payload["training_run"])
     bright = resolve(bright_streak_config["config"])
-    efficientad_thresholds, efficientad_source_csv, efficientad_source_csv_sha256 = _load_efficientad_thresholds(
-        resolve(efficientad_config["threshold_artifact"])
-    )
+    threshold_artifact = resolve(efficientad_config["threshold_artifact"])
+    expected_threshold_sha256 = efficientad_config["threshold_artifact_sha256"]
+    if not isinstance(expected_threshold_sha256, str) or re.fullmatch(r"[0-9a-f]{64}", expected_threshold_sha256) is None:
+        raise ValueError("EfficientAD threshold artifact SHA256格式不正确")
+    if not threshold_artifact.is_file() or _sha256(threshold_artifact) != expected_threshold_sha256:
+        raise ValueError("EfficientAD threshold artifact SHA256不匹配")
+    (
+        efficientad_thresholds,
+        efficientad_source_csv,
+        efficientad_source_csv_sha256,
+        expected_checkpoint_sha256,
+    ) = _load_efficientad_thresholds(threshold_artifact)
     for label, asset in (("capture_config", capture_config), ("roi_config", roi_config)):
         if not asset.is_file():
             raise ValueError(f"{label}不存在：{asset}")
@@ -330,6 +360,9 @@ def load_demo_config(path: Path) -> EightViewDemoConfig:
     }.items():
         if not asset.is_file():
             raise ValueError(f"{label}模型不存在：{asset}")
+    for view, checkpoint in efficientad.items():
+        if _sha256(checkpoint) != expected_checkpoint_sha256[view]:
+            raise ValueError(f"EfficientAD {view} checkpoint SHA256不匹配")
     demo_id = payload["demo_id"]
     if not isinstance(demo_id, str) or not demo_id.strip():
         raise ValueError("demo_id不能为空")

@@ -103,9 +103,49 @@ def _prediction_records(
             map_value = np.asarray(anomaly_map, dtype=np.float32)
             if not math.isfinite(value) or not np.isfinite(map_value).all():
                 raise ValueError(f"EfficientAD输出包含非有限数值：{path}")
-            records.append(EfficientAdScore(view, label, path, value, bool(predicted)))
+            records.append(
+                EfficientAdScore(
+                    view,
+                    label,
+                    path,
+                    value,
+                    bool(predicted),
+                    part_id=_report_part_id(path, view, label),
+                )
+            )
             anomaly_maps[path] = map_value
     return records, anomaly_maps
+
+
+def _report_part_id(image_path: Path, view: str, label: str) -> str:
+    """Bind score rows to a collision-free physical part identity."""
+    path = Path(image_path)
+    part_id = part_id_from_image_path(path, view)
+    if label == "normal":
+        if (
+            len(path.parents) >= 6
+            and path.parent.name == "images"
+            and path.parents[3].name == "normal_test"
+            and path.parents[4].name == view
+            and path.parents[5].name == "efficientad"
+        ):
+            return f"{path.parents[2].name}::{part_id}"
+        if (
+            len(path.parents) >= 6
+            and path.parent.name == "images"
+            and path.parents[2].name == "normal_test"
+            and path.parents[3].name == view
+            and path.parents[4].name == "efficientad"
+        ):
+            return f"{path.parents[5].name}::{part_id}"
+    if (
+        label == "defect"
+        and len(path.parents) >= 3
+        and path.parent.name == view
+        and path.parents[1].name == "crops"
+    ):
+        return f"{path.parents[2].name}::{part_id}"
+    raise ValueError(f"unsupported EfficientAD score image path schema: {path}")
 
 
 def _predictions_for_paths(
@@ -142,7 +182,8 @@ def _complete_defect_crop_paths(training_release: Path, views: tuple[str, ...]) 
     view_order = tuple(views)
     if not view_order or len(set(view_order)) != len(view_order):
         raise ValueError("缺陷补全视图必须非空且唯一")
-    selected_parts: set[str] = set()
+    selected_parts: set[tuple[str | None, str]] = set()
+    observed_layouts: set[str] = set()
     for view in view_order:
         defect_root = release / "efficientad" / view / "defect"
         if not defect_root.is_dir():
@@ -157,29 +198,48 @@ def _complete_defect_crop_paths(training_release: Path, views: tuple[str, ...]) 
                     f"visible defect identity mismatch: directory={declared_part_id}, "
                     f"filename={parsed_part_id}, path={image_path}"
                 )
-            selected_parts.add(declared_part_id)
+            relative_parts = image_path.relative_to(defect_root).parts
+            source_id: str | None
+            if len(relative_parts) == 4:
+                observed_layouts.add("legacy")
+                source_id = None
+            elif len(relative_parts) == 5:
+                observed_layouts.add("multisource")
+                candidate_source = relative_parts[0]
+                if not (release.parent / candidate_source / "crops").is_dir():
+                    raise ValueError(f"EfficientAD缺陷源release不存在：{candidate_source}")
+                source_id = candidate_source
+            else:
+                raise ValueError(f"EfficientAD缺陷路径契约错误：{image_path}")
+            selected_parts.add((source_id, declared_part_id))
+    if len(observed_layouts) > 1:
+        raise ValueError("EfficientAD缺陷目录不能混用legacy与multisource布局")
     if not selected_parts:
         raise ValueError("EfficientAD可见缺陷目录没有确认缺陷物理件")
 
     selected_order = tuple(sorted(selected_parts))
     paths_by_view: dict[str, tuple[Path, ...]] = {}
     for view in view_order:
-        crop_root = release / "crops" / view
-        if not crop_root.is_dir():
-            raise ValueError(f"EfficientAD完整ROI目录不存在：{crop_root}")
-        matching: dict[str, list[Path]] = {part_id: [] for part_id in selected_order}
-        for image_path in sorted(crop_root.glob("*.png")):
-            if not image_path.is_file():
-                continue
-            part_id = part_id_from_image_path(image_path, view)
-            if part_id in matching:
-                matching[part_id].append(image_path)
-        invalid = {part_id: len(paths) for part_id, paths in matching.items() if len(paths) != 1}
+        matching: dict[tuple[str | None, str], list[Path]] = {identity: [] for identity in selected_order}
+        for source_id, selected_part_id in selected_order:
+            crop_root = release / "crops" / view if source_id is None else release.parent / source_id / "crops" / view
+            if not crop_root.is_dir():
+                raise ValueError(f"EfficientAD完整ROI目录不存在：{crop_root}")
+            matching[(source_id, selected_part_id)] = [
+                image_path
+                for image_path in sorted(crop_root.glob("*.png"))
+                if image_path.is_file() and part_id_from_image_path(image_path, view) == selected_part_id
+            ]
+        invalid = {
+            f"{source_id or release.name}::{part_id}": len(paths)
+            for (source_id, part_id), paths in matching.items()
+            if len(paths) != 1
+        }
         if invalid:
             raise ValueError(
                 f"每个视图必须为每个确认缺陷件提供exactly one crop for every selected defect part：{view} {invalid}"
             )
-        paths_by_view[view] = tuple(matching[part_id][0] for part_id in selected_order)
+        paths_by_view[view] = tuple(matching[identity][0] for identity in selected_order)
     return paths_by_view
 
 
@@ -200,7 +260,7 @@ def analyze(args: argparse.Namespace) -> dict[str, object]:
 
     training_release = Path(args.training_release).expanduser().resolve()
     defect_paths_by_view = _complete_defect_crop_paths(training_release, views)
-    defect_part_ids = tuple(part_id_from_image_path(path, views[0]) for path in defect_paths_by_view[views[0]])
+    defect_part_ids = tuple(_report_part_id(path, views[0], "defect") for path in defect_paths_by_view[views[0]])
     output_dir = Path(args.output_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     torch.set_float32_matmul_precision("high")

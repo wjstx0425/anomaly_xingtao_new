@@ -15,6 +15,7 @@ from numbers import Real
 from pathlib import Path
 
 _SAMPLE_INDEX = re.compile(r"^(?P<part_id>.+)_[0-9]{6}$")
+_MIN_ACTIVE_THRESHOLD = 1e-3
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,6 +100,30 @@ def part_id_from_image_path(image_path: Path, view_id: str) -> str:
     raise ValueError(f"cannot derive physical part identity from image_path: {image_path}")
 
 
+def _source_id_from_explicit_score_path(image_path: Path, view_id: str) -> str:
+    """Extract source release only from a supported generated score-path schema."""
+    path = Path(image_path)
+    if len(path.parents) >= 3 and path.parent.name == view_id and path.parents[1].name == "crops":
+        return path.parents[2].name
+    if (
+        len(path.parents) >= 6
+        and path.parent.name == "images"
+        and path.parents[3].name == "normal_test"
+        and path.parents[4].name == view_id
+        and path.parents[5].name == "efficientad"
+    ):
+        return path.parents[2].name
+    if (
+        len(path.parents) >= 6
+        and path.parent.name == "images"
+        and path.parents[2].name == "normal_test"
+        and path.parents[3].name == view_id
+        and path.parents[4].name == "efficientad"
+    ):
+        return path.parents[5].name
+    raise ValueError(f"cannot derive source release from explicit score image_path: {image_path}")
+
+
 def _part_scores_from_bytes(content: bytes) -> tuple[PartScore, ...]:
     """Parse an immutable score CSV snapshot."""
     required = {"view_id", "label", "score", "image_path"}
@@ -107,12 +132,14 @@ def _part_scores_from_bytes(content: bytes) -> tuple[PartScore, ...]:
         if not required.issubset(reader.fieldnames or ()):
             raise ValueError(f"score CSV must contain fields: {sorted(required)}")
         rows: list[PartScore] = []
+        has_explicit_identity = "part_id" in (reader.fieldnames or ())
         for row_number, row in enumerate(reader, start=2):
             if None in row:
                 raise ValueError(f"score CSV row {row_number} contains extra cells")
             view_id = (row.get("view_id") or "").strip()
             label = (row.get("label") or "").strip()
             raw_path = (row.get("image_path") or "").strip()
+            explicit_part_id = (row.get("part_id") or "").strip()
             if not raw_path:
                 raise ValueError(f"score CSV row {row_number} has empty image_path")
             image_path = Path(raw_path)
@@ -120,9 +147,23 @@ def _part_scores_from_bytes(content: bytes) -> tuple[PartScore, ...]:
                 score = float(row.get("score") or "")
             except ValueError as error:
                 raise ValueError(f"score CSV row {row_number} has invalid score") from error
+            derived_part_id = part_id_from_image_path(image_path, view_id)
+            if has_explicit_identity:
+                pieces = explicit_part_id.split("::")
+                try:
+                    source_id = _source_id_from_explicit_score_path(image_path, view_id)
+                except ValueError as error:
+                    raise ValueError(f"score CSV row {row_number} has invalid explicit part_id") from error
+                if (
+                    len(pieces) != 2
+                    or not all(pieces)
+                    or pieces[1] != derived_part_id
+                    or pieces[0] != source_id
+                ):
+                    raise ValueError(f"score CSV row {row_number} has invalid explicit part_id")
             rows.append(
                 PartScore(
-                    part_id=part_id_from_image_path(image_path, view_id),
+                    part_id=explicit_part_id or derived_part_id,
                     view_id=view_id,
                     label=label,
                     score=score,
@@ -191,6 +232,8 @@ def _validated_thresholds(thresholds: Mapping[str, float]) -> tuple[tuple[str, .
         value = float(thresholds[view])
         if not math.isfinite(value):
             raise ValueError(f"threshold for {view} must be finite")
+        if 0 <= value < _MIN_ACTIVE_THRESHOLD:
+            raise ValueError(f"threshold for {view} is below the minimum active threshold")
         values[view] = value
     return views, values
 
@@ -263,6 +306,8 @@ def fit_part_thresholds(
                 threshold = math.nextafter(min(all_view_scores), -math.inf)
             if not math.isfinite(threshold):
                 raise ValueError(f"cannot derive a finite threshold for view {view}")
+            if 0 <= threshold < _MIN_ACTIVE_THRESHOLD:
+                threshold = _MIN_ACTIVE_THRESHOLD
             thresholds[view] = threshold
         evaluation = evaluate_part_thresholds(rows, thresholds)
         if evaluation.normal_false_positive_count <= allowed_count:

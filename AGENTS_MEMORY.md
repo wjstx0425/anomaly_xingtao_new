@@ -1,5 +1,35 @@
 # AGENTS Memory
 
+## BMW right multisource models integrated into eight-view Demo (2026-08-11)
+
+- The active BMW Demo profile in this worktree now binds the right-hand fixed ROI
+  `configs/bmw/rois/bmw_right_hdr_eight_view_v1.json` and the complete training run
+  `results/bmw_lab_one_click/bmw_right_multisource_left_yolo_v1`. This switches all eight Template models,
+  all eight EfficientAD checkpoints, and the shared YOLO `best.pt` as one `training_run` contract.
+- EfficientAD score analysis now supports the symlink-based multisource release: visible defect parts are completed
+  from each named source release's `crops/<view>` directory, and the score CSV publishes an explicit
+  `<source_release>::<part_id>` identity to prevent same-numbered right batches from being merged.
+- The deployed EfficientAD threshold asset is
+  `results/bmw_lab_one_click/bmw_right_multisource_left_yolo_v1/efficientad/score_analysis/part_thresholds.json`.
+  The 41 branch-negative parts contain 33 true business-normal parts plus 8 no-streak business-NG parts. The
+  tightened asset produces 1/41 branch-negative false NG (2.44%), 1/33 business-normal false NG (3.03%), and
+  detects 7/7 visible-defect parts on the same selection data. It is explicitly demo-only, not independent
+  acceptance evidence. The former `back_left=5e-324` threshold is now guarded at `0.001`.
+- The threshold asset binds all eight EfficientAD checkpoint SHA-256 values, and the Demo profile also pins the
+  threshold artifact SHA-256. Startup fails closed if a checkpoint or threshold file changes. Multisource score
+  parsing now validates `<source_release>::<part_id>` against both the image path and filename and rejects mixed
+  legacy/multisource defect layouts.
+- Do not bind the raw new-training bright config directly to the ridge Demo detector. The root training run used an
+  older detector implementation, while this worktree's Demo uses detector SHA-256
+  `9726bd5cb6adb0a89d5dfc09ed51619d97a4d2bcdf6b355a40c15ed8af2ae2c0`. The compatible asset is
+  `bright_streak_right_ridge_v1_bold/calibrated_config.json`; its current right-hand data performance remains weak
+  (calibration balanced accuracy 0.682, final-test balanced accuracy 0.453), so the right-hand bright ROI/rule still
+  needs a dedicated follow-up before acceptance.
+- Offline integration smoke used `bmw_right_normal_group039_000001`: all 25 checks passed, final status `OK`,
+  CPU-only inference took 13.314 s after strict asset verification, and the screenshot is
+  `results/bmw_eight_view_demo/right_multisource_group039_smoke.png`. Use the root `.venv` from this worktree because
+  the worktree-local minimal environment does not contain Ultralytics.
+
 ## ZS32 right-hand unified PatchCore + YOLO runtime (2026-07-13)
 
 - Use `pipeline/32_run_zs32_multimodel_inference.py` as the single entrypoint. `infer` preserves continuous evidence and remains REVIEW; `fuse` calls strict Stage 18 only when all required external branches and locked thresholds are supplied.

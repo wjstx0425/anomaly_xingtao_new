@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import csv
+import hashlib
 from pathlib import Path
 
 import cv2
@@ -72,6 +73,10 @@ def _write_demo_assets(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
                 "test_used_for_selection": True,
                 "source_csv": "/retired-calibration-host/efficientad_scores.csv",
                 "source_csv_sha256": "a" * 64,
+                "checkpoint_sha256_by_view": {
+                    view: hashlib.sha256((run / "efficientad" / view / "model.ckpt").read_bytes()).hexdigest()
+                    for view in VIEW_ORDER
+                },
             }
         ),
         encoding="utf-8",
@@ -92,7 +97,10 @@ def _demo_payload(tmp_path: Path, *, threshold_artifact: Path) -> dict[str, obje
         "training_run": str(run),
         "result_root": str(tmp_path / "results"),
         "bright_streak": {"config": str(tmp_path / "bright_streak_asset/calibrated_config.json")},
-        "efficientad": {"threshold_artifact": str(threshold_artifact)},
+        "efficientad": {
+            "threshold_artifact": str(threshold_artifact),
+            "threshold_artifact_sha256": hashlib.sha256(threshold_artifact.read_bytes()).hexdigest(),
+        },
         "yolo": {"candidate_conf": 0.1, "final_threshold": 0.25, "imgsz": 640},
     }
 
@@ -154,6 +162,30 @@ def test_demo_config_resolves_current_model_assets(tmp_path: Path) -> None:
     )
     assert config.efficientad_threshold_source_csv == "/retired-calibration-host/efficientad_scores.csv"
     assert config.efficientad_threshold_source_csv_sha256 == "a" * 64
+
+
+def test_demo_config_fails_closed_when_efficientad_checkpoint_changes(tmp_path: Path) -> None:
+    _roi, _capture, run, threshold_artifact = _write_demo_assets(tmp_path)
+    config_path = tmp_path / "demo.json"
+    config_path.write_text(
+        json.dumps(_demo_payload(tmp_path, threshold_artifact=threshold_artifact)),
+        encoding="utf-8",
+    )
+    (run / "efficientad" / VIEW_ORDER[0] / "model.ckpt").write_bytes(b"replaced-checkpoint")
+
+    with pytest.raises(ValueError, match="checkpoint SHA256"):
+        load_demo_config(config_path)
+
+
+def test_demo_config_fails_closed_when_threshold_artifact_changes(tmp_path: Path) -> None:
+    _roi, _capture, _run, threshold_artifact = _write_demo_assets(tmp_path)
+    payload = _demo_payload(tmp_path, threshold_artifact=threshold_artifact)
+    config_path = tmp_path / "demo.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+    threshold_artifact.write_text(threshold_artifact.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="threshold artifact SHA256"):
+        load_demo_config(config_path)
 
 
 @pytest.mark.parametrize("invalid", [None, "", "   ", 123])
@@ -236,16 +268,33 @@ def test_demo_config_fails_closed_when_bright_streak_asset_is_missing(tmp_path: 
         load_demo_config(config_path)
 
 
-def test_repository_demo_config_selects_the_bold_bright_streak_asset() -> None:
+def test_repository_demo_config_selects_the_compatible_right_ridge_asset() -> None:
     config_path = Path(__file__).resolve().parents[4] / "configs/bmw/experiments/bmw_eight_view_demo_v1.json"
     payload = json.loads(config_path.read_text(encoding="utf-8"))
 
     assert payload["bright_streak"] == {
         "config": (
-            "../../../results/bmw_lab_one_click/bmw_lab_eight_view_v1/"
-            "bright_streak_ridge_v4_bold/calibrated_config.json"
+            "../../../results/bmw_lab_one_click/bmw_right_multisource_left_yolo_v1/"
+            "bright_streak_right_ridge_v1_bold/calibrated_config.json"
         )
     }
+
+
+def test_repository_demo_config_selects_right_multisource_models_and_thresholds() -> None:
+    config_path = Path(__file__).resolve().parents[4] / "configs/bmw/experiments/bmw_eight_view_demo_v1.json"
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+
+    assert payload["demo_id"] == "bmw-eight-view-right-multisource-demo-v1"
+    assert payload["roi_config"] == "../rois/bmw_right_hdr_eight_view_v1.json"
+    assert payload["prepared_manifest"] == (
+        "../../../dataset/bmw_lab_prepared/bmw_right_batch_20260810_21_v1/manifests/dataset_manifest.csv"
+    )
+    assert payload["training_run"] == "../../../results/bmw_lab_one_click/bmw_right_multisource_left_yolo_v1"
+    assert payload["efficientad"]["threshold_artifact"] == (
+        "../../../results/bmw_lab_one_click/bmw_right_multisource_left_yolo_v1/"
+        "efficientad/score_analysis/part_thresholds.json"
+    )
+    assert len(payload["efficientad"]["threshold_artifact_sha256"]) == 64
 
 
 def test_demo_config_rejects_efficientad_threshold_artifact_missing_view(tmp_path: Path) -> None:

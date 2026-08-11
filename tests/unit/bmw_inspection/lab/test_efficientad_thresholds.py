@@ -297,6 +297,71 @@ def test_score_csv_rejects_ambiguous_images_parent_without_sample_identity(tmp_p
         read_part_scores_csv(score_csv)
 
 
+def test_score_csv_prefers_explicit_multisource_part_id(tmp_path: Path) -> None:
+    score_csv = tmp_path / "efficientad_scores.csv"
+    score_csv.write_text(
+        "part_id,view_id,label,prediction,score,threshold,image_path\n"
+        "right_release_v1::bmw_normal_group001,front,normal,OK,0.2,0.5,"
+        "/training/right_release_v1/crops/front/session__bmw_normal_group001_000001__front.png\n",
+        encoding="utf-8",
+    )
+
+    rows = read_part_scores_csv(score_csv)
+
+    assert rows[0].part_id == "right_release_v1::bmw_normal_group001"
+
+
+@pytest.mark.parametrize(
+    "explicit_part_id",
+    [
+        "right_release_v1::bmw_normal_group999",
+        "wrong_release::bmw_normal_group001",
+        "bmw_normal_group001",
+        "",
+    ],
+)
+def test_score_csv_rejects_invalid_explicit_multisource_identity(
+    tmp_path: Path,
+    explicit_part_id: str,
+) -> None:
+    score_csv = tmp_path / "efficientad_scores.csv"
+    score_csv.write_text(
+        "part_id,view_id,label,prediction,score,threshold,image_path\n"
+        f"{explicit_part_id},front,normal,OK,0.2,0.5,"
+        "/training/right_release_v1/crops/front/session__bmw_normal_group001_000001__front.png\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="explicit part_id"):
+        read_part_scores_csv(score_csv)
+
+
+def test_score_csv_rejects_source_name_found_only_in_unrelated_ancestor(tmp_path: Path) -> None:
+    score_csv = tmp_path / "efficientad_scores.csv"
+    score_csv.write_text(
+        "part_id,view_id,label,prediction,score,threshold,image_path\n"
+        "wrong_release::bmw_normal_group001,front,normal,OK,0.2,0.5,"
+        "/wrong_release/training/right_release_v1/crops/front/"
+        "session__bmw_normal_group001_000001__front.png\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="explicit part_id"):
+        read_part_scores_csv(score_csv)
+
+
+def test_fit_never_publishes_subnormal_threshold_for_zero_normal_scores() -> None:
+    rows = []
+    for index in range(20):
+        rows.extend(_part_rows(f"normal-{index:03d}", "normal", {VIEW_ORDER[0]: 0.0}))
+    rows.extend(_part_rows("defect-000", "defect", {VIEW_ORDER[0]: 0.02}))
+
+    fit = fit_part_thresholds(rows, views=VIEW_ORDER, target_part_fpr=0.05)
+
+    assert fit.thresholds[VIEW_ORDER[0]] >= 1e-3
+    assert fit.defect_detected_count == 1
+
+
 def test_score_csv_snapshot_hashes_the_same_bytes_it_parses(tmp_path: Path, monkeypatch) -> None:
     score_csv = tmp_path / "efficientad_scores.csv"
     rows = _eight_view_rows(normal_parts=1, defect_parts=1)
@@ -350,6 +415,11 @@ def test_cli_writes_hash_bound_demo_only_assets(tmp_path: Path, monkeypatch) -> 
     expected_sha256 = hashlib.sha256(score_bytes).hexdigest()
     namespace = runpy.run_path(root / "pipeline/bmw_lab_calibrate_efficientad_thresholds.py")
     output_dir = tmp_path / "thresholds"
+    model_root = tmp_path / "models"
+    for view in VIEW_ORDER:
+        checkpoint = model_root / view / "model.ckpt"
+        checkpoint.parent.mkdir(parents=True)
+        checkpoint.write_bytes(f"checkpoint-{view}".encode())
     original_snapshot = namespace["read_part_scores_csv_snapshot"]
     snapshot_calls = 0
 
@@ -368,7 +438,14 @@ def test_cli_writes_hash_bound_demo_only_assets(tmp_path: Path, monkeypatch) -> 
     assert defaults.target_part_fpr == 0.05
     assert tuple(defaults.views) == VIEW_ORDER
 
-    assert namespace["main"](["--scores-csv", str(score_csv), "--output-dir", str(output_dir)]) == 0
+    assert namespace["main"]([
+        "--scores-csv",
+        str(score_csv),
+        "--output-dir",
+        str(output_dir),
+        "--model-root",
+        str(model_root),
+    ]) == 0
     assert snapshot_calls == 1
 
     thresholds = json.loads((output_dir / "part_thresholds.json").read_text(encoding="utf-8"))
@@ -384,6 +461,7 @@ def test_cli_writes_hash_bound_demo_only_assets(tmp_path: Path, monkeypatch) -> 
         "test_used_for_selection",
         "calibrated_at_utc",
         "source_csv_sha256",
+        "checkpoint_sha256_by_view",
     }
     for payload in (thresholds, report):
         assert required_fields <= payload.keys()
@@ -408,6 +486,8 @@ def test_cli_writes_hash_bound_demo_only_assets(tmp_path: Path, monkeypatch) -> 
             str(score_csv),
             "--output-dir",
             str(tmp_path / "partial"),
+            "--model-root",
+            str(model_root),
             "--views",
             VIEW_ORDER[0],
         ])
@@ -443,6 +523,11 @@ def test_calibration_cli_renders_final_per_view_thresholds_without_inference(tmp
         defect_image_hits=1,
     )
     namespace = runpy.run_path(root / "pipeline/bmw_lab_calibrate_efficientad_thresholds.py")
+    model_root = tmp_path / "models"
+    for view in VIEW_ORDER:
+        checkpoint = model_root / view / "model.ckpt"
+        checkpoint.parent.mkdir(parents=True)
+        checkpoint.write_bytes(f"checkpoint-{view}".encode())
     captured: dict[str, object] = {}
 
     def render(
@@ -464,6 +549,8 @@ def test_calibration_cli_renders_final_per_view_thresholds_without_inference(tmp
         str(score_csv),
         "--output-dir",
         str(output_dir),
+        "--model-root",
+        str(model_root),
     ])
 
     report = namespace["calibrate"](args)
