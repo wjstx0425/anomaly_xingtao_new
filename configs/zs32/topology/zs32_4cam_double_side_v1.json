@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "topology_id": "zs32-4cam-double-side-v1",
+  "product": "ZS32",
+  "rounds": [
+    {
+      "round_id": "front",
+      "prompt": "capture_front"
+    },
+    {
+      "round_id": "back",
+      "prompt": "flip_same_part_then_capture_back"
+    }
+  ],
+  "camera_slots": [
+    {
+      "slot_id": "center",
+      "serial": "DA9805574",
+      "views": {
+        "front": "front",
+        "back": "back"
+      }
+    },
+    {
+      "slot_id": "left_oblique",
+      "serial": "DA9625347",
+      "views": {
+        "front": "front_left",
+        "back": "back_left"
+      }
+    },
+    {
+      "slot_id": "right_oblique",
+      "serial": "DB0998274",
+      "views": {
+        "front": "front_right",
+        "back": "back_right"
+      }
+    },
+    {
+      "slot_id": "front_secondary",
+      "serial": "DB0968108",
+      "views": {
+        "front": "front_secondary",
+        "back": "back_secondary"
+      }
+    }
+  ],
+  "required_views": [
+    "front",
+    "front_left",
+    "front_right",
+    "front_secondary",
+    "back",
+    "back_left",
+    "back_right",
+    "back_secondary"
+  ]
+}

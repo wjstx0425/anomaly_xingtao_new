@@ -1,5 +1,35 @@
 # AGENTS Memory
 
+## BMW right multisource models integrated into eight-view Demo (2026-08-11)
+
+- The active BMW Demo profile in this worktree now binds the right-hand fixed ROI
+  `configs/bmw/rois/bmw_right_hdr_eight_view_v1.json` and the complete training run
+  `results/bmw_lab_one_click/bmw_right_multisource_left_yolo_v1`. This switches all eight Template models,
+  all eight EfficientAD checkpoints, and the shared YOLO `best.pt` as one `training_run` contract.
+- EfficientAD score analysis now supports the symlink-based multisource release: visible defect parts are completed
+  from each named source release's `crops/<view>` directory, and the score CSV publishes an explicit
+  `<source_release>::<part_id>` identity to prevent same-numbered right batches from being merged.
+- The deployed EfficientAD threshold asset is
+  `results/bmw_lab_one_click/bmw_right_multisource_left_yolo_v1/efficientad/score_analysis/part_thresholds.json`.
+  The 41 branch-negative parts contain 33 true business-normal parts plus 8 no-streak business-NG parts. The
+  tightened asset produces 1/41 branch-negative false NG (2.44%), 1/33 business-normal false NG (3.03%), and
+  detects 7/7 visible-defect parts on the same selection data. It is explicitly demo-only, not independent
+  acceptance evidence. The former `back_left=5e-324` threshold is now guarded at `0.001`.
+- The threshold asset binds all eight EfficientAD checkpoint SHA-256 values, and the Demo profile also pins the
+  threshold artifact SHA-256. Startup fails closed if a checkpoint or threshold file changes. Multisource score
+  parsing now validates `<source_release>::<part_id>` against both the image path and filename and rejects mixed
+  legacy/multisource defect layouts.
+- Do not bind the raw new-training bright config directly to the ridge Demo detector. The root training run used an
+  older detector implementation, while this worktree's Demo uses detector SHA-256
+  `9726bd5cb6adb0a89d5dfc09ed51619d97a4d2bcdf6b355a40c15ed8af2ae2c0`. The compatible asset is
+  `bright_streak_right_ridge_v1_bold/calibrated_config.json`; its current right-hand data performance remains weak
+  (calibration balanced accuracy 0.682, final-test balanced accuracy 0.453), so the right-hand bright ROI/rule still
+  needs a dedicated follow-up before acceptance.
+- Offline integration smoke used `bmw_right_normal_group039_000001`: all 25 checks passed, final status `OK`,
+  CPU-only inference took 13.314 s after strict asset verification, and the screenshot is
+  `results/bmw_eight_view_demo/right_multisource_group039_smoke.png`. Use the root `.venv` from this worktree because
+  the worktree-local minimal environment does not contain Ultralytics.
+
 ## ZS32 right-hand unified PatchCore + YOLO runtime (2026-07-13)
 
 - Use `pipeline/32_run_zs32_multimodel_inference.py` as the single entrypoint. `infer` preserves continuous evidence and remains REVIEW; `fuse` calls strict Stage 18 only when all required external branches and locked thresholds are supplied.
@@ -520,3 +550,21 @@
 - `ZS32InspectionOrchestrator` passes all six normalized template results to its downstream runner. It records early-stop/skipped state without inventing missing branch CLEAR evidence.
 - Local integration on 2026-07-13 merged `feat/zs32/multimodel-fusion` into `main` after first committing the completed PatchCore ROI workflow and C789 matcher prototype. Backup branch: `backup/main-before-zs32-fusion-20260713`; no GitHub push was performed.
 - The merged PatchCore + fusion target suite reports `333 passed, 1 warning`; production/core-import Ruff, Python compilation, shell syntax, profile JSON, and all five relevant CLI help commands pass.
+
+## BMW eight-view bright-streak and EfficientAD Demo thresholds (2026-08-10)
+
+- Branch/worktree: `agent/bmw-eight-view-handoff` in `.worktrees/bmw-eight-view-handoff`; the public Draft PR is `wjstx0425/anomaly_xingtao_new#1`. Never commit `dataset/`, `results/`, customer images, checkpoints, or the local asset symlinks.
+- Bright-streak detection in `src/bmw_inspection/detector.py` follows a row-wise center ridge, allowing gradual local drift and width changes instead of requiring one whole connected component. The latest audit tracks candidate-row adjacency separately from the last accepted ridge: rejected lateral-jump rows keep the candidate run active, while only a real candidate gap permits reacquisition and continuity-gap accounting. It keeps the existing fixed ROI, presence, continuity, and evidence contracts.
+- Standalone recalibration is `pipeline/bmw_lab_recalibrate_bright_streak.py`. Default mode fits only `split=calibration`; explicit `--bold-continuity` keeps SNR/coverage presence fitting calibration-only but uses calibration plus final-test normals for the three continuity envelopes. It is strictly boolean and records `demo_only=true` and detailed split/leakage flags.
+- Real bold artifact: `results/bmw_lab_one_click/bmw_lab_eight_view_v1/bright_streak_ridge_v4_bold/`. Detector SHA-256 is `9726bd5cb6adb0a89d5dfc09ed51619d97a4d2bcdf6b355a40c15ed8af2ae2c0`. Thresholds are SNR `3.2675675643`, coverage `0.2536704731`, longest-run `0.2202283850`, max-gap ratio `0.3931484502`, max-gap count `12`. Current-data result is 20/20 calibration and 20/20 final rows correct, including 17/17 normal streaks OK and 3/3 no-streak samples `NG_NO_STREAK`; this is demo tuning, not independent validation. There are still no real broken-but-present streak negatives.
+- Complete EfficientAD scoring uses 20 normal physical parts and 6 defect physical parts, each with all eight views: 208 rows in `efficientad/score_analysis/efficientad_scores.csv`. The defect set is the union of per-view visible-defect part IDs, completed from the canonical per-view ROI crops.
+- Whole-part threshold CLI is `pipeline/bmw_lab_calibrate_efficientad_thresholds.py`. Current thresholds are front `0.680344`, front_left `0.009403`, front_right `0.486333`, front_secondary `0.111191`, back `1.0000000000000002`, back_left `0.457497`, back_right `0.230414`, back_secondary `0.575206`. The `back > 1` threshold intentionally disables a noisy view.
+- Current selected-data EfficientAD result is 1/20 normal whole-part false NG (`5%`, `bmw_normal_group051/back_left`) and 6/6 defect whole-parts detected with 17 defect-view hits. The artifact is explicitly `demo_only=true` and `test_used_for_selection=true`; it must be validated on new untouched physical parts before any acceptance claim.
+- Demo configuration requires explicit `bright_streak.config` and `efficientad.threshold_artifact` assets and fails closed on missing/invalid files. Runtime EfficientAD status is solely `score >= per-view threshold`; checkpoint `pred_label` is diagnostic only. Heatmaps use a fixed 0-1 scale.
+- Fresh final offline smoke `bmw_normal_group072_000001` produced 25 PASS, final OK, 3385.422 ms with RTX 4090 CUDA inference. Screenshot: `artifacts/bmw_eight_view_threshold_demo/group072_bold_efficientad_5pct.png`; this single-sample smoke is not a throughput benchmark.
+
+## BMW current algorithm backup (2026-08-11)
+
+- GitHub backup target is branch `agent/bmw-eight-view-handoff`; the snapshot includes BMW code, configs, pipeline entrypoints, and tests but excludes `dataset/`, `results/`, images, and model checkpoints.
+- Keep the latest right-hand training entrypoints in the backup: `pipeline/bmw_lab_train_right.py`, `pipeline/bmw_lab_train_right_multisource.py`, `src/bmw_inspection/lab/right_train_all.py`, and `src/bmw_inspection/lab/multisource_training_data.py`, together with their unit tests.
+- Local recoverable backup is a complete Git bundle under `/home/yunjing/anomaly_xingtao_new/local_backups/`; verify it with `git bundle verify` and use its recorded SHA-256 before restoration.
