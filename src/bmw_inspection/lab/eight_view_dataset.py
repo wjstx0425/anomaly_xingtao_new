@@ -173,19 +173,44 @@ def _read_manifest_rows(path: Path) -> list[dict[str, str]]:
     return rows
 
 
+def _capture_manifest_paths(root: Path, session_ids: Sequence[str] | None) -> tuple[Path, ...]:
+    """Resolve all or an explicit subset of immutable capture manifests."""
+    manifest_root = root / "manifests"
+    if session_ids is None:
+        paths = tuple(sorted(manifest_root.glob("*.csv")))
+        if not paths:
+            raise ValueError(f"no capture manifests found below {manifest_root}")
+        return paths
+    if isinstance(session_ids, (str, bytes)):
+        raise TypeError("session_ids must be a sequence of session ID strings")
+    requested = tuple(session_ids)
+    if not requested:
+        raise ValueError("session_ids must not be empty")
+    if len(set(requested)) != len(requested):
+        raise ValueError("session_ids must not contain duplicates")
+    paths: list[Path] = []
+    for session_id in requested:
+        if not isinstance(session_id, str) or not _DATASET_ID.fullmatch(session_id):
+            raise ValueError(f"invalid capture session ID: {session_id!r}")
+        path = manifest_root / f"{session_id}.csv"
+        if not path.is_file() or path.is_symlink():
+            raise ValueError(f"capture session manifest does not exist: {path}")
+        paths.append(path)
+    return tuple(sorted(paths))
+
+
 def read_complete_capture_rows(
     raw_root: Path,
     *,
     verify_image_hash: bool = True,
     capture_scope: str | None = None,
+    session_ids: Sequence[str] | None = None,
 ) -> tuple[tuple[PreparedImage, ...], CaptureAudit]:
     """Read complete BMW capture samples and reject topology or identity drift."""
     if capture_scope is not None and capture_scope not in CAPTURE_SCOPES:
         raise ValueError(f"capture_scope must be one of {CAPTURE_SCOPES}")
     root = Path(raw_root).expanduser().resolve()
-    manifest_paths = sorted((root / "manifests").glob("*.csv"))
-    if not manifest_paths:
-        raise ValueError(f"no capture manifests found below {root / 'manifests'}")
+    manifest_paths = _capture_manifest_paths(root, session_ids)
 
     sample_rows: dict[tuple[str, str], dict[str, str]] = {}
     images_by_sample: dict[tuple[str, str], list[dict[str, str]]] = defaultdict(list)
@@ -502,6 +527,7 @@ def _report(
     verify_image_hash: bool,
     release_status: str,
     capture_scope: str | None,
+    session_ids: Sequence[str] | None,
 ) -> dict[str, object]:
     source_by_part = {row.physical_part_id: row.source_class for row in rows}
     return {
@@ -510,6 +536,7 @@ def _report(
         "release_status": release_status,
         "raw_root": str(raw_root),
         "capture_scope": capture_scope or "all",
+        "session_ids": sorted(session_ids) if session_ids is not None else "all",
         "identity_basis": "sample_id_without_six_digit_image_index",
         "physical_part_count": len(split_by_part),
         "complete_sample_count": audit.complete_sample_count,
@@ -543,6 +570,7 @@ def prepare_eight_view_dataset(
     verify_image_hash: bool = True,
     dry_run: bool = False,
     capture_scope: str | None = None,
+    session_ids: Sequence[str] | None = None,
 ) -> dict[str, object]:
     """Validate raw captures and atomically publish branch-specific manifests."""
     if not isinstance(dataset_id, str) or not _DATASET_ID.fullmatch(dataset_id):
@@ -556,6 +584,7 @@ def prepare_eight_view_dataset(
         raw,
         verify_image_hash=verify_image_hash,
         capture_scope=capture_scope,
+        session_ids=session_ids,
     )
     split_by_part = assign_stratified_part_splits(rows, seed=seed)
     report = _report(
@@ -568,6 +597,7 @@ def prepare_eight_view_dataset(
         verify_image_hash=verify_image_hash,
         release_status="dry_run" if dry_run else "published",
         capture_scope=capture_scope,
+        session_ids=session_ids,
     )
     if dry_run:
         return report

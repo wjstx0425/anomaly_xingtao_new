@@ -20,7 +20,6 @@ import numpy as np
 from bmw_inspection.lab.eight_view_dataset import VIEW_ORDER, _atomic_publish_noreplace
 from bmw_inspection.lab.eight_view_roi import EightViewRoiConfig, load_roi_config
 
-
 _DATASET_FIELDS = (
     "sample_id",
     "physical_part_id",
@@ -48,6 +47,7 @@ _TEMPLATE_FIELDS = ("sample_id", "part_id", "view_id", "image_path", "split", "l
 _QUEUE_FIELDS = _DATASET_FIELDS + ("crop_path", "expected_label_filename")
 _TRAINING_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 _SPLIT_TO_YOLO = {"train": "train", "calibration": "val", "final_test": "test"}
+_YOLO_EDGE_TOLERANCE = 1e-6
 
 
 def _sha256(path: Path) -> str:
@@ -107,10 +107,10 @@ def _validate_yolo_text(text: str, *, path: Path) -> str:
         if width <= 0.0 or height <= 0.0:
             raise ValueError(f"YOLO label width and height must be positive: {path}:{line_number}")
         if not (
-            0.0 <= center_x - width / 2.0
-            and center_x + width / 2.0 <= 1.0
-            and 0.0 <= center_y - height / 2.0
-            and center_y + height / 2.0 <= 1.0
+            -_YOLO_EDGE_TOLERANCE <= center_x - width / 2.0
+            and center_x + width / 2.0 <= 1.0 + _YOLO_EDGE_TOLERANCE
+            and -_YOLO_EDGE_TOLERANCE <= center_y - height / 2.0
+            and center_y + height / 2.0 <= 1.0 + _YOLO_EDGE_TOLERANCE
         ):
             raise ValueError(f"YOLO label box lies outside normalized crop coordinates: {path}:{line_number}")
         normalized_lines.append(f"0 {center_x:.6f} {center_y:.6f} {width:.6f} {height:.6f}")

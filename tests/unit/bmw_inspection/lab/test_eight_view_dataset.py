@@ -182,6 +182,54 @@ def test_reader_capture_scope_keeps_only_right_samples_and_audit_counts(tmp_path
     assert audit.incomplete_sample_count == 1
 
 
+def test_reader_session_filter_keeps_only_requested_manifests(tmp_path: Path) -> None:
+    selected_session = "20260810_100000_000011"
+    _write_session(
+        tmp_path,
+        session_id="20260810_100000_000010",
+        source_class="normal",
+        groups=2,
+        hand="right",
+    )
+    _write_session(
+        tmp_path,
+        session_id=selected_session,
+        source_class="edge",
+        groups=3,
+        incomplete_last=True,
+        hand="right",
+    )
+
+    rows, audit = read_complete_capture_rows(
+        tmp_path,
+        capture_scope="right",
+        session_ids=(selected_session,),
+    )
+
+    assert len(rows) == 24
+    assert {row.session_id for row in rows} == {selected_session}
+    assert audit.manifest_count == 1
+    assert audit.complete_sample_count == 3
+    assert audit.incomplete_sample_count == 1
+
+
+def test_reader_session_filter_rejects_missing_manifest(tmp_path: Path) -> None:
+    _write_session(
+        tmp_path,
+        session_id="20260810_100000_000012",
+        source_class="normal",
+        groups=1,
+        hand="right",
+    )
+
+    with pytest.raises(ValueError, match="capture session manifest does not exist"):
+        read_complete_capture_rows(
+            tmp_path,
+            capture_scope="right",
+            session_ids=("20260810_100000_999999",),
+        )
+
+
 def test_stratified_split_is_deterministic_and_keeps_parts_together() -> None:
     rows: list[PreparedImage] = []
     for source_class, count in (("normal", 10), ("no_streak", 4)):
@@ -293,6 +341,8 @@ def test_pipeline_wrapper_dry_run_prints_json(tmp_path: Path, capsys: pytest.Cap
             "bmw-hdr-v1",
             "--hand",
             "right",
+            "--session-id",
+            "20260806_100000_000020",
             "--dry-run",
         ]
     )
@@ -302,6 +352,7 @@ def test_pipeline_wrapper_dry_run_prints_json(tmp_path: Path, capsys: pytest.Cap
     assert payload["complete_sample_count"] == 1
     assert payload["image_count"] == 8
     assert payload["capture_scope"] == "right"
+    assert payload["session_ids"] == ["20260806_100000_000020"]
     assert payload["release_status"] == "dry_run"
 
 

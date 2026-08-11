@@ -13,8 +13,7 @@ import pytest
 
 from bmw_inspection.lab.eight_view_dataset import VIEW_ORDER
 from bmw_inspection.lab.eight_view_roi import EightViewRoiConfig, save_roi_config
-from bmw_inspection.lab.eight_view_training_data import materialize_training_data
-
+from bmw_inspection.lab.eight_view_training_data import _validate_yolo_text, materialize_training_data
 
 FIELDS = (
     "sample_id",
@@ -222,3 +221,19 @@ def test_missing_or_invalid_review_labels_fail_without_release(tmp_path: Path) -
         )
 
     assert not (output_root / "bmw-train-invalid-v1").exists()
+
+
+def test_yolo_validation_tolerates_only_six_decimal_serialization_error(tmp_path: Path) -> None:
+    path = tmp_path / "boundary.txt"
+
+    normalized = _validate_yolo_text(
+        "0 0.454308 0.959184 0.146040 0.081633\n",
+        path=path,
+    )
+
+    assert normalized == "0 0.454308 0.959184 0.146040 0.081633\n"
+    with pytest.raises(ValueError, match="outside normalized"):
+        _validate_yolo_text(
+            "0 0.454308 0.959186 0.146040 0.081633\n",
+            path=path,
+        )

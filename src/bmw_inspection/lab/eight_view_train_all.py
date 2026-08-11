@@ -1,3 +1,6 @@
+# Copyright (C) 2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+
 """BMW eight-view laboratory training orchestration.
 
 This module intentionally produces experimental artifacts only. It does not
@@ -153,8 +156,68 @@ def _image_paths(path: Path) -> list[Path]:
     return sorted(item for item in path.rglob("*") if item.is_file() and item.suffix.lower() in suffixes)
 
 
-def preflight_training(config: LabTrainingConfig) -> dict[str, Any]:
-    """Check only the inputs needed before the expensive run starts."""
+def required_yolo_label_names(prepared_root: Path) -> tuple[str, ...]:
+    """Return the reviewed YOLO files required by one prepared dataset.
+
+    Args:
+        prepared_root (Path): Prepared eight-view dataset root.
+
+    Returns:
+        tuple[str, ...]: Sorted YOLO text filenames required for non-normal source rows.
+
+    Raises:
+        OSError: If the prepared manifest cannot be read.
+        ValueError: If the manifest schema is invalid or contains no defect rows.
+    """
+    manifest = Path(prepared_root).expanduser().resolve() / "manifests/dataset_manifest.csv"
+    with manifest.open("r", newline="", encoding="utf-8-sig") as stream:
+        reader = csv.DictReader(stream)
+        required = {"sample_id", "session_id", "view_id", "source_class"}
+        if reader.fieldnames is None or not required.issubset(reader.fieldnames):
+            raise ValueError("prepared dataset manifest is missing YOLO identity fields")
+        names = {
+            f"{row['session_id']}__{row['sample_id']}__{row['view_id']}.txt"
+            for row in reader
+            if row["source_class"] not in {"normal", "no_streak"}
+        }
+    if not names:
+        raise ValueError("prepared dataset has no defect rows requiring YOLO review")
+    return tuple(sorted(names))
+
+
+def training_release_report_is_complete(report: Mapping[str, Any], views: tuple[str, ...]) -> bool:
+    """Return whether a materialized release can be safely reused.
+
+    Args:
+        report (Mapping[str, Any]): Materialized training release report.
+        views (tuple[str, ...]): Canonical views expected in the report.
+
+    Returns:
+        bool: True when YOLO data is ready and every view has the same positive crop count.
+    """
+    counts = report.get("view_crop_counts")
+    if report.get("yolo_training_ready") is not True or not isinstance(counts, Mapping):
+        return False
+    if set(counts) != set(views):
+        return False
+    values = [counts[view] for view in views]
+    return all(isinstance(value, int) and not isinstance(value, bool) and value > 0 for value in values) and len(
+        set(values)
+    ) == 1
+
+
+def preflight_model_assets(config: LabTrainingConfig) -> dict[str, Any]:
+    """Validate shared model settings and local pretrained assets.
+
+    Args:
+        config (LabTrainingConfig): Laboratory training configuration.
+
+    Returns:
+        dict[str, Any]: Validated views, model assets, and YOLO batch.
+
+    Raises:
+        ValueError: If model settings or required local assets are invalid.
+    """
     if config.views != VIEW_ORDER:
         raise ValueError("BMW laboratory training requires the canonical eight-view order")
     if config.efficientad_batch != 1:
@@ -169,20 +232,12 @@ def preflight_training(config: LabTrainingConfig) -> dict[str, Any]:
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
             raise ValueError(f"{name} must be a positive integer")
     required_files = {
-        "ROI config": config.roi_config,
-        "prepared manifest": config.prepared_root / "manifests/dataset_manifest.csv",
-        "bright-streak manifest": config.prepared_root / "manifests/bright_streak.csv",
         "YOLO checkpoint": config.yolo_checkpoint,
         "bright-streak base config": config.repo_root / "configs/bmw/bright_streak_demo.json",
     }
     for label, path in required_files.items():
         if not path.is_file():
             raise ValueError(f"{label} does not exist: {path}")
-    if not config.reviewed_yolo_labels.is_dir():
-        raise ValueError(f"reviewed YOLO label root does not exist: {config.reviewed_yolo_labels}")
-    label_files = sorted(config.reviewed_yolo_labels.glob("*.txt"))
-    if len(label_files) != 248:
-        raise ValueError(f"reviewed YOLO label root must contain exactly 248 txt files, got {len(label_files)}")
     if not config.imagenette_dir.is_dir() or not _image_paths(config.imagenette_dir):
         raise ValueError(f"ImageNette data is missing: {config.imagenette_dir}")
     teacher = (
@@ -194,11 +249,36 @@ def preflight_training(config: LabTrainingConfig) -> dict[str, Any]:
     return {
         "status": "ready",
         "views": list(config.views),
-        "reviewed_label_count": len(label_files),
         "yolo_batch": config.yolo_batch,
         "teacher_weights": str(teacher),
         "imagenette_dir": str(config.imagenette_dir),
     }
+
+
+def preflight_training(config: LabTrainingConfig) -> dict[str, Any]:
+    """Check materialization inputs and shared model assets before training."""
+    assets = preflight_model_assets(config)
+    required_files = {
+        "ROI config": config.roi_config,
+        "prepared manifest": config.prepared_root / "manifests/dataset_manifest.csv",
+        "bright-streak manifest": config.prepared_root / "manifests/bright_streak.csv",
+    }
+    for label, path in required_files.items():
+        if not path.is_file():
+            raise ValueError(f"{label} does not exist: {path}")
+    if not config.reviewed_yolo_labels.is_dir():
+        raise ValueError(f"reviewed YOLO label root does not exist: {config.reviewed_yolo_labels}")
+    expected_label_names = set(required_yolo_label_names(config.prepared_root))
+    label_files = sorted(config.reviewed_yolo_labels.glob("*.txt"))
+    actual_label_names = {path.name for path in label_files}
+    if actual_label_names != expected_label_names:
+        missing = len(expected_label_names - actual_label_names)
+        extra = len(actual_label_names - expected_label_names)
+        raise ValueError(
+            "reviewed YOLO label root does not match prepared defect rows: "
+            f"expected={len(expected_label_names)}, actual={len(actual_label_names)}, missing={missing}, extra={extra}"
+        )
+    return {**assets, "reviewed_label_count": len(label_files)}
 
 
 def _materialize_stage(config: LabTrainingConfig) -> dict[str, Any]:
@@ -207,9 +287,7 @@ def _materialize_stage(config: LabTrainingConfig) -> dict[str, Any]:
     report_path = config.training_release / "report.json"
     if report_path.is_file():
         report = json.loads(report_path.read_text(encoding="utf-8"))
-        if report.get("yolo_training_ready") is not True or report.get("view_crop_counts") != {
-            view: 132 for view in VIEW_ORDER
-        }:
+        if not training_release_report_is_complete(report, config.views):
             raise ValueError(f"existing training release is incomplete: {config.training_release}")
         return {"status": "reused", "training_release": str(config.training_release)}
     report = materialize_training_data(
@@ -537,10 +615,11 @@ def _json_safe(value: Any) -> Any:
 
 
 def _efficientad_stage(config: LabTrainingConfig) -> dict[str, Any]:
+    from lightning import seed_everything
+
     from anomalib.data import Folder
     from anomalib.engine import Engine
     from anomalib.models import EfficientAd
-    from lightning import seed_everything
 
     dataset_root = config.training_release / "efficientad"
     output_root = config.run_dir / "efficientad"

@@ -562,3 +562,9 @@
 - Current selected-data EfficientAD result is 1/20 normal whole-part false NG (`5%`, `bmw_normal_group051/back_left`) and 6/6 defect whole-parts detected with 17 defect-view hits. The artifact is explicitly `demo_only=true` and `test_used_for_selection=true`; it must be validated on new untouched physical parts before any acceptance claim.
 - Demo configuration requires explicit `bright_streak.config` and `efficientad.threshold_artifact` assets and fails closed on missing/invalid files. Runtime EfficientAD status is solely `score >= per-view threshold`; checkpoint `pred_label` is diagnostic only. Heatmaps use a fixed 0-1 scale.
 - Fresh final offline smoke `bmw_normal_group072_000001` produced 25 PASS, final OK, 3385.422 ms with RTX 4090 CUDA inference. Screenshot: `artifacts/bmw_eight_view_threshold_demo/group072_bold_efficientad_5pct.png`; this single-sample smoke is not a throughput benchmark.
+
+## BMW current algorithm backup (2026-08-11)
+
+- GitHub backup target is branch `agent/bmw-eight-view-handoff`; the snapshot includes BMW code, configs, pipeline entrypoints, and tests but excludes `dataset/`, `results/`, images, and model checkpoints.
+- Keep the latest right-hand training entrypoints in the backup: `pipeline/bmw_lab_train_right.py`, `pipeline/bmw_lab_train_right_multisource.py`, `src/bmw_inspection/lab/right_train_all.py`, and `src/bmw_inspection/lab/multisource_training_data.py`, together with their unit tests.
+- Local recoverable backup is a complete Git bundle under `/home/yunjing/anomaly_xingtao_new/local_backups/`; verify it with `git bundle verify` and use its recorded SHA-256 before restoration.

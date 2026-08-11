@@ -24,6 +24,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-root", type=Path, default=REPO_ROOT / "dataset/bmw_lab_prepared")
     parser.add_argument("--dataset-id", default="bmw_hdr_eight_view_v1")
     parser.add_argument("--hand", choices=("left", "right"), help="只准备指定采集范围的数据。")
+    parser.add_argument(
+        "--session-id",
+        action="append",
+        dest="session_ids",
+        metavar="SESSION_ID",
+        help="只准备指定采集会话；处理多个会话时可重复传入。",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--skip-image-hash",
@@ -46,6 +53,7 @@ def main(argv: list[str] | None = None) -> int:
             verify_image_hash=not args.skip_image_hash,
             dry_run=args.dry_run,
             capture_scope=args.hand,
+            session_ids=args.session_ids,
         )
     except (FileExistsError, OSError, TypeError, ValueError) as error:
         print(f"BMW八视图数据准备失败：{type(error).__name__}: {error}", file=sys.stderr)
