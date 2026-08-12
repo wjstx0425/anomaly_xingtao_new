@@ -4,6 +4,7 @@
 
 - `pipeline/bmw_lab_publish_trusted_ok_reference.py` atomically publishes a no-overwrite reference release only from exact human `APPROVED` decisions. It binds the whitelist and every reference entry to the review decision, source, copied full-image, ROI-crop, and fixed ROI-config SHA-256 values.
 - The user-confirmed 50-part release is `dataset/bmw_trusted_ok_reference/bmw_right_20260810_21_train_normal_approved_v1`: 400 full frames, 400 ROI PNGs, eight views with 50 references each. It is trusted-OK provenance only, not model-quality or production acceptance.
+- P1 follow-up preserves v1 but retires it from future publisher input because its historical review package does not bind a candidate-manifest SHA. Use v2 only: `bmw_right_20260810_21_train_normal_v2` review and `bmw_right_20260810_21_train_normal_approved_v2` reference release. v2 is frozen to candidate SHA `9ff29f52bf0bb63636558832b8da0ffc7244809b2d5f056aa124ba444559ce8e` and was independently verified as 50 parts, 400 full images, 400 ROI images, and all source/copy/crop SHA matches.
 
 ## BMW v3 NG evidence laboratory Demo (2026-08-12)
 

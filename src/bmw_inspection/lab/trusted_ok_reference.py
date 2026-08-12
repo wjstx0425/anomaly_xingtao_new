@@ -259,6 +259,7 @@ def prepare_review_package(manifest: Path, output_dir: Path, *, session_id: str)
     staging = Path(tempfile.mkdtemp(prefix=f".{output.name}.", dir=output.parent))
     try:
         _write_csv(staging / "candidate_manifest.csv", DATASET_FIELDS, (row.manifest_row() for row in candidates))
+        candidate_manifest_sha256 = _sha256(staging / "candidate_manifest.csv")
         decisions = [
             {
                 "physical_part_id": part_id,
@@ -281,6 +282,7 @@ def prepare_review_package(manifest: Path, output_dir: Path, *, session_id: str)
             "session_id": normalized_session_id,
             "manifest_path": str(manifest_path),
             "manifest_sha256": _sha256(manifest_path),
+            "candidate_manifest_sha256": candidate_manifest_sha256,
             "candidate_part_count": len(part_rows),
             "candidate_image_count": len(candidates),
             "pending_decision_count": len(decisions),
@@ -363,6 +365,11 @@ def _validate_review_package(review_dir: Path) -> tuple[dict[str, list[Candidate
         raise ValueError("review package metadata has unsupported schema or status")
     if not candidate_path.is_file() or candidate_path.is_symlink():
         raise ValueError(f"candidate manifest is not a regular file: {candidate_path}")
+    expected_candidate_sha256 = package.get("candidate_manifest_sha256")
+    if not isinstance(expected_candidate_sha256, str) or not _SHA256.fullmatch(expected_candidate_sha256):
+        raise ValueError("review package candidate_manifest_sha256 must be a lowercase SHA-256")
+    if _sha256(candidate_path) != expected_candidate_sha256:
+        raise ValueError("review package candidate_manifest_sha256 differs from candidate_manifest.csv")
 
     candidates = _group_by_part(
         _candidate_rows(_read_manifest(candidate_path), TRUSTED_OK_SESSION_ID, include_incomplete=True)

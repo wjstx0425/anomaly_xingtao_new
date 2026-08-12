@@ -22,13 +22,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--review-dir",
         type=Path,
-        default=REPO_ROOT / "dataset/bmw_trusted_ok_review/bmw_right_20260810_21_train_normal_v1",
+        default=REPO_ROOT / "dataset/bmw_trusted_ok_review/bmw_right_20260810_21_train_normal_v2",
     )
     parser.add_argument(
         "--output",
         type=Path,
         default=(
-            REPO_ROOT / "dataset/bmw_trusted_ok_reference/bmw_right_20260810_21_train_normal_approved_v1"
+            REPO_ROOT / "dataset/bmw_trusted_ok_reference/bmw_right_20260810_21_train_normal_approved_v2"
         ),
     )
     parser.add_argument(

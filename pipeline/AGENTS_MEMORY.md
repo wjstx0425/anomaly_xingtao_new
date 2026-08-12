@@ -20,6 +20,7 @@
 - `bmw_lab_publish_trusted_ok_reference.py` publishes only exact `APPROVED` decisions from the immutable review package. It validates the decision schema, decision-to-candidate binding, all approved source SHA-256 values, fixed eight-view ROI contract, and complete views before atomically creating a no-overwrite release.
 - The fixed first release is `dataset/bmw_trusted_ok_reference/bmw_right_20260810_21_train_normal_approved_v1`. Its `trusted_ok_whitelist.json` binds the candidate and decision CSV hashes; `reference_index.json` binds the whitelist/ROI SHA and one copied full image plus RGB PNG ROI crop per part/view.
 - User confirmation on 2026-08-12 changed the ignored review decisions for all 50 candidates to `APPROVED`, reviewer `user-confirmed-20260812`, note `用户确认50个全部OK`. Publication independently verified 50 parts, 400 index rows, 50 references per view, and SHA matches for 400 sources, 400 full copies, and 400 ROI files. This is curated normal-reference provenance, not model or production acceptance.
+- P1 correction: v1's review package predates the frozen candidate-manifest binding and must not be used for later publishing. The producer now writes `candidate_manifest_sha256`; the publisher validates it before reading decisions. The only future candidate is v2: `dataset/bmw_trusted_ok_review/bmw_right_20260810_21_train_normal_v2`, whose 400 identity/source-SHA rows exactly match v1 and whose frozen SHA is `9ff29f52bf0bb63636558832b8da0ffc7244809b2d5f056aa124ba444559ce8e`.
 
 ## BMW 21-point Template-only diagnostic candidate (2026-08-11)
 

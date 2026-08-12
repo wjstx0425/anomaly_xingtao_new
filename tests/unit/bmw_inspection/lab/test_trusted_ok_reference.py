@@ -128,6 +128,15 @@ def _set_decision(review: Path, part_id: str, decision: str) -> None:
         writer.writerows(rows)
 
 
+def _set_candidate_manifest_hash(review: Path) -> None:
+    """Model a producer package whose frozen candidate CSV has this exact content."""
+    candidate_path = review / "candidate_manifest.csv"
+    package_path = review / "review_package.json"
+    package = json.loads(package_path.read_text(encoding="utf-8"))
+    package["candidate_manifest_sha256"] = hashlib.sha256(candidate_path.read_bytes()).hexdigest()
+    package_path.write_text(json.dumps(package), encoding="utf-8")
+
+
 def test_publish_trusted_reference_index_copies_only_complete_approved_parts(tmp_path: Path) -> None:
     review = _review_package(tmp_path, part_count=3)
     _set_decision(review, "normal-train-001", "APPROVED")
@@ -181,6 +190,7 @@ def test_publish_trusted_reference_index_rejects_approved_part_missing_a_view(tm
         writer = csv.DictWriter(stream, fieldnames=DATASET_FIELDS)
         writer.writeheader()
         writer.writerows(rows)
+    _set_candidate_manifest_hash(review)
 
     with pytest.raises(ValueError, match="exactly eight views"):
         publish_trusted_reference_index(review, tmp_path / "trusted-release", _roi_config(tmp_path))
@@ -190,6 +200,33 @@ def test_publish_trusted_reference_index_rejects_when_no_part_is_approved(tmp_pa
     review = _review_package(tmp_path, part_count=1)
 
     with pytest.raises(ValueError, match="no APPROVED"):
+        publish_trusted_reference_index(review, tmp_path / "trusted-release", _roi_config(tmp_path))
+
+
+def test_publish_trusted_reference_index_rejects_candidate_substitution_despite_unchanged_approval_ids(
+    tmp_path: Path,
+) -> None:
+    review = _review_package(tmp_path, part_count=2)
+    _set_decision(review, "normal-train-001", "APPROVED")
+    candidate_path = review / "candidate_manifest.csv"
+    with candidate_path.open(newline="", encoding="utf-8") as stream:
+        rows = list(csv.DictReader(stream))
+    replacement_by_view = {
+        row["view_id"]: row
+        for row in rows
+        if row["physical_part_id"] == "normal-train-002"
+    }
+    for row in rows:
+        if row["physical_part_id"] == "normal-train-001":
+            replacement = replacement_by_view[row["view_id"]]
+            row["source_path"] = replacement["source_path"]
+            row["source_sha256"] = replacement["source_sha256"]
+    with candidate_path.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=DATASET_FIELDS)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    with pytest.raises(ValueError, match="candidate_manifest_sha256"):
         publish_trusted_reference_index(review, tmp_path / "trusted-release", _roi_config(tmp_path))
 
 
@@ -215,6 +252,10 @@ def test_review_package_contains_only_complete_training_normals_and_pending_deci
         candidate_rows = list(csv.DictReader(stream))
     assert len(candidate_rows) == 8
     assert [row["view_id"] for row in candidate_rows] == list(VIEW_ORDER)
+    package = json.loads((output / "review_package.json").read_text(encoding="utf-8"))
+    assert package["candidate_manifest_sha256"] == hashlib.sha256(
+        (output / "candidate_manifest.csv").read_bytes()
+    ).hexdigest()
 
 
 def test_review_package_aborts_before_publication_when_a_candidate_hash_mismatches(tmp_path: Path) -> None:
@@ -302,3 +343,16 @@ def test_review_cli_requires_a_session_and_defaults_to_the_immutable_review_loca
     assert defaults.manifest.name == "dataset_manifest.csv"
     with pytest.raises(SystemExit):
         parser.parse_args([])
+
+
+def test_publish_cli_defaults_to_the_frozen_v2_review_and_reference_paths() -> None:
+    script = Path(__file__).resolve().parents[4] / "pipeline/bmw_lab_publish_trusted_ok_reference.py"
+    spec = importlib.util.spec_from_file_location("bmw_lab_publish_trusted_ok_reference", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    defaults = module.build_parser().parse_args([])
+
+    assert defaults.review_dir.name == "bmw_right_20260810_21_train_normal_v2"
+    assert defaults.output.name == "bmw_right_20260810_21_train_normal_approved_v2"
