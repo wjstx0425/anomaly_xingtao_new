@@ -65,6 +65,13 @@ class TrackedProfileGeometry:
             raise ValueError("tracked-profile step_penalty must be a finite non-negative number")
 
 
+# The narrower candidate band was selected from calibration-only evidence: it
+# doubles the weakest normal accepted coverage and reduces the calibration gap
+# envelope while retaining strict normal/no-streak peak separation. Task-1's
+# dataclass defaults remain the general synthetic reference geometry.
+BMW_TRACKED_PROFILE_V3_GEOMETRY = TrackedProfileGeometry(candidate_width=5)
+
+
 @dataclass(frozen=True, slots=True)
 class TrackedProfileThresholds:
     """Presence and continuity thresholds applied to one tracked path."""
@@ -373,6 +380,7 @@ def fit_tracked_profile_thresholds(
 
 
 __all__ = [
+    "BMW_TRACKED_PROFILE_V3_GEOMETRY",
     "TRACKED_PROFILE_ROI_SHAPE",
     "TrackedProfileGeometry",
     "TrackedProfileMetrics",
