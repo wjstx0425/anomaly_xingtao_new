@@ -5,14 +5,18 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import math
 import re
 import shutil
 import tempfile
+import threading
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+import cv2
+import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 from bmw_inspection.lab.eight_view_dataset import VIEW_ORDER, _atomic_publish_noreplace
@@ -34,6 +38,10 @@ DATASET_FIELDS = (
 )
 DECISION_FIELDS = ("physical_part_id", "sample_id", "decision", "reviewer", "review_note")
 TRUSTED_OK_SESSION_ID = "20260810_210030_527506"
+DEFAULT_TRUSTED_OK_REFERENCE_RELEASE = (
+    Path(__file__).resolve().parents[3]
+    / "dataset/bmw_trusted_ok_reference/bmw_right_20260810_21_train_normal_approved_v2"
+)
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _SAFE_PART_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 _VIEW_LABELS = {
@@ -108,6 +116,334 @@ class TrustedIndexSummary:
     reference_count_by_view: dict[str, int]
     whitelist_sha256: str
     roi_config_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class TrustedOkMatch:
+    """Display-only nearest approved reference for one actionable view."""
+
+    view_id: str
+    physical_part_id: str
+    sample_id: str
+    similarity: float
+    shift_x: int
+    shift_y: int
+    current_full_image: np.ndarray
+    reference_full_image: np.ndarray
+    current_roi: np.ndarray
+    reference_roi: np.ndarray
+    aligned_reference_roi: np.ndarray
+    difference_overlay: np.ndarray
+    source_sha256: str
+    reference_full_sha256: str
+    reference_roi_sha256: str
+    index_sha256: str
+
+    def __post_init__(self) -> None:
+        if self.view_id not in VIEW_ORDER:
+            raise ValueError(f"unknown BMW view: {self.view_id}")
+        if not self.physical_part_id.strip() or not self.sample_id.strip():
+            raise ValueError("trusted reference identity must not be empty")
+        if not math.isfinite(float(self.similarity)) or not -1.0 <= float(self.similarity) <= 1.0:
+            raise ValueError("similarity must be finite and within [-1, 1]")
+        if isinstance(self.shift_x, bool) or not isinstance(self.shift_x, int):
+            raise TypeError("shift_x must be an integer")
+        if isinstance(self.shift_y, bool) or not isinstance(self.shift_y, int):
+            raise TypeError("shift_y must be an integer")
+        for name in (
+            "current_full_image",
+            "reference_full_image",
+            "current_roi",
+            "reference_roi",
+            "aligned_reference_roi",
+            "difference_overlay",
+        ):
+            image = getattr(self, name)
+            if (
+                not isinstance(image, np.ndarray)
+                or image.dtype != np.uint8
+                or image.size == 0
+                or image.ndim not in {2, 3}
+            ):
+                raise ValueError(f"{name} must be a non-empty uint8 image")
+            owned = image.copy()
+            owned.flags.writeable = False
+            object.__setattr__(self, name, owned)
+        for name in (
+            "source_sha256",
+            "reference_full_sha256",
+            "reference_roi_sha256",
+            "index_sha256",
+        ):
+            if not _SHA256.fullmatch(getattr(self, name)):
+                raise ValueError(f"{name} must be a lowercase SHA-256")
+
+
+@dataclass(frozen=True, slots=True)
+class _TrustedReference:
+    physical_part_id: str
+    sample_id: str
+    view_id: str
+    source_sha256: str
+    full_path: Path
+    full_sha256: str
+    roi_path: Path
+    roi_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedReference:
+    row: _TrustedReference
+    prepared: np.ndarray
+
+
+def _gray_for_match(image: np.ndarray) -> np.ndarray:
+    if image.ndim == 2:
+        return image
+    if image.ndim == 3 and image.shape[2] == 3:
+        return cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    if image.ndim == 3 and image.shape[2] == 4:
+        return cv2.cvtColor(image, cv2.COLOR_BGRA2GRAY)
+    raise ValueError("trusted-OK matching requires grayscale, BGR, or BGRA images")
+
+
+def _prepare_match_image(image: np.ndarray) -> np.ndarray:
+    """Apply the frozen Template fit/reflect/blur preparation at 512 square."""
+    if not isinstance(image, np.ndarray) or image.dtype != np.uint8 or image.size == 0:
+        raise ValueError("trusted-OK matching requires a non-empty uint8 image")
+    gray = _gray_for_match(image)
+    target_width = target_height = 512
+    scale = min(target_width / gray.shape[1], target_height / gray.shape[0])
+    width = max(1, min(target_width, int(round(gray.shape[1] * scale))))
+    height = max(1, min(target_height, int(round(gray.shape[0] * scale))))
+    resized = cv2.resize(
+        gray,
+        (width, height),
+        interpolation=cv2.INTER_AREA if scale < 1 else cv2.INTER_LINEAR,
+    )
+    left = (target_width - width) // 2
+    top = (target_height - height) // 2
+    fitted = cv2.copyMakeBorder(
+        resized,
+        top,
+        target_height - height - top,
+        left,
+        target_width - width - left,
+        cv2.BORDER_REFLECT_101,
+    )
+    return cv2.GaussianBlur(fitted, (3, 3), 0)
+
+
+def _difference_overlay(current: np.ndarray, aligned_reference: np.ndarray) -> np.ndarray:
+    difference = cv2.absdiff(current, aligned_reference)
+    maximum = int(difference.max())
+    contrast = np.zeros_like(difference) if maximum == 0 else cv2.convertScaleAbs(
+        difference, alpha=255.0 / maximum
+    )
+    overlay = cv2.applyColorMap(contrast, cv2.COLORMAP_INFERNO)
+    positive = contrast[contrast > 0]
+    if positive.size:
+        threshold = max(32, int(np.percentile(positive, 75)))
+        mask = np.where(contrast >= threshold, 255, 0).astype(np.uint8)
+        count, labels, _stats, _centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
+        if count > 1:
+            strongest = max(
+                range(1, count),
+                key=lambda label: (int(difference[labels == label].sum()), -label),
+            )
+            region = np.where(labels == strongest, 255, 0).astype(np.uint8)
+            contours, _hierarchy = cv2.findContours(region, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            cv2.drawContours(overlay, contours, -1, (0, 0, 255), 2)
+    return overlay
+
+
+class TrustedOkMatcher:
+    """Match one actionable BMW view against an immutable approved-v2 bank."""
+
+    def __init__(self, release_dir: Path, *, max_shift: int = 12) -> None:
+        raw_root = Path(release_dir).expanduser().absolute()
+        if raw_root.name.endswith("_approved_v1"):
+            raise ValueError("trusted-OK matcher refuses the obsolete approved_v1 release")
+        if not raw_root.is_dir() or raw_root.is_symlink():
+            raise ValueError(f"trusted-OK release is not a regular directory: {raw_root}")
+        if isinstance(max_shift, bool) or not isinstance(max_shift, int) or not 0 <= max_shift <= 64:
+            raise ValueError("max_shift must be an integer from 0 through 64")
+        index_path = raw_root / "reference_index.json"
+        if not index_path.is_file() or index_path.is_symlink():
+            raise ValueError(f"trusted-OK index is not a regular file: {index_path}")
+        try:
+            payload = json.loads(index_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise ValueError(f"trusted-OK index is invalid JSON: {index_path}") from error
+        if not isinstance(payload, dict) or payload.get("schema_version") != 1 or payload.get("status") != "published":
+            raise ValueError("trusted-OK index has unsupported schema or status")
+        raw_references = payload.get("references")
+        if not isinstance(raw_references, list) or not raw_references:
+            raise ValueError("trusted-OK index references must be a non-empty list")
+        by_view: dict[str, list[_TrustedReference]] = {view: [] for view in VIEW_ORDER}
+        seen: set[tuple[str, str]] = set()
+        for number, raw in enumerate(raw_references, start=1):
+            if not isinstance(raw, dict):
+                raise ValueError(f"trusted-OK reference {number} must be an object")
+            context = f"trusted-OK reference {number}"
+            view = self._text(raw, "view_id", context)
+            if view not in VIEW_ORDER:
+                raise ValueError(f"{context} has unknown view_id")
+            part_id = self._text(raw, "physical_part_id", context)
+            identity = (view, part_id)
+            if identity in seen:
+                raise ValueError(f"{context} duplicates view/physical_part_id")
+            seen.add(identity)
+            by_view[view].append(
+                _TrustedReference(
+                    physical_part_id=part_id,
+                    sample_id=self._text(raw, "sample_id", context),
+                    view_id=view,
+                    source_sha256=self._digest(raw, "source_sha256", context),
+                    full_path=self._asset_path(raw_root, raw, "full_image_path", context),
+                    full_sha256=self._digest(raw, "full_image_sha256", context),
+                    roi_path=self._asset_path(raw_root, raw, "roi_image_path", context),
+                    roi_sha256=self._digest(raw, "roi_image_sha256", context),
+                )
+            )
+        if all(not rows for rows in by_view.values()):
+            raise ValueError("trusted-OK index contains no supported references")
+        counts = payload.get("reference_count_by_view")
+        if isinstance(counts, dict) and any(counts.get(view) != len(by_view[view]) for view in VIEW_ORDER):
+            raise ValueError("trusted-OK reference_count_by_view differs from references")
+        self._root = raw_root
+        self._index_sha256 = _sha256(index_path)
+        self._max_shift = max_shift
+        self._by_view = {view: tuple(rows) for view, rows in by_view.items()}
+        self._prepared: dict[tuple[str, bool], tuple[_PreparedReference, ...]] = {}
+        self._lock = threading.RLock()
+
+    @staticmethod
+    def _text(raw: Mapping[str, object], field: str, context: str) -> str:
+        value = raw.get(field)
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{context} has invalid {field}")
+        return value.strip()
+
+    @classmethod
+    def _digest(cls, raw: Mapping[str, object], field: str, context: str) -> str:
+        value = cls._text(raw, field, context)
+        if not _SHA256.fullmatch(value):
+            raise ValueError(f"{context} has invalid {field}")
+        return value
+
+    @classmethod
+    def _asset_path(
+        cls, root: Path, raw: Mapping[str, object], field: str, context: str
+    ) -> Path:
+        relative = Path(cls._text(raw, field, context))
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ValueError(f"{context} has unsafe {field}")
+        path = root / relative
+        if not path.is_file() or path.is_symlink():
+            raise ValueError(f"{context} {field} is not a regular file")
+        return path
+
+    @staticmethod
+    def _load_verified(path: Path, expected_sha256: str) -> np.ndarray:
+        if not path.is_file() or path.is_symlink() or _sha256(path) != expected_sha256:
+            raise ValueError(f"trusted-OK reference SHA-256 mismatch: {path}")
+        image = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+        if image is None or image.dtype != np.uint8 or image.size == 0:
+            raise ValueError(f"trusted-OK reference image is unavailable: {path}")
+        return image
+
+    def _prepared_references(self, view_id: str, use_full: bool) -> tuple[_PreparedReference, ...]:
+        key = (view_id, use_full)
+        cached = self._prepared.get(key)
+        if cached is not None:
+            return cached
+        rows = self._by_view[view_id]
+        if not rows:
+            raise ValueError(f"trusted-OK index has no references for view {view_id}")
+        prepared = tuple(
+            _PreparedReference(
+                row=row,
+                prepared=_prepare_match_image(
+                    self._load_verified(
+                        row.full_path if use_full else row.roi_path,
+                        row.full_sha256 if use_full else row.roi_sha256,
+                    )
+                ),
+            )
+            for row in rows
+        )
+        self._prepared[key] = prepared
+        return prepared
+
+    def match(
+        self,
+        view_id: str,
+        current_full_image: np.ndarray,
+        current_roi: np.ndarray,
+    ) -> TrustedOkMatch:
+        """Return the deterministic highest normalized-correlation approved reference."""
+        if view_id not in VIEW_ORDER:
+            raise ValueError(f"unknown BMW view: {view_id}")
+        for name, image in (
+            ("current_full_image", current_full_image),
+            ("current_roi", current_roi),
+        ):
+            if (
+                not isinstance(image, np.ndarray)
+                or image.dtype != np.uint8
+                or image.size == 0
+                or image.ndim not in {2, 3}
+            ):
+                raise ValueError(f"{name} must be a non-empty uint8 image")
+        current_full = current_full_image
+        current_region = current_roi
+        prepared_current = _prepare_match_image(current_region)
+        use_full = view_id == "front_left" and current_region.shape[:2] == current_full.shape[:2]
+        with self._lock:
+            candidates = self._prepared_references(view_id, use_full)
+            best: tuple[float, int, int, _PreparedReference, np.ndarray] | None = None
+            for candidate in candidates:
+                padded = cv2.copyMakeBorder(
+                    candidate.prepared,
+                    self._max_shift,
+                    self._max_shift,
+                    self._max_shift,
+                    self._max_shift,
+                    cv2.BORDER_REFLECT_101,
+                )
+                response = cv2.matchTemplate(padded, prepared_current, cv2.TM_CCOEFF_NORMED)
+                _minimum, similarity, _min_location, location = cv2.minMaxLoc(response)
+                if not math.isfinite(similarity):
+                    similarity = -1.0
+                x, y = location
+                aligned = padded[y : y + 512, x : x + 512].copy()
+                if best is None or similarity > best[0]:
+                    best = (float(similarity), x - self._max_shift, y - self._max_shift, candidate, aligned)
+            if best is None:
+                raise ValueError(f"trusted-OK index has no references for view {view_id}")
+            similarity, shift_x, shift_y, selected, aligned = best
+            row = selected.row
+            reference_full = self._load_verified(row.full_path, row.full_sha256)
+            reference_region = self._load_verified(row.roi_path, row.roi_sha256)
+        return TrustedOkMatch(
+            view_id=view_id,
+            physical_part_id=row.physical_part_id,
+            sample_id=row.sample_id,
+            similarity=similarity,
+            shift_x=shift_x,
+            shift_y=shift_y,
+            current_full_image=current_full,
+            reference_full_image=reference_full,
+            current_roi=current_region,
+            reference_roi=reference_region,
+            aligned_reference_roi=aligned,
+            difference_overlay=_difference_overlay(prepared_current, aligned),
+            source_sha256=row.source_sha256,
+            reference_full_sha256=row.full_sha256,
+            reference_roi_sha256=row.roi_sha256,
+            index_sha256=self._index_sha256,
+        )
 
 
 def _sha256(path: Path) -> str:

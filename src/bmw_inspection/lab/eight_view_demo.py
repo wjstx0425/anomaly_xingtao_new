@@ -18,6 +18,7 @@ import cv2
 import numpy as np
 
 from bmw_inspection.lab.eight_view_dataset import VIEW_ORDER
+from bmw_inspection.lab.trusted_ok_reference import TrustedOkMatch
 
 
 class DemoBranch(str, Enum):
@@ -94,6 +95,8 @@ class EightViewInspection:
     results: tuple[DemoBranchResult, ...]
     final_status: DemoFinalStatus
     elapsed_ms: float
+    trusted_ok_by_view: Mapping[str, TrustedOkMatch] = MappingProxyType({})
+    diagnostic_metadata: Mapping[str, Any] = MappingProxyType({})
 
     def __post_init__(self) -> None:
         if not self.capture_id.strip():
@@ -105,6 +108,15 @@ class EightViewInspection:
             raise ValueError("final_status does not match branch results")
         if not math.isfinite(float(self.elapsed_ms)) or self.elapsed_ms < 0:
             raise ValueError("elapsed_ms must be finite and non-negative")
+        if not isinstance(self.trusted_ok_by_view, Mapping):
+            raise TypeError("trusted_ok_by_view must be a mapping")
+        trusted: dict[str, TrustedOkMatch] = {}
+        for view, match in self.trusted_ok_by_view.items():
+            if view not in VIEW_ORDER or not isinstance(match, TrustedOkMatch) or match.view_id != view:
+                raise ValueError("trusted_ok_by_view must contain matching canonical views")
+            trusted[view] = match
+        object.__setattr__(self, "trusted_ok_by_view", MappingProxyType(trusted))
+        object.__setattr__(self, "diagnostic_metadata", _immutable_details(self.diagnostic_metadata))
 
     def actionable_results(self) -> tuple[DemoBranchResult, ...]:
         """Return NG and ERROR evidence in the model execution order."""

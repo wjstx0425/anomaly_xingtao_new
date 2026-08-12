@@ -8,11 +8,14 @@ import importlib.util
 import json
 from pathlib import Path
 
+import cv2
+import numpy as np
 import pytest
 from PIL import Image
 
 from bmw_inspection.lab.eight_view_dataset import VIEW_ORDER
 from bmw_inspection.lab.trusted_ok_reference import (
+    TrustedOkMatcher,
     prepare_review_package,
     publish_trusted_reference_index,
 )
@@ -356,3 +359,79 @@ def test_publish_cli_defaults_to_the_frozen_v2_review_and_reference_paths() -> N
 
     assert defaults.review_dir.name == "bmw_right_20260810_21_train_normal_v2"
     assert defaults.output.name == "bmw_right_20260810_21_train_normal_approved_v2"
+
+
+def test_matcher_selects_deterministic_aligned_correlation_winner(tmp_path: Path) -> None:
+    release = tmp_path / "synthetic_approved_v2"
+    references: list[dict[str, object]] = []
+    patterns: list[np.ndarray] = []
+    for index in range(3):
+        image = np.zeros((512, 512, 3), dtype=np.uint8)
+        cv2.rectangle(
+            image,
+            (70 + index * 45, 90 + index * 25),
+            (210 + index * 35, 310 + index * 20),
+            (40 + index * 50, 180 - index * 30, 240 - index * 40),
+            -1,
+        )
+        cv2.circle(image, (350 - index * 30, 170 + index * 70), 35 + index * 7, (255, 255, 255), -1)
+        patterns.append(image)
+        full_relative = Path("references/front/full") / f"part-{index}.png"
+        roi_relative = Path("references/front/roi") / f"part-{index}.png"
+        for relative in (full_relative, roi_relative):
+            path = release / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            assert cv2.imwrite(str(path), image)
+        digest = hashlib.sha256((release / full_relative).read_bytes()).hexdigest()
+        references.append(
+            {
+                "physical_part_id": f"part-{index}",
+                "sample_id": f"sample-{index}",
+                "view_id": "front",
+                "source_sha256": digest,
+                "full_image_path": str(full_relative),
+                "full_image_sha256": digest,
+                "roi_image_path": str(roi_relative),
+                "roi_image_sha256": digest,
+            }
+        )
+    index_path = release / "reference_index.json"
+    index_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "status": "published",
+                "approved_part_count": 3,
+                "reference_count_by_view": {view: (3 if view == "front" else 0) for view in VIEW_ORDER},
+                "references": references,
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    current = cv2.warpAffine(
+        patterns[1],
+        np.float32([[1, 0, 5], [0, 1, -4]]),
+        (512, 512),
+        borderMode=cv2.BORDER_REFLECT_101,
+    )
+
+    match = TrustedOkMatcher(release, max_shift=12).match("front", current, current)
+
+    assert match.physical_part_id == "part-1"
+    assert match.sample_id == "sample-1"
+    assert match.similarity > 0.99
+    assert abs(match.shift_x) <= 12
+    assert abs(match.shift_y) <= 12
+    assert match.difference_overlay.shape == (512, 512, 3)
+    assert match.difference_overlay.flags.writeable is False
+    assert match.index_sha256 == hashlib.sha256(index_path.read_bytes()).hexdigest()
+    assert TrustedOkMatcher(release, max_shift=12).match("front", current, current).physical_part_id == "part-1"
+
+
+def test_matcher_refuses_obsolete_v1_release_before_reading_an_index(tmp_path: Path) -> None:
+    obsolete = tmp_path / "bmw_right_20260810_21_train_normal_approved_v1"
+    obsolete.mkdir()
+
+    with pytest.raises(ValueError, match="refuses.*approved_v1"):
+        TrustedOkMatcher(obsolete)

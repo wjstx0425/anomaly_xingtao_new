@@ -9,6 +9,7 @@ import cv2
 import numpy as np
 import pytest
 
+from bmw_inspection.lab import eight_view_demo_models as demo_models
 from bmw_inspection.lab.eight_view_dataset import VIEW_ORDER
 from bmw_inspection.lab.eight_view_demo import BranchStatus, DemoFinalStatus
 from bmw_inspection.lab.efficientad_analysis import fixed_scale_heatmap
@@ -22,6 +23,34 @@ from bmw_inspection.lab.eight_view_demo_models import (
     ModelOutput,
     load_part_rois,
 )
+from bmw_inspection.lab.trusted_ok_reference import TrustedOkMatch
+
+
+def _trusted_match(
+    view: str,
+    current_full: np.ndarray,
+    current_roi: np.ndarray,
+) -> TrustedOkMatch:
+    reference_full = np.full_like(current_full, 10)
+    reference_roi = np.full_like(current_roi, 10)
+    return TrustedOkMatch(
+        view_id=view,
+        physical_part_id=f"trusted-{view}",
+        sample_id=f"sample-{view}",
+        similarity=0.9,
+        shift_x=0,
+        shift_y=0,
+        current_full_image=current_full,
+        reference_full_image=reference_full,
+        current_roi=current_roi,
+        reference_roi=reference_roi,
+        aligned_reference_roi=reference_roi,
+        difference_overlay=np.zeros((*current_roi.shape[:2], 3), dtype=np.uint8),
+        source_sha256="a" * 64,
+        reference_full_sha256="b" * 64,
+        reference_roi_sha256="c" * 64,
+        index_sha256="d" * 64,
+    )
 
 
 def test_model_suite_runs_all_25_checks_without_short_circuiting() -> None:
@@ -86,6 +115,107 @@ def test_model_suite_converts_one_predictor_exception_to_error_and_continues() -
     failed = [row for row in inspection.results if row.status is BranchStatus.ERROR]
     assert len(failed) == 1
     assert failed[0].view_id == "front_right"
+
+
+def test_model_suite_matches_only_unique_actionable_views_after_decisions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(demo_models, "perf_counter", lambda: 1.0)
+    calls: list[tuple[str, tuple[int, int], tuple[int, int]]] = []
+
+    class Matcher:
+        def match(self, view: str, current_full: np.ndarray, current_roi: np.ndarray) -> TrustedOkMatch:
+            calls.append((view, current_full.shape[:2], current_roi.shape[:2]))
+            return _trusted_match(view, current_full, current_roi)
+
+    def output(branch: str, view: str, _image: np.ndarray) -> ModelOutput:
+        status = BranchStatus.PASS
+        if view == "front" and branch in {"template", "yolo"}:
+            status = BranchStatus.NG
+        if branch == "bright_streak":
+            status = BranchStatus.NG
+        return ModelOutput(status, 0.1, 0.2, f"{branch}/{view}", None)
+
+    kwargs = {
+        "rois": {view: (0, 0, 10, 10) for view in VIEW_ORDER},
+        "template_predictor": lambda view, image: output("template", view, image),
+        "bright_streak_predictor": lambda image: output("bright_streak", "front_left", image),
+        "yolo_predictor": lambda view, image: output("yolo", view, image),
+        "efficientad_predictor": lambda view, image: output("efficientad", view, image),
+    }
+    images = {view: np.zeros((20, 20, 3), dtype=np.uint8) for view in VIEW_ORDER}
+    baseline = EightViewModelSuite(**kwargs).inspect(images, capture_id="baseline")
+    inspection = EightViewModelSuite(**kwargs, trusted_ok_matcher=Matcher()).inspect(images, capture_id="matched")
+
+    assert [row[0] for row in calls] == ["front", "front_left"]
+    assert calls[0][1:] == ((20, 20), (10, 10))
+    assert calls[1][1:] == ((20, 20), (20, 20))
+    assert tuple(inspection.trusted_ok_by_view) == ("front", "front_left")
+    assert inspection.results == baseline.results
+    assert inspection.final_status is baseline.final_status is DemoFinalStatus.NG
+
+
+def test_model_suite_pass_only_inspection_does_not_call_matcher() -> None:
+    class Matcher:
+        def match(self, *_args: object) -> TrustedOkMatch:
+            raise AssertionError("PASS-only inspection must not match trusted references")
+
+    passing = lambda *_args: ModelOutput(BranchStatus.PASS, 0.1, 0.5, "pass", None)
+    suite = EightViewModelSuite(
+        rois={view: (0, 0, 20, 20) for view in VIEW_ORDER},
+        template_predictor=passing,
+        bright_streak_predictor=lambda _image: passing(),
+        yolo_predictor=passing,
+        efficientad_predictor=passing,
+        trusted_ok_matcher=Matcher(),
+    )
+
+    inspection = suite.inspect(
+        {view: np.zeros((20, 20, 3), dtype=np.uint8) for view in VIEW_ORDER},
+        capture_id="pass",
+    )
+
+    assert inspection.final_status is DemoFinalStatus.OK
+    assert dict(inspection.trusted_ok_by_view) == {}
+
+
+def test_matcher_failure_is_diagnostic_only_and_keeps_model_decisions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(demo_models, "perf_counter", lambda: 1.0)
+
+    class BrokenMatcher:
+        def match(self, *_args: object) -> TrustedOkMatch:
+            raise RuntimeError("reference bank unavailable")
+
+    def template(view: str, _image: np.ndarray) -> ModelOutput:
+        return ModelOutput(
+            BranchStatus.NG if view == "front" else BranchStatus.PASS,
+            0.1,
+            0.2,
+            view,
+            None,
+        )
+
+    kwargs = {
+        "rois": {view: (0, 0, 20, 20) for view in VIEW_ORDER},
+        "template_predictor": template,
+        "bright_streak_predictor": lambda _image: ModelOutput(BranchStatus.PASS, 0.1, 0.2, "pass", None),
+        "yolo_predictor": lambda *_args: ModelOutput(BranchStatus.PASS, 0.1, 0.2, "pass", None),
+        "efficientad_predictor": lambda *_args: ModelOutput(BranchStatus.PASS, 0.1, 0.2, "pass", None),
+    }
+    images = {view: np.zeros((20, 20, 3), dtype=np.uint8) for view in VIEW_ORDER}
+    baseline = EightViewModelSuite(**kwargs).inspect(images, capture_id="baseline")
+    inspection = EightViewModelSuite(**kwargs, trusted_ok_matcher=BrokenMatcher()).inspect(
+        images, capture_id="broken"
+    )
+
+    assert dict(inspection.trusted_ok_by_view) == {}
+    assert inspection.diagnostic_metadata["trusted_ok_match_errors"] == {
+        "front": "reference bank unavailable"
+    }
+    assert inspection.results == baseline.results
+    assert inspection.final_status is baseline.final_status is DemoFinalStatus.NG
 
 
 def test_generic_template_predictor_loads_secondary_view_model() -> None:

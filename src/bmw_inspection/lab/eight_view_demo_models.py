@@ -28,6 +28,11 @@ from bmw_inspection.lab.eight_view_demo import (
     fuse_demo_status,
 )
 from bmw_inspection.lab.eight_view_roi import load_roi_config
+from bmw_inspection.lab.trusted_ok_reference import (
+    DEFAULT_TRUSTED_OK_REFERENCE_RELEASE,
+    TrustedOkMatch,
+    TrustedOkMatcher,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -601,6 +606,8 @@ class EightViewModelSuite:
         bright_streak_predictor: BrightPredictor,
         yolo_predictor: ViewPredictor,
         efficientad_predictor: ViewPredictor,
+        trusted_ok_matcher: TrustedOkMatcher | None = None,
+        trusted_ok_matcher_error: str | None = None,
     ) -> None:
         if tuple(rois) != VIEW_ORDER:
             raise ValueError("rois must use the canonical BMW eight-view order")
@@ -617,6 +624,8 @@ class EightViewModelSuite:
         self._bright_streak = bright_streak_predictor
         self._yolo = yolo_predictor
         self._efficientad = efficientad_predictor
+        self._trusted_ok_matcher = trusted_ok_matcher
+        self._trusted_ok_matcher_error = trusted_ok_matcher_error
 
     def inspect(self, images: Mapping[str, np.ndarray], *, capture_id: str) -> EightViewInspection:
         """Run 8 Template + 1 light streak + 8 YOLO + 8 EfficientAD checks."""
@@ -640,12 +649,50 @@ class EightViewModelSuite:
         for view in VIEW_ORDER:
             results.append(self._call(DemoBranch.EFFICIENTAD, view, self._efficientad, view, crops[view]))
         rows = tuple(results)
+        final_status = fuse_demo_status(rows)
+        actionable_views = tuple(
+            dict.fromkeys(
+                row.view_id
+                for row in rows
+                if row.status in {BranchStatus.NG, BranchStatus.ERROR}
+            )
+        )
+        trusted_ok_by_view: dict[str, TrustedOkMatch] = {}
+        match_errors: dict[str, str] = {}
+        bright_streak_actionable = any(
+            row.branch is DemoBranch.BRIGHT_STREAK
+            and row.status in {BranchStatus.NG, BranchStatus.ERROR}
+            for row in rows
+        )
+        for view in actionable_views:
+            if self._trusted_ok_matcher is None:
+                if self._trusted_ok_matcher_error is not None:
+                    match_errors[view] = self._trusted_ok_matcher_error
+                continue
+            current_region = (
+                images[view]
+                if view == "front_left" and bright_streak_actionable
+                else crops[view]
+            )
+            try:
+                trusted_ok_by_view[view] = self._trusted_ok_matcher.match(
+                    view,
+                    images[view],
+                    current_region,
+                )
+            except Exception as error:
+                match_errors[view] = str(error)
+        diagnostic_metadata = (
+            {"trusted_ok_match_errors": match_errors} if match_errors else {}
+        )
         return EightViewInspection(
             capture_id=capture_id,
             images=images,
             results=rows,
-            final_status=fuse_demo_status(rows),
+            final_status=final_status,
             elapsed_ms=(perf_counter() - started) * 1000.0,
+            trusted_ok_by_view=trusted_ok_by_view,
+            diagnostic_metadata=diagnostic_metadata,
         )
 
     def _crop(self, view: str, image: np.ndarray) -> np.ndarray:
@@ -709,12 +756,20 @@ def build_model_suite(config: EightViewDemoConfig) -> EightViewModelSuite:
         base_thresholds=config.efficientad_base_thresholds,
         threshold_margin=config.efficientad_threshold_margin,
     )
+    trusted_ok_matcher: TrustedOkMatcher | None = None
+    trusted_ok_matcher_error: str | None = None
+    try:
+        trusted_ok_matcher = TrustedOkMatcher(DEFAULT_TRUSTED_OK_REFERENCE_RELEASE)
+    except Exception as error:
+        trusted_ok_matcher_error = str(error)
     return EightViewModelSuite(
         rois=load_part_rois(config.roi_config),
         template_predictor=template.predict,
         bright_streak_predictor=bright_streak.predict,
         yolo_predictor=yolo.predict,
         efficientad_predictor=efficientad.predict,
+        trusted_ok_matcher=trusted_ok_matcher,
+        trusted_ok_matcher_error=trusted_ok_matcher_error,
     )
 
 

@@ -17,6 +17,7 @@ from bmw_inspection.lab.eight_view_demo import (
     DemoBranch,
     DemoBranchResult,
     DemoFinalStatus,
+    EightViewInspection,
     fuse_demo_status,
     load_capture_directory,
     load_demo_config,
@@ -109,6 +110,22 @@ def test_fusion_runs_as_all_pass_ng_or_error() -> None:
     assert fuse_demo_status((_branch_result(BranchStatus.PASS),)) is DemoFinalStatus.OK
     assert fuse_demo_status((_branch_result(BranchStatus.NG),)) is DemoFinalStatus.NG
     assert fuse_demo_status((_branch_result(BranchStatus.ERROR),)) is DemoFinalStatus.ERROR
+
+
+def test_inspection_trusted_ok_diagnostics_default_to_empty_immutable_mappings() -> None:
+    images = {view: np.zeros((8, 8, 3), dtype=np.uint8) for view in VIEW_ORDER}
+    inspection = EightViewInspection(
+        capture_id="sample",
+        images=images,
+        results=(_branch_result(BranchStatus.PASS),),
+        final_status=DemoFinalStatus.OK,
+        elapsed_ms=1.0,
+    )
+
+    assert dict(inspection.trusted_ok_by_view) == {}
+    assert dict(inspection.diagnostic_metadata) == {}
+    with pytest.raises(TypeError):
+        inspection.trusted_ok_by_view["front"] = object()  # type: ignore[index]
 
 
 def test_capture_directory_requires_exactly_eight_named_images(tmp_path: Path) -> None:
