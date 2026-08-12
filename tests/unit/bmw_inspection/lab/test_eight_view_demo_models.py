@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import hashlib
 import json
 from collections import Counter
@@ -642,7 +643,6 @@ def _tracked_report(tmp_path: Path) -> Path:
     profiles.mkdir(parents=True)
     metrics = artifact_root / "metrics.csv"
     replay = artifact_root / "replay_summary.json"
-    profile = profiles / "profile_0001.npz"
     manifest = tmp_path / "bright_streak.csv"
     live_record = tmp_path / "bmw_demo_20260812_211302"
     (live_record / "images").mkdir(parents=True)
@@ -655,9 +655,68 @@ def _tracked_report(tmp_path: Path) -> Path:
     for name, live_file in live_files.items():
         live_file.write_bytes(f"confirmed-live-normal:{name}".encode())
     manifest.write_text("sample_id,label\nsynthetic,normal\n", encoding="utf-8")
-    metrics.write_text("record_id,status\nsynthetic,OK\n", encoding="utf-8")
-    replay.write_text('{"count":0,"outcomes":[]}', encoding="utf-8")
-    np.savez_compressed(profile, path_x=np.zeros(613, dtype=np.int64))
+    metric_rows = []
+    final_outcomes = []
+    for index in range(61):
+        if index < 4:
+            split, truth, provenance, predicted = "calibration", "no_streak", "manifest", "NG_NO_STREAK"
+        elif index < 21:
+            split, truth, provenance, predicted = "calibration", "normal", "manifest", "OK"
+        elif index == 21:
+            split, truth, provenance, predicted = "calibration", "normal", "user_confirmed_live_normal", "OK"
+        elif index < 26:
+            split, truth, provenance, predicted = "final_test", "no_streak", "manifest", "NG_NO_STREAK"
+        elif index < 41:
+            split, truth, provenance, predicted = "final_test", "normal", "manifest", "OK"
+        elif index == 41:
+            split, truth, provenance, predicted = "final_test", "normal", "manifest", "NG_NO_STREAK"
+        else:
+            split, truth, provenance, predicted = "live_replay", "unknown", "unconfirmed_live_replay", "OK"
+        sample_id = "bmw_demo_20260812_211302" if index == 21 else f"synthetic_{index:04d}"
+        profile = profiles / f"profile_{index + 1:04d}.npz"
+        np.savez_compressed(profile, path_x=np.zeros(613, dtype=np.int64))
+        metric_rows.append(
+            {
+                "record_id": f"record-{index:04d}",
+                "sample_id": sample_id,
+                "split": split,
+                "truth": truth,
+                "provenance_kind": provenance,
+                "profile_npz": str(profile),
+                "tracked_profile_v3_predicted_status": predicted,
+            }
+        )
+        if split == "final_test":
+            expected = "NG_NO_STREAK" if truth == "no_streak" else "OK"
+            final_outcomes.append(
+                {
+                    "correct": predicted == expected,
+                    "expected_status": expected,
+                    "predicted_status": predicted,
+                    "sample_id": sample_id,
+                }
+            )
+    with metrics.open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=tuple(metric_rows[0]))
+        writer.writeheader()
+        writer.writerows(metric_rows)
+    replay_payload = {
+        "accuracy_denominator": 1,
+        "count": 20,
+        "known_truth_count": 1,
+        "limit": 20,
+        "outcomes": [
+            {
+                "capture_id": "bmw_demo_20260812_211302" if index == 0 else f"replay_{index:04d}",
+                "included_in_accuracy": index == 0,
+                "truth": "normal" if index == 0 else "unknown",
+                "v3_predicted_status": "OK",
+            }
+            for index in range(20)
+        ],
+        "unknown_truth_count": 19,
+    }
+    replay.write_text(json.dumps(replay_payload), encoding="utf-8")
     root = Path(__file__).resolve().parents[4]
     algorithm_source = root / "src/bmw_inspection/lab/bright_streak_tracked_profile.py"
     evaluator_source = root / "pipeline/bmw_lab_evaluate_bright_streak_tracked_profile.py"
@@ -694,6 +753,7 @@ def _tracked_report(tmp_path: Path) -> Path:
                     "replay_summary_sha256": hashlib.sha256(replay.read_bytes()).hexdigest(),
                     "profile_npz_sha256": {
                         profile.name: hashlib.sha256(profile.read_bytes()).hexdigest()
+                        for profile in sorted(profiles.glob("*.npz"))
                     },
                 },
                 "identities": {
@@ -743,8 +803,9 @@ def _tracked_report(tmp_path: Path) -> Path:
                     "no_streak_count": 4,
                     "no_streak_false_accepts": 0,
                     "normal_false_rejects": 1,
+                    "outcomes": final_outcomes,
                 },
-                "replay": {},
+                "replay": replay_payload,
                 "cpu_per_image_ms": {},
                 "metrics_csv": str(metrics),
                 "profiles_dir": str(profiles),
@@ -890,6 +951,21 @@ def test_tracked_profile_predictor_rejects_incomplete_acceptance_evidence(tmp_pa
     report.write_text(json.dumps(payload), encoding="utf-8")
 
     with pytest.raises(ValueError, match="验收证据"):
+        EightViewTrackedProfileBrightStreakPredictor(report)
+
+
+def test_tracked_profile_predictor_rejects_metrics_inventory_semantic_mismatch(tmp_path: Path) -> None:
+    report = _tracked_report(tmp_path)
+    metrics = report.parent / "metrics.csv"
+    rows = metrics.read_text(encoding="utf-8").splitlines()
+    metrics.write_text("\n".join(rows[:-1]) + "\n", encoding="utf-8")
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    payload["artifact_identities"]["metrics_csv_sha256"] = hashlib.sha256(
+        metrics.read_bytes()
+    ).hexdigest()
+    report.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="metrics与profile inventory"):
         EightViewTrackedProfileBrightStreakPredictor(report)
 
 

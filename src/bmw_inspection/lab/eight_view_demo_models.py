@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import hashlib
 import json
 import math
@@ -489,6 +490,7 @@ class EightViewTrackedProfileBrightStreakPredictor:
         self._validate_confirmed_live_normal(payload["accepted_live_normals"])
         self._validate_acceptance_evidence(payload)
         self._validate_artifact_inventory(path.parent, payload["artifact_identities"])
+        self._validate_semantic_inventory(path.parent, payload)
         self._roi = (x1, y1, x2, y2)
         self._geometry = geometry
         self._thresholds = thresholds
@@ -608,6 +610,87 @@ class EightViewTrackedProfileBrightStreakPredictor:
         actual_profiles = {path.name for path in (root / "profiles").glob("*.npz")}
         if actual_profiles != set(profiles):
             raise ValueError("追踪光痕v3 artifact inventory不完整")
+
+    @classmethod
+    def _validate_semantic_inventory(cls, root: Path, payload: Mapping[str, object]) -> None:
+        metrics_path = root / "metrics.csv"
+        try:
+            with metrics_path.open("r", encoding="utf-8", newline="") as stream:
+                reader = csv.DictReader(stream)
+                required = {
+                    "sample_id",
+                    "split",
+                    "truth",
+                    "provenance_kind",
+                    "profile_npz",
+                    "tracked_profile_v3_predicted_status",
+                }
+                if reader.fieldnames is None or not required.issubset(reader.fieldnames):
+                    raise ValueError("追踪光痕v3 metrics schema不正确")
+                rows = list(reader)
+        except OSError as error:
+            raise ValueError(f"追踪光痕v3 metrics不可用：{error}") from error
+        inventory = payload["artifact_identities"]["profile_npz_sha256"]
+        profile_names = [Path(row["profile_npz"]).name for row in rows]
+        if (
+            len(rows) != 61
+            or len(profile_names) != len(set(profile_names))
+            or set(profile_names) != set(inventory)
+        ):
+            raise ValueError("追踪光痕v3 metrics与profile inventory不一致")
+        expected_counts = {
+            "split": {"calibration": 22, "final_test": 20, "live_replay": 19},
+            "truth": {"normal": 34, "no_streak": 8, "unknown": 19},
+            "provenance_kind": {
+                "manifest": 41,
+                "user_confirmed_live_normal": 1,
+                "unconfirmed_live_replay": 19,
+            },
+        }
+        for field, expected in expected_counts.items():
+            actual = {value: sum(row[field] == value for row in rows) for value in expected}
+            if actual != expected or sum(actual.values()) != len(rows):
+                raise ValueError("追踪光痕v3 metrics验收计数不一致")
+        no_streak = [row for row in rows if row["truth"] == "no_streak"]
+        accepted = [row for row in rows if row["provenance_kind"] == "user_confirmed_live_normal"]
+        if (
+            any(row["tracked_profile_v3_predicted_status"] != "NG_NO_STREAK" for row in no_streak)
+            or len(accepted) != 1
+            or accepted[0]["sample_id"] != cls._CONFIRMED_LIVE_CAPTURE_ID
+            or accepted[0]["tracked_profile_v3_predicted_status"] != "OK"
+        ):
+            raise ValueError("追踪光痕v3逐样本验收结果不一致")
+        final_rows = {row["sample_id"]: row for row in rows if row["split"] == "final_test"}
+        outcomes = payload["final_test"].get("outcomes")
+        if not isinstance(outcomes, list) or len(outcomes) != 20 or len(final_rows) != 20:
+            raise ValueError("追踪光痕v3 final-test逐样本证据不完整")
+        for outcome in outcomes:
+            if not isinstance(outcome, dict) or outcome.get("sample_id") not in final_rows:
+                raise ValueError("追踪光痕v3 final-test逐样本证据不一致")
+            row = final_rows[outcome["sample_id"]]
+            expected_status = "NG_NO_STREAK" if row["truth"] == "no_streak" else "OK"
+            predicted = row["tracked_profile_v3_predicted_status"]
+            if (
+                outcome.get("expected_status") != expected_status
+                or outcome.get("predicted_status") != predicted
+                or outcome.get("correct") is not (predicted == expected_status)
+            ):
+                raise ValueError("追踪光痕v3 final-test逐样本证据不一致")
+        replay_path = root / "replay_summary.json"
+        try:
+            replay = json.loads(replay_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise ValueError(f"追踪光痕v3 replay证据不可用：{error}") from error
+        if replay != payload["replay"] or not isinstance(replay, dict):
+            raise ValueError("追踪光痕v3 replay证据不一致")
+        if (
+            replay.get("count") != 20
+            or replay.get("known_truth_count") != 1
+            or replay.get("unknown_truth_count") != 19
+            or not isinstance(replay.get("outcomes"), list)
+            or len(replay["outcomes"]) != 20
+        ):
+            raise ValueError("追踪光痕v3 replay证据不完整")
 
     def predict(self, image: np.ndarray) -> ModelOutput:
         from bmw_inspection.lab.bright_streak_tracked_profile import (
