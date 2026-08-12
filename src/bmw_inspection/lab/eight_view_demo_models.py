@@ -29,7 +29,6 @@ from bmw_inspection.lab.eight_view_demo import (
 )
 from bmw_inspection.lab.eight_view_roi import load_roi_config
 from bmw_inspection.lab.trusted_ok_reference import (
-    DEFAULT_TRUSTED_OK_REFERENCE_RELEASE,
     TrustedOkMatch,
     TrustedOkMatcher,
 )
@@ -669,16 +668,17 @@ class EightViewModelSuite:
                 if self._trusted_ok_matcher_error is not None:
                     match_errors[view] = self._trusted_ok_matcher_error
                 continue
-            current_region = (
-                images[view]
+            comparison_mode = (
+                "full"
                 if view == "front_left" and bright_streak_actionable
-                else crops[view]
+                else "roi"
             )
             try:
                 trusted_ok_by_view[view] = self._trusted_ok_matcher.match(
                     view,
                     images[view],
-                    current_region,
+                    crops[view],
+                    comparison_mode=comparison_mode,
                 )
             except Exception as error:
                 match_errors[view] = str(error)
@@ -756,20 +756,12 @@ def build_model_suite(config: EightViewDemoConfig) -> EightViewModelSuite:
         base_thresholds=config.efficientad_base_thresholds,
         threshold_margin=config.efficientad_threshold_margin,
     )
-    trusted_ok_matcher: TrustedOkMatcher | None = None
-    trusted_ok_matcher_error: str | None = None
-    try:
-        trusted_ok_matcher = TrustedOkMatcher(DEFAULT_TRUSTED_OK_REFERENCE_RELEASE)
-    except Exception as error:
-        trusted_ok_matcher_error = str(error)
     return EightViewModelSuite(
         rois=load_part_rois(config.roi_config),
         template_predictor=template.predict,
         bright_streak_predictor=bright_streak.predict,
         yolo_predictor=yolo.predict,
         efficientad_predictor=efficientad.predict,
-        trusted_ok_matcher=trusted_ok_matcher,
-        trusted_ok_matcher_error=trusted_ok_matcher_error,
     )
 
 

@@ -361,77 +361,207 @@ def test_publish_cli_defaults_to_the_frozen_v2_review_and_reference_paths() -> N
     assert defaults.output.name == "bmw_right_20260810_21_train_normal_approved_v2"
 
 
-def test_matcher_selects_deterministic_aligned_correlation_winner(tmp_path: Path) -> None:
-    release = tmp_path / "synthetic_approved_v2"
+def _strict_matcher_fixture(tmp_path: Path) -> tuple[Path, str, list[np.ndarray]]:
+    release = tmp_path / "bmw_right_20260810_21_train_normal_approved_v2"
     references: list[dict[str, object]] = []
     patterns: list[np.ndarray] = []
     for index in range(3):
-        image = np.zeros((512, 512, 3), dtype=np.uint8)
+        image = np.zeros((128, 128, 3), dtype=np.uint8)
         cv2.rectangle(
             image,
-            (70 + index * 45, 90 + index * 25),
-            (210 + index * 35, 310 + index * 20),
+            (14 + index * 7, 18 + index * 5),
+            (48 + index * 6, 78 + index * 4),
             (40 + index * 50, 180 - index * 30, 240 - index * 40),
             -1,
         )
-        cv2.circle(image, (350 - index * 30, 170 + index * 70), 35 + index * 7, (255, 255, 255), -1)
+        cv2.circle(image, (92 - index * 5, 42 + index * 12), 8 + index, (255, 255, 255), -1)
         patterns.append(image)
-        full_relative = Path("references/front/full") / f"part-{index}.png"
-        roi_relative = Path("references/front/roi") / f"part-{index}.png"
-        for relative in (full_relative, roi_relative):
-            path = release / relative
-            path.parent.mkdir(parents=True, exist_ok=True)
-            assert cv2.imwrite(str(path), image)
-        digest = hashlib.sha256((release / full_relative).read_bytes()).hexdigest()
-        references.append(
+        relative = Path("assets") / f"pattern-{index}.png"
+        path = release / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        assert cv2.imwrite(str(path), image)
+    approved_part_ids = [f"part-{index:02d}" for index in range(50)]
+    roi_config_sha256 = "a" * 64
+    whitelist = {
+        "schema_version": 1,
+        "status": "published",
+        "review_dir": str(tmp_path / "bmw_right_20260810_21_train_normal_v2"),
+        "candidate_manifest_sha256": "b" * 64,
+        "review_decisions_sha256": "c" * 64,
+        "roi_config_path": str(tmp_path / "roi.json"),
+        "roi_config_sha256": roi_config_sha256,
+        "preprocessing_identity": "pil_rgb_crop_png_v1",
+        "approved_part_ids": approved_part_ids,
+        "approved_decisions": [
             {
-                "physical_part_id": f"part-{index}",
-                "sample_id": f"sample-{index}",
-                "view_id": "front",
-                "source_sha256": digest,
-                "full_image_path": str(full_relative),
-                "full_image_sha256": digest,
-                "roi_image_path": str(roi_relative),
-                "roi_image_sha256": digest,
+                "decision": "APPROVED",
+                "physical_part_id": part_id,
+                "review_note": "synthetic fixture",
+                "reviewer": "test-reviewer",
+                "sample_id": f"sample-{index:02d}",
             }
-        )
+            for index, part_id in enumerate(approved_part_ids)
+        ],
+    }
+    whitelist_path = release / "trusted_ok_whitelist.json"
+    whitelist_path.write_text(json.dumps(whitelist, sort_keys=True), encoding="utf-8")
+    whitelist_sha256 = hashlib.sha256(whitelist_path.read_bytes()).hexdigest()
+    for part_index, part_id in enumerate(approved_part_ids):
+        pattern_index = part_index if part_index < 3 else 0
+        relative = Path("assets") / f"pattern-{pattern_index}.png"
+        digest = hashlib.sha256((release / relative).read_bytes()).hexdigest()
+        for view in VIEW_ORDER:
+            references.append(
+                {
+                    "business_label": "OK",
+                    "camera_serial": f"camera-{view}",
+                    "full_image_path": str(relative),
+                    "full_image_sha256": digest,
+                    "group_id": f"group-{part_index:02d}",
+                    "physical_part_id": part_id,
+                    "preprocessing_identity": "pil_rgb_crop_png_v1",
+                    "roi_config_sha256": roi_config_sha256,
+                    "roi_image_path": str(relative),
+                    "roi_image_sha256": digest,
+                    "roi_xyxy": [0, 0, 128, 128],
+                    "sample_id": f"sample-{part_index:02d}",
+                    "session_id": "20260810_210030_527506",
+                    "source_class": "normal",
+                    "source_path": f"/frozen/source/{part_id}/{view}.png",
+                    "source_sha256": digest,
+                    "split": "train",
+                    "view_id": view,
+                    "whitelist_sha256": whitelist_sha256,
+                }
+            )
     index_path = release / "reference_index.json"
     index_path.write_text(
         json.dumps(
             {
                 "schema_version": 1,
                 "status": "published",
-                "approved_part_count": 3,
-                "reference_count_by_view": {view: (3 if view == "front" else 0) for view in VIEW_ORDER},
+                "whitelist_sha256": whitelist_sha256,
+                "roi_config_path": str(tmp_path / "roi.json"),
+                "roi_config_sha256": roi_config_sha256,
+                "preprocessing_identity": "pil_rgb_crop_png_v1",
+                "approved_part_count": 50,
+                "reference_count_by_view": {view: 50 for view in VIEW_ORDER},
                 "references": references,
             },
             sort_keys=True,
         ),
         encoding="utf-8",
     )
+    return release, hashlib.sha256(index_path.read_bytes()).hexdigest(), patterns
+
+
+def test_matcher_selects_deterministic_aligned_correlation_winner(tmp_path: Path) -> None:
+    release, index_sha256, patterns = _strict_matcher_fixture(tmp_path)
     current = cv2.warpAffine(
         patterns[1],
-        np.float32([[1, 0, 5], [0, 1, -4]]),
-        (512, 512),
+        np.float32([[1, 0, 2], [0, 1, -1]]),
+        (128, 128),
         borderMode=cv2.BORDER_REFLECT_101,
     )
+    matcher = TrustedOkMatcher(
+        release,
+        expected_index_sha256=index_sha256,
+        max_shift=12,
+    )
+    matcher.preload()
 
-    match = TrustedOkMatcher(release, max_shift=12).match("front", current, current)
+    match = matcher.match("front", current, current, comparison_mode="roi")
 
-    assert match.physical_part_id == "part-1"
-    assert match.sample_id == "sample-1"
+    assert match.physical_part_id == "part-01"
+    assert match.sample_id == "sample-01"
     assert match.similarity > 0.99
     assert abs(match.shift_x) <= 12
     assert abs(match.shift_y) <= 12
     assert match.difference_overlay.shape == (512, 512, 3)
     assert match.difference_overlay.flags.writeable is False
-    assert match.index_sha256 == hashlib.sha256(index_path.read_bytes()).hexdigest()
-    assert TrustedOkMatcher(release, max_shift=12).match("front", current, current).physical_part_id == "part-1"
+    assert match.index_sha256 == index_sha256
+    assert matcher.match("front", current, current, comparison_mode="roi").physical_part_id == "part-01"
 
 
-def test_matcher_refuses_obsolete_v1_release_before_reading_an_index(tmp_path: Path) -> None:
-    obsolete = tmp_path / "bmw_right_20260810_21_train_normal_approved_v1"
-    obsolete.mkdir()
+def test_matcher_requires_exact_approved_v2_identity_and_index_sha256(tmp_path: Path) -> None:
+    release, index_sha256, _patterns = _strict_matcher_fixture(tmp_path)
+    renamed = tmp_path / "synthetic_approved_v2"
+    release.rename(renamed)
 
-    with pytest.raises(ValueError, match="refuses.*approved_v1"):
-        TrustedOkMatcher(obsolete)
+    with pytest.raises(ValueError, match="release identity"):
+        TrustedOkMatcher(renamed, expected_index_sha256=index_sha256)
+
+
+def test_matcher_rejects_index_sha256_mismatch(tmp_path: Path) -> None:
+    release, _index_sha256, _patterns = _strict_matcher_fixture(tmp_path)
+
+    with pytest.raises(ValueError, match="index SHA-256"):
+        TrustedOkMatcher(release, expected_index_sha256="0" * 64)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("count", "reference_count_by_view"),
+        ("session", "session_id"),
+        ("source_hash", "source_sha256"),
+        ("row_whitelist", "whitelist_sha256"),
+        ("part_incomplete", "400 references"),
+    ],
+)
+def test_matcher_rejects_noncanonical_v2_index(
+    tmp_path: Path,
+    mutation: str,
+    message: str,
+) -> None:
+    release, _index_sha256, _patterns = _strict_matcher_fixture(tmp_path)
+    index_path = release / "reference_index.json"
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    if mutation == "count":
+        index["reference_count_by_view"]["front"] = 49
+    elif mutation == "session":
+        index["references"][0]["session_id"] = "wrong-session"
+    elif mutation == "source_hash":
+        index["references"][0]["source_sha256"] = "d" * 64
+    elif mutation == "row_whitelist":
+        index["references"][0]["whitelist_sha256"] = "e" * 64
+    else:
+        index["references"].pop()
+    index_path.write_text(json.dumps(index, sort_keys=True), encoding="utf-8")
+    changed_sha256 = hashlib.sha256(index_path.read_bytes()).hexdigest()
+
+    with pytest.raises(ValueError, match=message):
+        TrustedOkMatcher(release, expected_index_sha256=changed_sha256)
+
+
+def test_matcher_preload_is_complete_and_idempotent_without_second_file_load(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    release, index_sha256, _patterns = _strict_matcher_fixture(tmp_path)
+    matcher = TrustedOkMatcher(release, expected_index_sha256=index_sha256)
+    original = TrustedOkMatcher._load_verified
+    loads: list[Path] = []
+
+    def counting_load(path: Path, expected_sha256: str) -> np.ndarray:
+        loads.append(path)
+        return original(path, expected_sha256)
+
+    monkeypatch.setattr(TrustedOkMatcher, "_load_verified", staticmethod(counting_load))
+
+    matcher.preload()
+    first_load_count = len(loads)
+    matcher.preload()
+
+    expected_keys = {(view, "roi") for view in VIEW_ORDER} | {("front_left", "full")}
+    assert set(matcher._prepared) == expected_keys
+    assert first_load_count == 9 * 50
+    assert len(loads) == first_load_count
+
+
+def test_matcher_requires_preload_before_matching(tmp_path: Path) -> None:
+    release, index_sha256, patterns = _strict_matcher_fixture(tmp_path)
+    matcher = TrustedOkMatcher(release, expected_index_sha256=index_sha256)
+
+    with pytest.raises(RuntimeError, match="preload"):
+        matcher.match("front", patterns[0], patterns[0], comparison_mode="roi")

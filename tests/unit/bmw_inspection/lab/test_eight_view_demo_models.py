@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import Counter
 from pathlib import Path
+from types import SimpleNamespace
 
 import cv2
 import numpy as np
@@ -21,6 +22,7 @@ from bmw_inspection.lab.eight_view_demo_models import (
     EightViewYoloPredictor,
     EightViewRawProfileBrightStreakPredictor,
     ModelOutput,
+    build_model_suite,
     load_part_rois,
 )
 from bmw_inspection.lab.trusted_ok_reference import TrustedOkMatch
@@ -121,11 +123,18 @@ def test_model_suite_matches_only_unique_actionable_views_after_decisions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(demo_models, "perf_counter", lambda: 1.0)
-    calls: list[tuple[str, tuple[int, int], tuple[int, int]]] = []
+    calls: list[tuple[str, tuple[int, int], tuple[int, int], str]] = []
 
     class Matcher:
-        def match(self, view: str, current_full: np.ndarray, current_roi: np.ndarray) -> TrustedOkMatch:
-            calls.append((view, current_full.shape[:2], current_roi.shape[:2]))
+        def match(
+            self,
+            view: str,
+            current_full: np.ndarray,
+            current_roi: np.ndarray,
+            *,
+            comparison_mode: str,
+        ) -> TrustedOkMatch:
+            calls.append((view, current_full.shape[:2], current_roi.shape[:2], comparison_mode))
             return _trusted_match(view, current_full, current_roi)
 
     def output(branch: str, view: str, _image: np.ndarray) -> ModelOutput:
@@ -148,8 +157,8 @@ def test_model_suite_matches_only_unique_actionable_views_after_decisions(
     inspection = EightViewModelSuite(**kwargs, trusted_ok_matcher=Matcher()).inspect(images, capture_id="matched")
 
     assert [row[0] for row in calls] == ["front", "front_left"]
-    assert calls[0][1:] == ((20, 20), (10, 10))
-    assert calls[1][1:] == ((20, 20), (20, 20))
+    assert calls[0][1:] == ((20, 20), (10, 10), "roi")
+    assert calls[1][1:] == ((20, 20), (10, 10), "full")
     assert tuple(inspection.trusted_ok_by_view) == ("front", "front_left")
     assert inspection.results == baseline.results
     assert inspection.final_status is baseline.final_status is DemoFinalStatus.NG
@@ -185,7 +194,7 @@ def test_matcher_failure_is_diagnostic_only_and_keeps_model_decisions(
     monkeypatch.setattr(demo_models, "perf_counter", lambda: 1.0)
 
     class BrokenMatcher:
-        def match(self, *_args: object) -> TrustedOkMatch:
+        def match(self, *_args: object, **_kwargs: object) -> TrustedOkMatch:
             raise RuntimeError("reference bank unavailable")
 
     def template(view: str, _image: np.ndarray) -> ModelOutput:
@@ -216,6 +225,50 @@ def test_matcher_failure_is_diagnostic_only_and_keeps_model_decisions(
     }
     assert inspection.results == baseline.results
     assert inspection.final_status is baseline.final_status is DemoFinalStatus.NG
+
+
+def test_build_model_suite_keeps_trusted_ok_disabled_without_explicit_injection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    predictor = SimpleNamespace(
+        predict=lambda *_args: ModelOutput(BranchStatus.PASS, 0.1, 0.2, "pass", None)
+    )
+    monkeypatch.setattr(demo_models, "EightViewTemplatePredictor", lambda *_args, **_kwargs: predictor)
+    monkeypatch.setattr(demo_models, "EightViewBrightStreakPredictor", lambda *_args, **_kwargs: predictor)
+    monkeypatch.setattr(demo_models, "EightViewYoloPredictor", lambda *_args, **_kwargs: predictor)
+    monkeypatch.setattr(demo_models, "EightViewEfficientAdPredictor", lambda *_args, **_kwargs: predictor)
+    monkeypatch.setattr(
+        demo_models,
+        "load_part_rois",
+        lambda _path: {view: (0, 0, 10, 10) for view in VIEW_ORDER},
+    )
+    config = SimpleNamespace(
+        template_models={},
+        bright_streak_engine="calibrated_rule_v1",
+        bright_streak_config=Path("bright.json"),
+        yolo_checkpoint=Path("best.pt"),
+        yolo_candidate_conf=0.1,
+        yolo_final_threshold=0.2,
+        yolo_imgsz=640,
+        efficientad_checkpoints={},
+        efficientad_thresholds={},
+        efficientad_base_thresholds={},
+        efficientad_threshold_margin=0.0,
+        roi_config=Path("roi.json"),
+    )
+
+    suite = build_model_suite(config)
+    inspection = suite.inspect(
+        {view: np.zeros((10, 10, 3), dtype=np.uint8) for view in VIEW_ORDER},
+        capture_id="legacy-config",
+    )
+
+    assert suite._trusted_ok_matcher is None
+    assert suite._trusted_ok_matcher_error is None
+    assert len(inspection.results) == 25
+    assert inspection.final_status is DemoFinalStatus.OK
+    assert dict(inspection.trusted_ok_by_view) == {}
+    assert dict(inspection.diagnostic_metadata) == {}
 
 
 def test_generic_template_predictor_loads_secondary_view_model() -> None:

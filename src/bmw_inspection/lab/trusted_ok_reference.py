@@ -14,6 +14,7 @@ from collections import defaultdict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 import cv2
 import numpy as np
@@ -38,10 +39,55 @@ DATASET_FIELDS = (
 )
 DECISION_FIELDS = ("physical_part_id", "sample_id", "decision", "reviewer", "review_note")
 TRUSTED_OK_SESSION_ID = "20260810_210030_527506"
-DEFAULT_TRUSTED_OK_REFERENCE_RELEASE = (
-    Path(__file__).resolve().parents[3]
-    / "dataset/bmw_trusted_ok_reference/bmw_right_20260810_21_train_normal_approved_v2"
-)
+TRUSTED_OK_REFERENCE_RELEASE_ID = "bmw_right_20260810_21_train_normal_approved_v2"
+TRUSTED_OK_REVIEW_ID = "bmw_right_20260810_21_train_normal_v2"
+TRUSTED_OK_PREPROCESSING_IDENTITY = "pil_rgb_crop_png_v1"
+TRUSTED_OK_PART_COUNT = 50
+TRUSTED_OK_REFERENCE_COUNT = 400
+_INDEX_FIELDS = {
+    "approved_part_count",
+    "preprocessing_identity",
+    "reference_count_by_view",
+    "references",
+    "roi_config_path",
+    "roi_config_sha256",
+    "schema_version",
+    "status",
+    "whitelist_sha256",
+}
+_REFERENCE_FIELDS = {
+    "business_label",
+    "camera_serial",
+    "full_image_path",
+    "full_image_sha256",
+    "group_id",
+    "physical_part_id",
+    "preprocessing_identity",
+    "roi_config_sha256",
+    "roi_image_path",
+    "roi_image_sha256",
+    "roi_xyxy",
+    "sample_id",
+    "session_id",
+    "source_class",
+    "source_path",
+    "source_sha256",
+    "split",
+    "view_id",
+    "whitelist_sha256",
+}
+_WHITELIST_FIELDS = {
+    "approved_decisions",
+    "approved_part_ids",
+    "candidate_manifest_sha256",
+    "preprocessing_identity",
+    "review_decisions_sha256",
+    "review_dir",
+    "roi_config_path",
+    "roi_config_sha256",
+    "schema_version",
+    "status",
+}
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _SAFE_PART_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 _VIEW_LABELS = {
@@ -260,36 +306,131 @@ def _difference_overlay(current: np.ndarray, aligned_reference: np.ndarray) -> n
 class TrustedOkMatcher:
     """Match one actionable BMW view against an immutable approved-v2 bank."""
 
-    def __init__(self, release_dir: Path, *, max_shift: int = 12) -> None:
+    def __init__(
+        self,
+        release_dir: Path,
+        *,
+        expected_index_sha256: str,
+        max_shift: int = 12,
+    ) -> None:
         raw_root = Path(release_dir).expanduser().absolute()
-        if raw_root.name.endswith("_approved_v1"):
-            raise ValueError("trusted-OK matcher refuses the obsolete approved_v1 release")
+        if raw_root.name != TRUSTED_OK_REFERENCE_RELEASE_ID:
+            raise ValueError(
+                f"trusted-OK release identity must be {TRUSTED_OK_REFERENCE_RELEASE_ID}"
+            )
         if not raw_root.is_dir() or raw_root.is_symlink():
             raise ValueError(f"trusted-OK release is not a regular directory: {raw_root}")
+        if not isinstance(expected_index_sha256, str) or not _SHA256.fullmatch(
+            expected_index_sha256
+        ):
+            raise ValueError("expected index SHA-256 must be lowercase hexadecimal")
         if isinstance(max_shift, bool) or not isinstance(max_shift, int) or not 0 <= max_shift <= 64:
             raise ValueError("max_shift must be an integer from 0 through 64")
         index_path = raw_root / "reference_index.json"
         if not index_path.is_file() or index_path.is_symlink():
             raise ValueError(f"trusted-OK index is not a regular file: {index_path}")
+        actual_index_sha256 = _sha256(index_path)
+        if actual_index_sha256 != expected_index_sha256:
+            raise ValueError("trusted-OK index SHA-256 differs from expected_index_sha256")
         try:
             payload = json.loads(index_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as error:
             raise ValueError(f"trusted-OK index is invalid JSON: {index_path}") from error
-        if not isinstance(payload, dict) or payload.get("schema_version") != 1 or payload.get("status") != "published":
+        if not isinstance(payload, dict) or set(payload) != _INDEX_FIELDS:
+            raise ValueError("trusted-OK index fields differ from the frozen v2 schema")
+        if payload.get("schema_version") != 1 or payload.get("status") != "published":
             raise ValueError("trusted-OK index has unsupported schema or status")
+        if payload.get("approved_part_count") != TRUSTED_OK_PART_COUNT:
+            raise ValueError("trusted-OK index must contain exactly 50 approved parts")
+        counts = payload.get("reference_count_by_view")
+        if not isinstance(counts, dict) or set(counts) != set(VIEW_ORDER) or any(
+            counts[view] != TRUSTED_OK_PART_COUNT for view in VIEW_ORDER
+        ):
+            raise ValueError("trusted-OK reference_count_by_view must be exactly 50 for every view")
         raw_references = payload.get("references")
-        if not isinstance(raw_references, list) or not raw_references:
-            raise ValueError("trusted-OK index references must be a non-empty list")
+        if not isinstance(raw_references, list) or len(raw_references) != TRUSTED_OK_REFERENCE_COUNT:
+            raise ValueError("trusted-OK index must contain exactly 400 references")
+
+        whitelist_path = raw_root / "trusted_ok_whitelist.json"
+        if not whitelist_path.is_file() or whitelist_path.is_symlink():
+            raise ValueError(f"trusted-OK whitelist is not a regular file: {whitelist_path}")
+        try:
+            whitelist = json.loads(whitelist_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise ValueError(f"trusted-OK whitelist is invalid JSON: {whitelist_path}") from error
+        if not isinstance(whitelist, dict) or set(whitelist) != _WHITELIST_FIELDS:
+            raise ValueError("trusted-OK whitelist fields differ from the frozen v2 schema")
+        if whitelist.get("schema_version") != 1 or whitelist.get("status") != "published":
+            raise ValueError("trusted-OK whitelist has unsupported schema or status")
+        whitelist_sha256 = self._digest(payload, "whitelist_sha256", "trusted-OK index")
+        if _sha256(whitelist_path) != whitelist_sha256:
+            raise ValueError("trusted-OK whitelist SHA-256 differs from the index")
+        candidate_manifest_sha256 = self._digest(
+            whitelist,
+            "candidate_manifest_sha256",
+            "trusted-OK whitelist",
+        )
+        self._digest(whitelist, "review_decisions_sha256", "trusted-OK whitelist")
+        roi_config_sha256 = self._digest(payload, "roi_config_sha256", "trusted-OK index")
+        if self._digest(whitelist, "roi_config_sha256", "trusted-OK whitelist") != roi_config_sha256:
+            raise ValueError("trusted-OK whitelist and index roi_config_sha256 differ")
+        if payload.get("roi_config_path") != whitelist.get("roi_config_path"):
+            raise ValueError("trusted-OK whitelist and index roi_config_path differ")
+        if (
+            payload.get("preprocessing_identity") != TRUSTED_OK_PREPROCESSING_IDENTITY
+            or whitelist.get("preprocessing_identity") != TRUSTED_OK_PREPROCESSING_IDENTITY
+        ):
+            raise ValueError("trusted-OK preprocessing_identity differs from the frozen v2 contract")
+        review_dir = whitelist.get("review_dir")
+        if not isinstance(review_dir, str) or Path(review_dir).name != TRUSTED_OK_REVIEW_ID:
+            raise ValueError("trusted-OK whitelist review_dir differs from the frozen v2 identity")
+        approved_part_ids, approved_samples = self._validate_whitelist(whitelist)
+
         by_view: dict[str, list[_TrustedReference]] = {view: [] for view in VIEW_ORDER}
         seen: set[tuple[str, str]] = set()
         for number, raw in enumerate(raw_references, start=1):
-            if not isinstance(raw, dict):
-                raise ValueError(f"trusted-OK reference {number} must be an object")
+            if not isinstance(raw, dict) or set(raw) != _REFERENCE_FIELDS:
+                raise ValueError(
+                    f"trusted-OK reference {number} fields differ from the frozen v2 schema"
+                )
             context = f"trusted-OK reference {number}"
             view = self._text(raw, "view_id", context)
             if view not in VIEW_ORDER:
                 raise ValueError(f"{context} has unknown view_id")
             part_id = self._text(raw, "physical_part_id", context)
+            if part_id not in approved_part_ids:
+                raise ValueError(f"{context} physical_part_id is not approved by the whitelist")
+            sample_id = self._text(raw, "sample_id", context)
+            if approved_samples[part_id] != sample_id:
+                raise ValueError(f"{context} sample_id differs from the whitelist")
+            if self._text(raw, "session_id", context) != TRUSTED_OK_SESSION_ID:
+                raise ValueError(f"{context} session_id differs from the frozen trusted session")
+            if self._text(raw, "split", context) != "train":
+                raise ValueError(f"{context} split must be train")
+            if self._text(raw, "source_class", context) != "normal":
+                raise ValueError(f"{context} source_class must be normal")
+            if self._text(raw, "business_label", context) != "OK":
+                raise ValueError(f"{context} business_label must be OK")
+            if self._text(raw, "preprocessing_identity", context) != TRUSTED_OK_PREPROCESSING_IDENTITY:
+                raise ValueError(f"{context} preprocessing_identity differs from the frozen contract")
+            if self._digest(raw, "roi_config_sha256", context) != roi_config_sha256:
+                raise ValueError(f"{context} roi_config_sha256 differs from the index")
+            if self._digest(raw, "whitelist_sha256", context) != whitelist_sha256:
+                raise ValueError(f"{context} whitelist_sha256 differs from the index")
+            source_sha256 = self._digest(raw, "source_sha256", context)
+            full_sha256 = self._digest(raw, "full_image_sha256", context)
+            if source_sha256 != full_sha256:
+                raise ValueError(f"{context} source_sha256 must equal full_image_sha256")
+            roi_xyxy = raw.get("roi_xyxy")
+            if (
+                not isinstance(roi_xyxy, list)
+                or len(roi_xyxy) != 4
+                or any(isinstance(value, bool) or not isinstance(value, int) for value in roi_xyxy)
+                or not (0 <= roi_xyxy[0] < roi_xyxy[2] and 0 <= roi_xyxy[1] < roi_xyxy[3])
+            ):
+                raise ValueError(f"{context} roi_xyxy is invalid")
+            for field in ("camera_serial", "group_id", "source_path"):
+                self._text(raw, field, context)
             identity = (view, part_id)
             if identity in seen:
                 raise ValueError(f"{context} duplicates view/physical_part_id")
@@ -297,26 +438,64 @@ class TrustedOkMatcher:
             by_view[view].append(
                 _TrustedReference(
                     physical_part_id=part_id,
-                    sample_id=self._text(raw, "sample_id", context),
+                    sample_id=sample_id,
                     view_id=view,
-                    source_sha256=self._digest(raw, "source_sha256", context),
+                    source_sha256=source_sha256,
                     full_path=self._asset_path(raw_root, raw, "full_image_path", context),
-                    full_sha256=self._digest(raw, "full_image_sha256", context),
+                    full_sha256=full_sha256,
                     roi_path=self._asset_path(raw_root, raw, "roi_image_path", context),
                     roi_sha256=self._digest(raw, "roi_image_sha256", context),
                 )
             )
-        if all(not rows for rows in by_view.values()):
-            raise ValueError("trusted-OK index contains no supported references")
-        counts = payload.get("reference_count_by_view")
-        if isinstance(counts, dict) and any(counts.get(view) != len(by_view[view]) for view in VIEW_ORDER):
+        if any(len(by_view[view]) != TRUSTED_OK_PART_COUNT for view in VIEW_ORDER):
             raise ValueError("trusted-OK reference_count_by_view differs from references")
-        self._root = raw_root
-        self._index_sha256 = _sha256(index_path)
+        views_by_part: dict[str, set[str]] = defaultdict(set)
+        for view, rows in by_view.items():
+            for row in rows:
+                views_by_part[row.physical_part_id].add(view)
+        if set(views_by_part) != approved_part_ids or any(
+            views != set(VIEW_ORDER) for views in views_by_part.values()
+        ):
+            raise ValueError("trusted-OK approved parts must each contain all eight views")
+        self._index_sha256 = actual_index_sha256
+        self._candidate_manifest_sha256 = candidate_manifest_sha256
         self._max_shift = max_shift
         self._by_view = {view: tuple(rows) for view, rows in by_view.items()}
-        self._prepared: dict[tuple[str, bool], tuple[_PreparedReference, ...]] = {}
+        self._prepared: dict[tuple[str, Literal["roi", "full"]], tuple[_PreparedReference, ...]] = {}
         self._lock = threading.RLock()
+
+    @classmethod
+    def _validate_whitelist(
+        cls,
+        whitelist: Mapping[str, object],
+    ) -> tuple[set[str], dict[str, str]]:
+        raw_part_ids = whitelist.get("approved_part_ids")
+        if (
+            not isinstance(raw_part_ids, list)
+            or len(raw_part_ids) != TRUSTED_OK_PART_COUNT
+            or any(not isinstance(part_id, str) or not part_id.strip() for part_id in raw_part_ids)
+            or raw_part_ids != sorted(set(raw_part_ids))
+        ):
+            raise ValueError("trusted-OK whitelist must contain 50 unique sorted approved_part_ids")
+        raw_decisions = whitelist.get("approved_decisions")
+        if not isinstance(raw_decisions, list) or len(raw_decisions) != TRUSTED_OK_PART_COUNT:
+            raise ValueError("trusted-OK whitelist must contain 50 approved_decisions")
+        approved_samples: dict[str, str] = {}
+        for number, raw in enumerate(raw_decisions, start=1):
+            context = f"trusted-OK approved decision {number}"
+            if not isinstance(raw, dict) or set(raw) != set(DECISION_FIELDS):
+                raise ValueError(f"{context} fields differ from the frozen v2 schema")
+            if cls._text(raw, "decision", context) != "APPROVED":
+                raise ValueError(f"{context} decision must be APPROVED")
+            part_id = cls._text(raw, "physical_part_id", context)
+            if part_id in approved_samples:
+                raise ValueError(f"{context} duplicates physical_part_id")
+            approved_samples[part_id] = cls._text(raw, "sample_id", context)
+            cls._text(raw, "reviewer", context)
+            cls._text(raw, "review_note", context)
+        if set(approved_samples) != set(raw_part_ids):
+            raise ValueError("trusted-OK approved decisions differ from approved_part_ids")
+        return set(raw_part_ids), approved_samples
 
     @staticmethod
     def _text(raw: Mapping[str, object], field: str, context: str) -> str:
@@ -353,8 +532,12 @@ class TrustedOkMatcher:
             raise ValueError(f"trusted-OK reference image is unavailable: {path}")
         return image
 
-    def _prepared_references(self, view_id: str, use_full: bool) -> tuple[_PreparedReference, ...]:
-        key = (view_id, use_full)
+    def _prepared_references(
+        self,
+        view_id: str,
+        comparison_mode: Literal["roi", "full"],
+    ) -> tuple[_PreparedReference, ...]:
+        key = (view_id, comparison_mode)
         cached = self._prepared.get(key)
         if cached is not None:
             return cached
@@ -366,8 +549,8 @@ class TrustedOkMatcher:
                 row=row,
                 prepared=_prepare_match_image(
                     self._load_verified(
-                        row.full_path if use_full else row.roi_path,
-                        row.full_sha256 if use_full else row.roi_sha256,
+                        row.full_path if comparison_mode == "full" else row.roi_path,
+                        row.full_sha256 if comparison_mode == "full" else row.roi_sha256,
                     )
                 ),
             )
@@ -376,15 +559,28 @@ class TrustedOkMatcher:
         self._prepared[key] = prepared
         return prepared
 
+    def preload(self) -> None:
+        """Warm all ROI banks and the sole full-image bright-streak bank once."""
+        with self._lock:
+            for view in VIEW_ORDER:
+                self._prepared_references(view, "roi")
+            self._prepared_references("front_left", "full")
+
     def match(
         self,
         view_id: str,
         current_full_image: np.ndarray,
         current_roi: np.ndarray,
+        *,
+        comparison_mode: Literal["roi", "full"],
     ) -> TrustedOkMatch:
         """Return the deterministic highest normalized-correlation approved reference."""
         if view_id not in VIEW_ORDER:
             raise ValueError(f"unknown BMW view: {view_id}")
+        if comparison_mode not in {"roi", "full"}:
+            raise ValueError("comparison_mode must be roi or full")
+        if comparison_mode == "full" and view_id != "front_left":
+            raise ValueError("full comparison_mode is reserved for front_left bright streak")
         for name, image in (
             ("current_full_image", current_full_image),
             ("current_roi", current_roi),
@@ -397,11 +593,13 @@ class TrustedOkMatcher:
             ):
                 raise ValueError(f"{name} must be a non-empty uint8 image")
         current_full = current_full_image
-        current_region = current_roi
+        current_region = current_full if comparison_mode == "full" else current_roi
         prepared_current = _prepare_match_image(current_region)
-        use_full = view_id == "front_left" and current_region.shape[:2] == current_full.shape[:2]
         with self._lock:
-            candidates = self._prepared_references(view_id, use_full)
+            key = (view_id, comparison_mode)
+            if key not in self._prepared:
+                raise RuntimeError("TrustedOkMatcher.preload() must complete before match()")
+            candidates = self._prepared[key]
             best: tuple[float, int, int, _PreparedReference, np.ndarray] | None = None
             for candidate in candidates:
                 padded = cv2.copyMakeBorder(
