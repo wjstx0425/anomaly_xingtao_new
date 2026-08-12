@@ -46,6 +46,7 @@ from bmw_inspection.lab.eight_view_demo_ui import (  # noqa: E402
     preferred_selection,
     render_eight_view_dashboard,
     render_eight_view_screen,
+    select_branch,
     step_actionable_selection,
     toggle_trusted_ok_mode,
 )
@@ -196,7 +197,7 @@ def _handle_gui_key(state: EightViewUiState, key: int) -> tuple[EightViewUiState
             ord("y"): DemoBranch.YOLO,
             ord("e"): DemoBranch.EFFICIENTAD,
         }[ord(chr(key).lower())]
-        return replace(state, selected_branch=branch), _GuiAction.CONTINUE
+        return select_branch(state, branch), _GuiAction.CONTINUE
     if state.inspection is not None and key in {ord("n"), ord("N"), ord("p"), ord("P")}:
         selected_view, selected_branch = step_actionable_selection(
             state.inspection,

@@ -8,8 +8,15 @@ import cv2
 import numpy as np
 
 from bmw_inspection.lab.eight_view_dataset import VIEW_ORDER
+from bmw_inspection.lab.eight_view_demo import (
+    BranchStatus,
+    DemoBranch,
+    DemoBranchResult,
+    DemoFinalStatus,
+    EightViewInspection,
+)
 from pipeline import bmw_lab_eight_view_demo as entrypoint
-from bmw_inspection.lab.eight_view_demo_ui import DemoUiPage, EightViewUiState
+from bmw_inspection.lab.eight_view_demo_ui import DemoUiPage, EightViewUiState, select_branch
 
 
 def test_persist_result_adapts_offline_images_and_preserves_live_sources(monkeypatch) -> None:
@@ -105,3 +112,36 @@ def test_page_key_handling_returns_detail_to_dashboard_and_preserves_dashboard_e
     assert reset.page is DemoUiPage.DASHBOARD
     assert reset.experiment_mode is True
     assert reset_action is entrypoint._GuiAction.RESET
+
+
+def test_keyboard_branch_selection_matches_card_selection_and_jumps_to_actionable_view() -> None:
+    images = {view: np.zeros((4, 5, 3), dtype=np.uint8) for view in VIEW_ORDER}
+    yolo_result = DemoBranchResult(
+        DemoBranch.YOLO,
+        "front_right",
+        BranchStatus.NG,
+        0.9,
+        0.5,
+        1.0,
+        "发现缺陷",
+        np.zeros((4, 5, 3), dtype=np.uint8),
+    )
+    inspection = EightViewInspection(
+        "capture",
+        images,
+        (yolo_result,),
+        DemoFinalStatus.NG,
+        1.0,
+    )
+    state = EightViewUiState(
+        inspection=inspection,
+        selected_view="back",
+        selected_branch=DemoBranch.TEMPLATE,
+        experiment_mode=True,
+    )
+
+    keyboard_state, action = entrypoint._handle_gui_key(state, ord("y"))
+
+    assert keyboard_state == select_branch(state, DemoBranch.YOLO)
+    assert keyboard_state.selected_view == "front_right"
+    assert action is entrypoint._GuiAction.CONTINUE
