@@ -159,7 +159,29 @@ def _inspection_payload(
         id(result): None if result.overlay is None else f"evidence/{result.branch.value}_{result.view_id}.png"
         for result in inspection.results
     }
-    return {
+    trusted_references = {
+        view: {
+            "reference_is_diagnostic_only": True,
+            "physical_part_id": match.physical_part_id,
+            "sample_id": match.sample_id,
+            "similarity": match.similarity,
+            "shift": {"x": match.shift_x, "y": match.shift_y},
+            "index_sha256": match.index_sha256,
+            "whitelist_sha256": match.whitelist_sha256,
+            "source_sha256": match.source_sha256,
+            "reference_full_sha256": match.reference_full_sha256,
+            "reference_roi_sha256": match.reference_roi_sha256,
+            "files": {
+                "full": f"references/{view}/full.png",
+                "roi": f"references/{view}/roi.png",
+                "aligned_roi": f"references/{view}/aligned_roi.png",
+                "difference": f"references/{view}/difference.png",
+            },
+            "saved_sha256": {},
+        }
+        for view, match in inspection.trusted_ok_by_view.items()
+    }
+    payload: dict[str, Any] = {
         "schema_version": 1,
         "demo_id": config.demo_id,
         "capture_id": inspection.capture_id,
@@ -198,6 +220,12 @@ def _inspection_payload(
             for result in inspection.results
         ],
     }
+    if trusted_references:
+        payload["reference_is_diagnostic_only"] = True
+        payload["trusted_ok_references"] = trusted_references
+    if inspection.diagnostic_metadata:
+        payload["diagnostic_metadata"] = _jsonable(inspection.diagnostic_metadata)
+    return payload
 
 
 def append_inspection_index(result_root: Path, inspection: EightViewInspection, demo_id: str) -> Path:
@@ -249,6 +277,18 @@ def persist_inspection(
             if result.overlay is not None:
                 _write_image(staging / "evidence" / f"{result.branch.value}_{result.view_id}.png", result.overlay)
         payload = _inspection_payload(config, inspection, source_kind, validated_sources, statistics)
+        for view, match in inspection.trusted_ok_by_view.items():
+            reference_images = {
+                "full": match.reference_full_image,
+                "roi": match.reference_roi,
+                "aligned_roi": match.aligned_reference_roi,
+                "difference": match.difference_overlay,
+            }
+            for name, image in reference_images.items():
+                relative = Path(payload["trusted_ok_references"][view]["files"][name])
+                target = staging / relative
+                _write_image(target, image)
+                payload["trusted_ok_references"][view]["saved_sha256"][name] = _sha256(target)
         (staging / "inspection.json").write_text(
             json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
             encoding="utf-8",

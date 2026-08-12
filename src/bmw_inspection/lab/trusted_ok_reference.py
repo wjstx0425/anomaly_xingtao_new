@@ -184,6 +184,7 @@ class TrustedOkMatch:
     reference_full_sha256: str
     reference_roi_sha256: str
     index_sha256: str
+    whitelist_sha256: str
 
     def __post_init__(self) -> None:
         if self.view_id not in VIEW_ORDER:
@@ -220,6 +221,7 @@ class TrustedOkMatch:
             "reference_full_sha256",
             "reference_roi_sha256",
             "index_sha256",
+            "whitelist_sha256",
         ):
             if not _SHA256.fullmatch(getattr(self, name)):
                 raise ValueError(f"{name} must be a lowercase SHA-256")
@@ -458,6 +460,7 @@ class TrustedOkMatcher:
         ):
             raise ValueError("trusted-OK approved parts must each contain all eight views")
         self._index_sha256 = actual_index_sha256
+        self._whitelist_sha256 = whitelist_sha256
         self._candidate_manifest_sha256 = candidate_manifest_sha256
         self._max_shift = max_shift
         self._by_view = {view: tuple(rows) for view, rows in by_view.items()}
@@ -641,6 +644,7 @@ class TrustedOkMatcher:
             reference_full_sha256=row.full_sha256,
             reference_roi_sha256=row.roi_sha256,
             index_sha256=self._index_sha256,
+            whitelist_sha256=self._whitelist_sha256,
         )
 
 

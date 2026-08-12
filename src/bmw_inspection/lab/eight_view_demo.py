@@ -149,6 +149,9 @@ class EightViewDemoConfig:
     yolo_candidate_conf: float
     yolo_final_threshold: float
     yolo_imgsz: int
+    trusted_ok_reference_index: Path | None = None
+    trusted_ok_reference_index_sha256: str | None = None
+    trusted_ok_reference_error: str | None = None
     views: tuple[str, ...] = VIEW_ORDER
 
     def __post_init__(self) -> None:
@@ -382,7 +385,8 @@ def load_demo_config(path: Path) -> EightViewDemoConfig:
         "efficientad",
         "yolo",
     }
-    if set(payload) != required or payload["schema_version"] != 1:
+    allowed = required | {"trusted_ok_reference"}
+    if not required.issubset(payload) or not set(payload).issubset(allowed) or payload["schema_version"] != 1:
         raise ValueError("BMW八视图Demo配置字段或schema_version不正确")
     yolo = payload["yolo"]
     if not isinstance(yolo, dict) or set(yolo) != {"candidate_conf", "final_threshold", "imgsz"}:
@@ -415,6 +419,14 @@ def load_demo_config(path: Path) -> EightViewDemoConfig:
         "threshold_artifact_sha256",
     }:
         raise ValueError("efficientad配置字段不正确")
+    trusted_ok_config = payload.get("trusted_ok_reference")
+    if "trusted_ok_reference" in payload and (
+        not isinstance(trusted_ok_config, dict)
+        or set(trusted_ok_config) != {"index", "index_sha256"}
+        or not isinstance(trusted_ok_config.get("index_sha256"), str)
+        or re.fullmatch(r"[0-9a-f]{64}", trusted_ok_config["index_sha256"]) is None
+    ):
+        raise ValueError("trusted_ok_reference配置字段不正确")
     base = resolved.parent
 
     def resolve(raw: object) -> Path:
@@ -437,6 +449,18 @@ def load_demo_config(path: Path) -> EightViewDemoConfig:
         raise ValueError("EfficientAD threshold artifact SHA256格式不正确")
     if not threshold_artifact.is_file() or _sha256(threshold_artifact) != expected_threshold_sha256:
         raise ValueError("EfficientAD threshold artifact SHA256不匹配")
+    trusted_ok_index: Path | None = None
+    trusted_ok_index_sha256: str | None = None
+    trusted_ok_reference_error: str | None = None
+    if trusted_ok_config is not None:
+        trusted_ok_index = resolve(trusted_ok_config["index"])
+        if trusted_ok_index.name != "reference_index.json":
+            raise ValueError("trusted_ok_reference.index必须指向reference_index.json")
+        trusted_ok_index_sha256 = trusted_ok_config["index_sha256"]
+        if not trusted_ok_index.is_file() or trusted_ok_index.is_symlink():
+            trusted_ok_reference_error = "可信OK参考索引不是普通文件"
+        elif _sha256(trusted_ok_index) != trusted_ok_index_sha256:
+            trusted_ok_reference_error = "可信OK参考索引SHA256不匹配"
     (
         efficientad_thresholds,
         efficientad_base_thresholds,
@@ -486,6 +510,9 @@ def load_demo_config(path: Path) -> EightViewDemoConfig:
         yolo_candidate_conf=candidate,
         yolo_final_threshold=final,
         yolo_imgsz=imgsz,
+        trusted_ok_reference_index=trusted_ok_index,
+        trusted_ok_reference_index_sha256=trusted_ok_index_sha256,
+        trusted_ok_reference_error=trusted_ok_reference_error,
     )
 
 

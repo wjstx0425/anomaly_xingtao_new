@@ -52,6 +52,7 @@ def _trusted_match(
         reference_full_sha256="b" * 64,
         reference_roi_sha256="c" * 64,
         index_sha256="d" * 64,
+        whitelist_sha256="e" * 64,
     )
 
 
@@ -255,6 +256,8 @@ def test_build_model_suite_keeps_trusted_ok_disabled_without_explicit_injection(
         efficientad_base_thresholds={},
         efficientad_threshold_margin=0.0,
         roi_config=Path("roi.json"),
+        trusted_ok_reference_index=None,
+        trusted_ok_reference_index_sha256=None,
     )
 
     suite = build_model_suite(config)
@@ -269,6 +272,132 @@ def test_build_model_suite_keeps_trusted_ok_disabled_without_explicit_injection(
     assert inspection.final_status is DemoFinalStatus.OK
     assert dict(inspection.trusted_ok_by_view) == {}
     assert dict(inspection.diagnostic_metadata) == {}
+
+
+def test_build_model_suite_preloads_configured_matcher_before_injection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class Matcher:
+        def __init__(self, release_dir: Path, *, expected_index_sha256: str) -> None:
+            events.append(f"init:{release_dir.name}:{expected_index_sha256}")
+
+        def preload(self) -> None:
+            events.append("preload")
+
+    predictor = SimpleNamespace(
+        predict=lambda *_args: ModelOutput(BranchStatus.PASS, 0.1, 0.2, "pass", None)
+    )
+    monkeypatch.setattr(demo_models, "EightViewTemplatePredictor", lambda *_args, **_kwargs: predictor)
+    monkeypatch.setattr(demo_models, "EightViewBrightStreakPredictor", lambda *_args, **_kwargs: predictor)
+    monkeypatch.setattr(demo_models, "EightViewYoloPredictor", lambda *_args, **_kwargs: predictor)
+    monkeypatch.setattr(demo_models, "EightViewEfficientAdPredictor", lambda *_args, **_kwargs: predictor)
+    monkeypatch.setattr(demo_models, "TrustedOkMatcher", Matcher)
+    monkeypatch.setattr(
+        demo_models,
+        "load_part_rois",
+        lambda _path: {view: (0, 0, 10, 10) for view in VIEW_ORDER},
+    )
+    index = Path("/trusted/bmw_right_20260810_21_train_normal_approved_v2/reference_index.json")
+    config = SimpleNamespace(
+        template_models={}, bright_streak_engine="calibrated_rule_v1", bright_streak_config=Path("bright.json"),
+        yolo_checkpoint=Path("best.pt"), yolo_candidate_conf=0.1, yolo_final_threshold=0.2,
+        yolo_imgsz=640, efficientad_checkpoints={}, efficientad_thresholds={},
+        efficientad_base_thresholds={}, efficientad_threshold_margin=0.0, roi_config=Path("roi.json"),
+        trusted_ok_reference_index=index, trusted_ok_reference_index_sha256="a" * 64,
+        trusted_ok_reference_error=None,
+    )
+
+    suite = build_model_suite(config, status_callback=events.append)
+
+    assert events == [
+        "正在校验并预热可信OK参考库，首次启动约需27秒……",
+        f"init:{index.parent.name}:{'a' * 64}",
+        "preload",
+        "可信OK参考库预热完成。",
+    ]
+    assert isinstance(suite._trusted_ok_matcher, Matcher)
+    assert suite._trusted_ok_matcher_error is None
+
+
+def test_build_model_suite_disables_only_reference_diagnostics_when_preload_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class BrokenMatcher:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def preload(self) -> None:
+            raise ValueError("参考图损坏")
+
+    predictor = SimpleNamespace(
+        predict=lambda *_args: ModelOutput(BranchStatus.PASS, 0.1, 0.2, "pass", None)
+    )
+    for name in (
+        "EightViewTemplatePredictor", "EightViewBrightStreakPredictor",
+        "EightViewYoloPredictor", "EightViewEfficientAdPredictor",
+    ):
+        monkeypatch.setattr(demo_models, name, lambda *_args, **_kwargs: predictor)
+    monkeypatch.setattr(demo_models, "TrustedOkMatcher", BrokenMatcher)
+    monkeypatch.setattr(
+        demo_models, "load_part_rois", lambda _path: {view: (0, 0, 10, 10) for view in VIEW_ORDER}
+    )
+    config = SimpleNamespace(
+        template_models={}, bright_streak_engine="calibrated_rule_v1", bright_streak_config=Path("bright.json"),
+        yolo_checkpoint=Path("best.pt"), yolo_candidate_conf=0.1, yolo_final_threshold=0.2,
+        yolo_imgsz=640, efficientad_checkpoints={}, efficientad_thresholds={},
+        efficientad_base_thresholds={}, efficientad_threshold_margin=0.0, roi_config=Path("roi.json"),
+        trusted_ok_reference_index=Path(
+            "/trusted/bmw_right_20260810_21_train_normal_approved_v2/reference_index.json"
+        ),
+        trusted_ok_reference_index_sha256="a" * 64,
+        trusted_ok_reference_error=None,
+    )
+    messages: list[str] = []
+
+    suite = build_model_suite(config, status_callback=messages.append)
+
+    assert suite._trusted_ok_matcher is None
+    assert suite._trusted_ok_matcher_error == "可信OK参考不可用：参考图损坏"
+    assert messages[-1] == "可信OK参考库不可用，已仅禁用参考诊断：参考图损坏"
+
+
+def test_build_model_suite_uses_prevalidated_reference_error_without_constructing_matcher(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    predictor = SimpleNamespace(
+        predict=lambda *_args: ModelOutput(BranchStatus.PASS, 0.1, 0.2, "pass", None)
+    )
+    for name in (
+        "EightViewTemplatePredictor", "EightViewBrightStreakPredictor",
+        "EightViewYoloPredictor", "EightViewEfficientAdPredictor",
+    ):
+        monkeypatch.setattr(demo_models, name, lambda *_args, **_kwargs: predictor)
+    monkeypatch.setattr(
+        demo_models,
+        "TrustedOkMatcher",
+        lambda *_args, **_kwargs: pytest.fail("prevalidated bad reference must not construct matcher"),
+    )
+    monkeypatch.setattr(
+        demo_models, "load_part_rois", lambda _path: {view: (0, 0, 10, 10) for view in VIEW_ORDER}
+    )
+    config = SimpleNamespace(
+        template_models={}, bright_streak_engine="calibrated_rule_v1", bright_streak_config=Path("bright.json"),
+        yolo_checkpoint=Path("best.pt"), yolo_candidate_conf=0.1, yolo_final_threshold=0.2,
+        yolo_imgsz=640, efficientad_checkpoints={}, efficientad_thresholds={},
+        efficientad_base_thresholds={}, efficientad_threshold_margin=0.0, roi_config=Path("roi.json"),
+        trusted_ok_reference_index=Path(
+            "/trusted/bmw_right_20260810_21_train_normal_approved_v2/reference_index.json"
+        ),
+        trusted_ok_reference_index_sha256="a" * 64,
+        trusted_ok_reference_error="可信OK参考索引SHA256不匹配",
+    )
+
+    suite = build_model_suite(config)
+
+    assert suite._trusted_ok_matcher is None
+    assert suite._trusted_ok_matcher_error == "可信OK参考不可用：可信OK参考索引SHA256不匹配"
 
 
 def test_generic_template_predictor_loads_secondary_view_model() -> None:

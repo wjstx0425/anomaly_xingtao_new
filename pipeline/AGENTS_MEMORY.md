@@ -34,6 +34,8 @@
 - The corrected 21:00 bright-streak candidate uses `--roi-xyxy 1792 1180 1873 1793` by default and writes `bmw_right_batch_20260810_21_bright_v2_roi_corrected`. Its held-out result is 19/20 versus 10/20 for the unchanged current detector; broken-but-present evidence is still absent.
 - `bmw_lab_prepare_template_21only_demo.py` creates a no-overwrite composite run for live single-variable testing: candidate `template`, baseline `efficientad`, and baseline `yolo`. Launch it with `bmw_eight_view_demo_template_21only_v1.json`; do not edit the default Demo config.
 - `bmw_lab_prepare_efficientad_bright_v2_demo.py` creates the second no-overwrite live-test composition: baseline Template/YOLO plus 21:00 EfficientAD. Launch it with `bmw_eight_view_demo_efficientad_bright_v2_v1.json`; this config also selects the SHA-bound corrected-ROI raw-profile bright-streak v2 report.
+- The v3 NG-evidence Demo now optionally loads the strictly approved-v2 trusted-OK bank from `trusted_ok_reference.index` plus `index_sha256`. `pipeline/bmw_lab_eight_view_demo.py` prints the Chinese preload status, keeps running the four detector branches if reference preload fails, and uses `O` only to toggle diagnostic comparison after a reference-enabled actionable inspection. `N` remains next and `P` remains previous.
+- Trusted-reference output is no-overwrite under each ordinary capture record at `references/<view>/`; `inspection.json` records the exact selected part/sample, similarity, shift, original source/reference/index/whitelist hashes, saved artifact hashes, and `reference_is_diagnostic_only=true`. It never changes any of the 25 detector rows or final fusion.
 
 ## Cropped six-view PatchCore retraining
 

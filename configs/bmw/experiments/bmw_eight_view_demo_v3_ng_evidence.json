@@ -15,6 +15,10 @@
     "threshold_artifact": "../../../results/bmw_lab_one_click/bmw_right_batch_20260810_21_v3_ng_evidence_demo_v1/efficientad_thresholds_deployment_v3.json",
     "threshold_artifact_sha256": "1c7e9f9e0f1750aabba62846f816d0cd273f23047e2ce6a6100e3c43fde2417e"
   },
+  "trusted_ok_reference": {
+    "index": "../../../dataset/bmw_trusted_ok_reference/bmw_right_20260810_21_train_normal_approved_v2/reference_index.json",
+    "index_sha256": "ae7833ab35cbc76cbfef6cfa5163f77ef345d879a6e8e4834fa8cbfcf6023acc"
+  },
   "yolo": {
     "candidate_conf": 0.1,
     "final_threshold": 0.25,

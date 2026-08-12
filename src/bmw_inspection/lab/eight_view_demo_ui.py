@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from functools import lru_cache
 from pathlib import Path
@@ -43,6 +43,7 @@ class EightViewUiState:
     selected_branch: DemoBranch = DemoBranch.BRIGHT_STREAK
     experiment_mode: bool = False
     source_images: Mapping[str, Any] | None = None
+    trusted_ok_mode: bool = False
 
 
 _WHITE = (255, 255, 255)
@@ -152,6 +153,37 @@ def step_actionable_selection(
     return row.view_id, row.branch
 
 
+def _trusted_ok_available(state: EightViewUiState) -> bool:
+    """Report whether this inspection came from an enabled reference diagnostic."""
+    if state.inspection is None:
+        return False
+    return bool(state.inspection.trusted_ok_by_view) or bool(
+        state.inspection.diagnostic_metadata.get("trusted_ok_match_errors")
+    )
+
+
+def toggle_trusted_ok_mode(state: EightViewUiState) -> EightViewUiState:
+    """Toggle diagnostic reference comparison only when it is available."""
+    if not _trusted_ok_available(state):
+        return state
+    return replace(state, trusted_ok_mode=not state.trusted_ok_mode)
+
+
+def _trusted_reference_details(state: EightViewUiState) -> tuple[tuple[str, str], ...]:
+    """Return compact, always-visible reference identity rows for the right column."""
+    if not state.trusted_ok_mode or state.inspection is None:
+        return ()
+    match = state.inspection.trusted_ok_by_view.get(state.selected_view)
+    if match is None:
+        return (("可信参考", "无可信OK参考"),)
+    return (
+        ("参考零件", match.physical_part_id),
+        ("参考样本", match.sample_id),
+        ("相似度", f"{match.similarity:.6f}"),
+        ("对齐平移", f"({match.shift_x:+d}, {match.shift_y:+d})"),
+    )
+
+
 def _source_image(state: EightViewUiState, kind: str) -> np.ndarray | None:
     sources = state.source_images
     if sources is None:
@@ -207,6 +239,15 @@ def evidence_comparison_images(
     evidence = None if selected_row is None else selected_row.overlay
     if evidence is not None and state.selected_branch is DemoBranch.BRIGHT_STREAK:
         evidence = cv2.rotate(evidence, cv2.ROTATE_90_CLOCKWISE)
+    if state.trusted_ok_mode and inspection is not None:
+        match = inspection.trusted_ok_by_view.get(state.selected_view)
+        current = inspection.images[state.selected_view] if match is None else match.current_roi
+        return (
+            ("现场NG", current),
+            ("可信OK", None if match is None else match.aligned_reference_roi),
+            ("对齐差异", None if match is None else match.difference_overlay),
+            (evidence_type, evidence),
+        )
     if _source_kind(state) == "fused_only":
         return (
             ("无短曝光原图", None),
@@ -338,10 +379,17 @@ def render_eight_view_dashboard(state: EightViewUiState) -> np.ndarray:
     for label, panel_image, x in panel_rectangles:
         draw.text((x, 580), label, font=_demo_font(17, "bold"), fill=_INK)
         if panel_image is None:
-            draw.text((x + 115, 725), "暂无图像", font=_demo_font(16), fill=_MUTED, anchor="mm")
+            unavailable = (
+                "无可信OK参考"
+                if state.trusted_ok_mode and label in {"可信OK", "对齐差异"}
+                else "暂无图像"
+            )
+            draw.text((x + 115, 725), unavailable, font=_demo_font(16), fill=_MUTED, anchor="mm")
     controls = "空格：拍摄/继续　R：重置　Q：退出"
     if state.experiment_mode:
-        controls += "\n1–8：视角　T/L/Y/E：证据\nN/P：下一条/上一条 NG/异常"
+        controls += "\n1–8：视角　T/L/Y/E：证据\nN：下一条　P：上一条"
+        if _trusted_ok_available(state):
+            controls += "　O：可信OK对比"
     for index, line in enumerate(controls.splitlines()):
         draw.text((1084, 520 + index * 26), line, font=_demo_font(15), fill=_MUTED)
     if state.inspection is not None:
@@ -367,15 +415,21 @@ def render_eight_view_dashboard(state: EightViewUiState) -> np.ndarray:
         deployment_threshold = selected_row.details.get("deployment_threshold", selected_row.threshold)
         margin = selected_row.details.get("threshold_margin")
         exceedance = selected_row.details.get("threshold_exceedance")
-        detail_rows.extend(
-            [
-                ("分数", "不可用" if selected_row.score is None else f"{selected_row.score:.6g}"),
+        numeric_rows = [
+            ("分数", "不可用" if selected_row.score is None else f"{selected_row.score:.6g}"),
+            ("部署阈值", "不可用" if deployment_threshold is None else f"{float(deployment_threshold):.6g}"),
+            ("超限量", "不可用" if exceedance is None else f"{float(exceedance):+.6g}"),
+        ]
+        if not state.trusted_ok_mode:
+            numeric_rows[1:1] = [
                 ("基础阈值", "不可用" if base_threshold is None else f"{float(base_threshold):.6g}"),
-                ("部署阈值", "不可用" if deployment_threshold is None else f"{float(deployment_threshold):.6g}"),
-                ("阈值余量", "不可用" if margin is None else f"{float(margin):.6g}"),
-                ("超限量", "不可用" if exceedance is None else f"{float(exceedance):+.6g}"),
             ]
-        )
+            numeric_rows.insert(
+                3,
+                ("阈值余量", "不可用" if margin is None else f"{float(margin):.6g}"),
+            )
+        detail_rows.extend(numeric_rows)
+    detail_rows.extend(_trusted_reference_details(state))
     for index, (label, value) in enumerate(detail_rows):
         y = detail_y + index * 20
         draw.text((1084, y), label, font=_demo_font(13), fill=_MUTED)
@@ -395,4 +449,5 @@ __all__ = [
     "preferred_selection",
     "render_eight_view_dashboard",
     "step_actionable_selection",
+    "toggle_trusted_ok_mode",
 ]

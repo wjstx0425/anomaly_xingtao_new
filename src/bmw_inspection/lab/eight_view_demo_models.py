@@ -737,7 +737,11 @@ class EightViewModelSuite:
             )
 
 
-def build_model_suite(config: EightViewDemoConfig) -> EightViewModelSuite:
+def build_model_suite(
+    config: EightViewDemoConfig,
+    *,
+    status_callback: Callable[[str], None] | None = None,
+) -> EightViewModelSuite:
     """Build the four resident model branches from one resolved Demo profile."""
     template = EightViewTemplatePredictor(config.template_models)
     if config.bright_streak_engine == "raw_profile_v2":
@@ -756,12 +760,38 @@ def build_model_suite(config: EightViewDemoConfig) -> EightViewModelSuite:
         base_thresholds=config.efficientad_base_thresholds,
         threshold_margin=config.efficientad_threshold_margin,
     )
+    trusted_ok_matcher: TrustedOkMatcher | None = None
+    trusted_ok_matcher_error: str | None = None
+    index_path = getattr(config, "trusted_ok_reference_index", None)
+    index_sha256 = getattr(config, "trusted_ok_reference_index_sha256", None)
+    prevalidated_error = getattr(config, "trusted_ok_reference_error", None)
+    if index_path is not None:
+        announce = status_callback if status_callback is not None else (lambda _message: None)
+        announce("正在校验并预热可信OK参考库，首次启动约需27秒……")
+        try:
+            if prevalidated_error is not None:
+                raise ValueError(prevalidated_error)
+            if index_sha256 is None:
+                raise ValueError("配置缺少可信OK索引SHA256")
+            candidate = TrustedOkMatcher(
+                Path(index_path).parent,
+                expected_index_sha256=index_sha256,
+            )
+            candidate.preload()
+        except Exception as error:
+            trusted_ok_matcher_error = f"可信OK参考不可用：{error}"
+            announce(f"可信OK参考库不可用，已仅禁用参考诊断：{error}")
+        else:
+            trusted_ok_matcher = candidate
+            announce("可信OK参考库预热完成。")
     return EightViewModelSuite(
         rois=load_part_rois(config.roi_config),
         template_predictor=template.predict,
         bright_streak_predictor=bright_streak.predict,
         yolo_predictor=yolo.predict,
         efficientad_predictor=efficientad.predict,
+        trusted_ok_matcher=trusted_ok_matcher,
+        trusted_ok_matcher_error=trusted_ok_matcher_error,
     )
 
 

@@ -8,6 +8,7 @@ import numpy as np
 
 from bmw_inspection.lab.eight_view_dataset import VIEW_ORDER
 from pipeline import bmw_lab_eight_view_demo as entrypoint
+from bmw_inspection.lab.eight_view_demo_ui import EightViewUiState
 
 
 def test_persist_result_adapts_offline_images_and_preserves_live_sources(monkeypatch) -> None:
@@ -32,3 +33,22 @@ def test_persist_result_adapts_offline_images_and_preserves_live_sources(monkeyp
         (config, inspection, ("offline", images)),
         (config, inspection, live_sources),
     ]
+
+
+def test_o_shortcut_handler_toggles_only_when_inspection_exists() -> None:
+    idle = EightViewUiState()
+    assert entrypoint._handle_trusted_ok_shortcut(idle, ord("o")) is idle
+    legacy = SimpleNamespace(results=("unchanged",), trusted_ok_by_view={}, diagnostic_metadata={})
+    legacy_state = EightViewUiState(inspection=legacy)  # type: ignore[arg-type]
+    assert entrypoint._handle_trusted_ok_shortcut(legacy_state, ord("o")) is legacy_state
+    inspection = SimpleNamespace(
+        results=("unchanged",), trusted_ok_by_view={"front": object()}, diagnostic_metadata={}
+    )
+    state = EightViewUiState(inspection=inspection)  # type: ignore[arg-type]
+
+    toggled = entrypoint._handle_trusted_ok_shortcut(state, ord("O"))
+
+    assert toggled.trusted_ok_mode is True
+    assert toggled.inspection is inspection
+    assert toggled.inspection.results == ("unchanged",)
+    assert entrypoint._handle_trusted_ok_shortcut(toggled, ord("x")) is toggled

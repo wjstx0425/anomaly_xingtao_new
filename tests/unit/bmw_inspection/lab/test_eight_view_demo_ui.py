@@ -16,10 +16,14 @@ from bmw_inspection.lab.eight_view_demo_ui import (
     DemoUiPhase,
     EightViewUiState,
     _demo_font_path,
+    _trusted_ok_available,
+    _trusted_reference_details,
     evidence_comparison_images,
     render_eight_view_dashboard,
     step_actionable_selection,
+    toggle_trusted_ok_mode,
 )
+from bmw_inspection.lab.trusted_ok_reference import TrustedOkMatch
 
 
 def _inspection() -> EightViewInspection:
@@ -60,6 +64,29 @@ def _inspection() -> EightViewInspection:
         ),
     )
     return EightViewInspection("capture", images, rows, DemoFinalStatus.ERROR, 6.0)
+
+
+def _match(inspection: EightViewInspection, view: str) -> TrustedOkMatch:
+    current = inspection.images[view]
+    return TrustedOkMatch(
+        view_id=view,
+        physical_part_id="normal-train-001",
+        sample_id="normal-train-001_000001",
+        similarity=0.9234,
+        shift_x=3,
+        shift_y=-2,
+        current_full_image=current,
+        reference_full_image=np.full_like(current, 40),
+        current_roi=np.full((12, 16, 3), 50, dtype=np.uint8),
+        reference_roi=np.full((12, 16, 3), 60, dtype=np.uint8),
+        aligned_reference_roi=np.full((12, 16, 3), 70, dtype=np.uint8),
+        difference_overlay=np.full((12, 16, 3), 80, dtype=np.uint8),
+        source_sha256="a" * 64,
+        reference_full_sha256="b" * 64,
+        reference_roi_sha256="c" * 64,
+        index_sha256="d" * 64,
+        whitelist_sha256="e" * 64,
+    )
 
 
 def test_demo_uses_distinct_medium_and_bold_cjk_fonts() -> None:
@@ -184,3 +211,81 @@ def test_bright_streak_evidence_is_rotated_clockwise_for_display() -> None:
     assert evidence is not None
     assert evidence.shape == (20, 5, 3)
     assert np.all(evidence[0] == 255)
+
+
+def test_o_toggle_requires_inspection_and_preserves_model_results() -> None:
+    idle = EightViewUiState()
+    assert toggle_trusted_ok_mode(idle) is idle
+    legacy_inspection = _inspection()
+    legacy = EightViewUiState(phase=DemoUiPhase.RESULT, inspection=legacy_inspection)
+    assert _trusted_ok_available(legacy) is False
+    assert toggle_trusted_ok_mode(legacy) is legacy
+    match = _match(legacy_inspection, "front_right")
+    inspection = EightViewInspection(
+        legacy_inspection.capture_id,
+        legacy_inspection.images,
+        legacy_inspection.results,
+        legacy_inspection.final_status,
+        legacy_inspection.elapsed_ms,
+        trusted_ok_by_view={"front_right": match},
+    )
+    state = EightViewUiState(phase=DemoUiPhase.RESULT, inspection=inspection)
+    assert _trusted_ok_available(state) is True
+
+    enabled = toggle_trusted_ok_mode(state)
+    disabled = toggle_trusted_ok_mode(enabled)
+
+    assert enabled.trusted_ok_mode is True
+    assert disabled.trusted_ok_mode is False
+    assert enabled.inspection is inspection
+    assert enabled.inspection.results is inspection.results
+
+
+def test_trusted_ok_mode_uses_four_comparison_panels_and_selected_model_evidence() -> None:
+    base = _inspection()
+    match = _match(base, "front_right")
+    inspection = EightViewInspection(
+        base.capture_id, base.images, base.results, base.final_status, base.elapsed_ms,
+        trusted_ok_by_view={"front_right": match},
+    )
+    state = EightViewUiState(
+        phase=DemoUiPhase.RESULT,
+        inspection=inspection,
+        selected_view="front_right",
+        selected_branch=DemoBranch.YOLO,
+        trusted_ok_mode=True,
+    )
+
+    panels = evidence_comparison_images(state)
+
+    assert tuple(label for label, _image in panels) == (
+        "现场NG", "可信OK", "对齐差异", "真实检测框"
+    )
+    assert tuple(int(image.mean()) for _label, image in panels) == (50, 70, 80, 20)
+    assert _trusted_reference_details(state) == (
+        ("参考零件", "normal-train-001"),
+        ("参考样本", "normal-train-001_000001"),
+        ("相似度", "0.923400"),
+        ("对齐平移", "(+3, -2)"),
+    )
+    assert render_eight_view_dashboard(state).shape == (900, 1600, 3)
+
+
+def test_trusted_ok_mode_explicitly_reports_missing_reference() -> None:
+    state = EightViewUiState(
+        phase=DemoUiPhase.RESULT,
+        inspection=_inspection(),
+        selected_view="front_right",
+        selected_branch=DemoBranch.YOLO,
+        trusted_ok_mode=True,
+    )
+
+    panels = evidence_comparison_images(state)
+    dashboard = render_eight_view_dashboard(state)
+
+    assert tuple(label for label, _image in panels) == (
+        "现场NG", "可信OK", "对齐差异", "真实检测框"
+    )
+    assert panels[1][1] is None and panels[2][1] is None
+    assert _trusted_reference_details(state) == (("可信参考", "无可信OK参考"),)
+    assert dashboard.shape == (900, 1600, 3)

@@ -42,6 +42,7 @@ from bmw_inspection.lab.eight_view_demo_ui import (  # noqa: E402
     preferred_selection,
     render_eight_view_dashboard,
     step_actionable_selection,
+    toggle_trusted_ok_mode,
 )
 
 
@@ -95,6 +96,13 @@ def _persist_result(config: object, inspection: object, source_images: Mapping[s
     """Persist live HDR sources, or explicitly adapt an offline fused-only sample."""
     sources = fused_only_sources(inspection.images) if source_images is None else source_images
     persist_inspection(config, inspection, sources)
+
+
+def _handle_trusted_ok_shortcut(state: EightViewUiState, key: int) -> EightViewUiState:
+    """Handle O/o without rerunning or mutating any model result."""
+    if key not in {ord("o"), ord("O")}:
+        return state
+    return toggle_trusted_ok_mode(state)
 
 
 def _summary(inspection: object) -> dict[str, object]:
@@ -184,6 +192,10 @@ def _run_gui(
                     front = None
                     state = EightViewUiState(experiment_mode=args.experiment_mode)
                     continue
+                toggled = _handle_trusted_ok_shortcut(state, key)
+                if toggled is not state:
+                    state = toggled
+                    continue
                 if args.experiment_mode and ord("1") <= key <= ord("8"):
                     state = replace(state, selected_view=VIEW_ORDER[key - ord("1")])
                     continue
@@ -259,7 +271,7 @@ def main() -> int:
     config = load_demo_config(args.config)
     offline = _offline_images(args, config)
     print("正在加载 Template、光痕、YOLO 和八个 EfficientAD 模型……", flush=True)
-    models = build_model_suite(config)
+    models = build_model_suite(config, status_callback=lambda message: print(message, flush=True))
     print("模型加载完成。", flush=True)
     if args.no_gui:
         return _run_no_gui(args, config, models, offline)

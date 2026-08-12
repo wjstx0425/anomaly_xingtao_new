@@ -112,6 +112,13 @@ def test_v3_config_pins_raw_profile_v2_and_generated_threshold_asset() -> None:
     assert candidate["training_run"].endswith("bmw_right_batch_20260810_21_v3_ng_evidence_demo_v1")
     assert candidate["bright_streak"]["engine"] == "raw_profile_v2"
     assert candidate["yolo"] == base["yolo"]
+    assert candidate["trusted_ok_reference"] == {
+        "index": (
+            "../../../dataset/bmw_trusted_ok_reference/"
+            "bmw_right_20260810_21_train_normal_approved_v2/reference_index.json"
+        ),
+        "index_sha256": "ae7833ab35cbc76cbfef6cfa5163f77ef345d879a6e8e4834fa8cbfcf6023acc",
+    }
     artifact = (CONFIG.parent / candidate["efficientad"]["threshold_artifact"]).resolve()
     assert artifact.name == "efficientad_thresholds_deployment_v3.json"
     assert candidate["efficientad"]["threshold_artifact_sha256"] == hashlib.sha256(
