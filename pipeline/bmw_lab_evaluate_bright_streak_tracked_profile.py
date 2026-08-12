@@ -463,6 +463,8 @@ def _enforce_acceptance_gate(
     no_streak_outcomes: Sequence[Mapping[str, object]],
     comparison: Mapping[str, object],
 ) -> dict[str, object]:
+    if not accepted_outcomes:
+        raise RuntimeError("acceptance gate requires at least one confirmed live normal")
     rejected_accepted = [
         str(row.get("capture_id"))
         for row in accepted_outcomes
@@ -472,6 +474,8 @@ def _enforce_acceptance_gate(
         raise RuntimeError(
             "confirmed live normal acceptance gate failed: " + ", ".join(rejected_accepted)
         )
+    if not no_streak_outcomes:
+        raise RuntimeError("acceptance gate requires no-streak evidence")
     bad_no_streak = [
         str(row.get("sample_id"))
         for row in no_streak_outcomes
@@ -482,7 +486,9 @@ def _enforce_acceptance_gate(
     for split in ("calibration", "final_test"):
         group = comparison.get(split)
         if not isinstance(group, Mapping) or not group.get("normal_count"):
-            continue
+            raise RuntimeError(
+                "acceptance gate requires complete v2 normal comparison for " + split
+            )
         if group["v3_normal_false_rejects"] > group["v2_normal_false_rejects"]:
             raise RuntimeError(f"normal false rejects are worse than v2 for {split}")
     return {

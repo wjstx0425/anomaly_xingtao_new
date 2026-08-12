@@ -180,8 +180,21 @@ def test_tracked_profile_evaluator_binds_capture_id_to_record_directory(tmp_path
         )
 
 
-def test_tracked_profile_report_binds_fit_provenance_and_npz_evidence(tmp_path: Path) -> None:
+def _synthetic_v2_outcomes() -> dict[str, str]:
+    return {
+        "cal-normal": "OK",
+        "cal-no-streak": "NG_NO_STREAK",
+        "final-normal": "OK",
+        "final-no-streak": "NG_NO_STREAK",
+    }
+
+
+def test_tracked_profile_report_binds_fit_provenance_and_npz_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     module = _load_evaluator_module()
+    monkeypatch.setattr(module, "_load_v2_outcomes", _synthetic_v2_outcomes)
     manifest = _write_manifest(tmp_path / "inputs")
     accepted = _write_live_record(tmp_path / "live", "capture-accepted")
     output = tmp_path / "tracked-v3"
@@ -218,7 +231,7 @@ def test_tracked_profile_report_binds_fit_provenance_and_npz_evidence(tmp_path: 
     )
     assert len(report["geometry_selection"]["selection_input_sha256"]) == 64
     assert len(report["geometry_selection"]["selection_evidence_sha256"]) == 64
-    assert report["comparison_to_v2"]["available"] is False
+    assert report["comparison_to_v2"]["available"] is True
     assert set(report["thresholds"]) == {
         "strong_row_score",
         "weak_row_score",
@@ -287,10 +300,15 @@ def test_tracked_profile_report_binds_fit_provenance_and_npz_evidence(tmp_path: 
     ("accepted", "no_streak", "comparison", "message"),
     [
         ([{"capture_id": "bad", "predicted_status": "NG_BROKEN"}], [], {}, "confirmed live normal"),
-        ([], [{"sample_id": "bad", "predicted_status": "OK"}], {}, "no-streak"),
         (
-            [],
-            [],
+            [{"capture_id": "good", "predicted_status": "OK"}],
+            [{"sample_id": "bad", "predicted_status": "OK"}],
+            {},
+            "no-streak",
+        ),
+        (
+            [{"capture_id": "good", "predicted_status": "OK"}],
+            [{"sample_id": "good", "predicted_status": "NG_NO_STREAK"}],
             {
                 "calibration": {
                     "normal_count": 1,
@@ -299,6 +317,14 @@ def test_tracked_profile_report_binds_fit_provenance_and_npz_evidence(tmp_path: 
                 }
             },
             "normal false rejects",
+        ),
+        ([], [{"sample_id": "good", "predicted_status": "NG_NO_STREAK"}], {}, "requires at least one confirmed"),
+        ([{"capture_id": "good", "predicted_status": "OK"}], [], {}, "requires no-streak evidence"),
+        (
+            [{"capture_id": "good", "predicted_status": "OK"}],
+            [{"sample_id": "good", "predicted_status": "NG_NO_STREAK"}],
+            {},
+            "requires complete v2 normal comparison",
         ),
     ],
 )
@@ -316,8 +342,10 @@ def test_tracked_profile_acceptance_gate_fails_closed_before_publication(
 
 def test_tracked_profile_replays_unconfirmed_recent_records_as_unknown_truth(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     module = _load_evaluator_module()
+    monkeypatch.setattr(module, "_load_v2_outcomes", _synthetic_v2_outcomes)
     manifest = _write_manifest(tmp_path / "inputs")
     accepted = _write_live_record(tmp_path / "live", "capture-001")
     unknown = _write_live_record(tmp_path / "live", "capture-002")
@@ -343,8 +371,10 @@ def test_tracked_profile_replays_unconfirmed_recent_records_as_unknown_truth(
 
 def test_tracked_profile_keeps_confirmed_truth_when_record_arrives_through_symlink(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     module = _load_evaluator_module()
+    monkeypatch.setattr(module, "_load_v2_outcomes", _synthetic_v2_outcomes)
     manifest = _write_manifest(tmp_path / "inputs")
     real_live = tmp_path / "real-live"
     _write_live_record(real_live, "capture-001")
