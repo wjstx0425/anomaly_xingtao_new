@@ -644,6 +644,16 @@ def _tracked_report(tmp_path: Path) -> Path:
     replay = artifact_root / "replay_summary.json"
     profile = profiles / "profile_0001.npz"
     manifest = tmp_path / "bright_streak.csv"
+    live_record = tmp_path / "bmw_demo_20260812_211302"
+    (live_record / "images").mkdir(parents=True)
+    live_files = {
+        "front_left_hdr.png": live_record / "images/front_left_hdr.png",
+        "front_left_long.png": live_record / "images/front_left_long.png",
+        "front_left_short.png": live_record / "images/front_left_short.png",
+        "inspection.json": live_record / "inspection.json",
+    }
+    for name, live_file in live_files.items():
+        live_file.write_bytes(f"confirmed-live-normal:{name}".encode())
     manifest.write_text("sample_id,label\nsynthetic,normal\n", encoding="utf-8")
     metrics.write_text("record_id,status\nsynthetic,OK\n", encoding="utf-8")
     replay.write_text('{"count":0,"outcomes":[]}', encoding="utf-8")
@@ -662,7 +672,7 @@ def _tracked_report(tmp_path: Path) -> Path:
                 "final_test_used_for_fit": False,
                 "real_broken_samples": 0,
                 "manifest": str(manifest),
-                "roi_xyxy": [0, 0, 81, 613],
+                "roi_xyxy": [1792, 1180, 1873, 1793],
                 "geometry": {
                     "candidate_width": 5,
                     "background_width": 10,
@@ -692,18 +702,48 @@ def _tracked_report(tmp_path: Path) -> Path:
                     "manifest_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest(),
                     "roi_config_sha256": hashlib.sha256(
                         json.dumps(
-                            {"roi_xyxy": [0, 0, 81, 613]},
+                            {"roi_xyxy": [1792, 1180, 1873, 1793]},
                             sort_keys=True,
                             separators=(",", ":"),
                         ).encode()
                     ).hexdigest(),
                 },
                 "geometry_selection": {},
-                "calibration_counts": {},
-                "accepted_live_normals": [],
-                "acceptance_gate": {"passed": True},
-                "comparison_to_v2": {},
-                "final_test": {},
+                "calibration_counts": {
+                    "accepted_live_normal": 1,
+                    "fit_total": 22,
+                    "manifest_no_streak": 4,
+                    "manifest_normal": 17,
+                },
+                "accepted_live_normals": [
+                    {
+                        "capture_id": "bmw_demo_20260812_211302",
+                        "file_sha256": {
+                            name: hashlib.sha256(live_file.read_bytes()).hexdigest()
+                            for name, live_file in live_files.items()
+                        },
+                        "predicted_status": "OK",
+                        "provenance_kind": "user_confirmed_live_normal",
+                        "record_path": str(live_record),
+                    }
+                ],
+                "acceptance_gate": {
+                    "confirmed_live_normal_count": 1,
+                    "no_streak_count": 8,
+                    "normal_not_worse_than_v2_splits": ["calibration", "final_test"],
+                    "passed": True,
+                },
+                "comparison_to_v2": {
+                    "calibration": {"v2_normal_false_rejects": 0, "v3_normal_false_rejects": 0},
+                    "final_test": {"v2_normal_false_rejects": 1, "v3_normal_false_rejects": 1},
+                },
+                "final_test": {
+                    "count": 20,
+                    "normal_count": 16,
+                    "no_streak_count": 4,
+                    "no_streak_false_accepts": 0,
+                    "normal_false_rejects": 1,
+                },
                 "replay": {},
                 "cpu_per_image_ms": {},
                 "metrics_csv": str(metrics),
@@ -724,11 +764,19 @@ def _tracked_roi(kind: str) -> np.ndarray:
     for row in range(613):
         centre = 35 + row // 120
         value = 180
+        if kind == "leading_background" and row < 540:
+            continue
         if kind == "bridged" and 290 <= row < 295:
             value = 70
         if kind == "broken" and 280 <= row < 360:
             continue
         image[row, centre - 2 : centre + 3] = value
+    return image
+
+
+def _tracked_full_image(kind: str) -> np.ndarray:
+    image = np.full((1793, 1873), 20, dtype=np.uint8)
+    image[1180:1793, 1792:1873] = _tracked_roi(kind)
     return image
 
 
@@ -749,7 +797,7 @@ def test_tracked_profile_predictor_exposes_chinese_metrics_and_colored_path(
 ) -> None:
     predictor = EightViewTrackedProfileBrightStreakPredictor(_tracked_report(tmp_path))
 
-    output = predictor.predict(_tracked_roi(kind))
+    output = predictor.predict(_tracked_full_image(kind))
 
     assert output.status is expected_status
     assert output.details["decision"] == decision
@@ -779,6 +827,16 @@ def test_tracked_profile_predictor_rejects_incomplete_artifact_inventory(tmp_pat
         EightViewTrackedProfileBrightStreakPredictor(report)
 
 
+def test_tracked_profile_overlay_does_not_paint_leading_background_as_gap(tmp_path: Path) -> None:
+    predictor = EightViewTrackedProfileBrightStreakPredictor(_tracked_report(tmp_path))
+
+    output = predictor.predict(_tracked_full_image("leading_background"))
+
+    assert output.details["active_start_row"] == 540
+    first_path_x = output.details["tracked_centerline_x"][0]
+    assert tuple(output.overlay[0, first_path_x]) != (0, 0, 255)
+
+
 def test_tracked_profile_predictor_rejects_unknown_report_fields(tmp_path: Path) -> None:
     report = _tracked_report(tmp_path)
     payload = json.loads(report.read_text(encoding="utf-8"))
@@ -795,6 +853,53 @@ def test_tracked_profile_predictor_rejects_changed_manifest_source(tmp_path: Pat
     Path(payload["manifest"]).write_text("changed", encoding="utf-8")
 
     with pytest.raises(ValueError, match="source identity SHA256"):
+        EightViewTrackedProfileBrightStreakPredictor(report)
+
+
+def test_tracked_profile_predictor_rejects_same_shape_wrong_fixed_roi(tmp_path: Path) -> None:
+    report = _tracked_report(tmp_path)
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    payload["roi_xyxy"] = [0, 0, 81, 613]
+    payload["identities"]["roi_config_sha256"] = hashlib.sha256(
+        json.dumps(
+            {"roi_xyxy": payload["roi_xyxy"]},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    report.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="固定ROI"):
+        EightViewTrackedProfileBrightStreakPredictor(report)
+
+
+def test_tracked_profile_predictor_requires_confirmed_live_normal_identity(tmp_path: Path) -> None:
+    report = _tracked_report(tmp_path)
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    payload["accepted_live_normals"] = []
+    report.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="现场正常样本"):
+        EightViewTrackedProfileBrightStreakPredictor(report)
+
+
+def test_tracked_profile_predictor_rejects_incomplete_acceptance_evidence(tmp_path: Path) -> None:
+    report = _tracked_report(tmp_path)
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    payload["acceptance_gate"] = {"passed": True}
+    report.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="验收证据"):
+        EightViewTrackedProfileBrightStreakPredictor(report)
+
+
+def test_tracked_profile_predictor_rejects_geometry_that_cannot_fit_fixed_roi(tmp_path: Path) -> None:
+    report = _tracked_report(tmp_path)
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    payload["geometry"]["candidate_width"] = 79
+    report.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="geometry超出固定ROI"):
         EightViewTrackedProfileBrightStreakPredictor(report)
 
 

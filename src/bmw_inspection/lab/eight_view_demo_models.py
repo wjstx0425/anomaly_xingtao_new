@@ -344,6 +344,15 @@ class EightViewRawProfileBrightStreakPredictor:
 class EightViewTrackedProfileBrightStreakPredictor:
     """Apply one immutable tracked-profile v3 report to its fixed full-image ROI."""
 
+    _FIXED_ROI = (1792, 1180, 1873, 1793)
+    _CONFIRMED_LIVE_CAPTURE_ID = "bmw_demo_20260812_211302"
+    _CONFIRMED_LIVE_FILES = {
+        "front_left_hdr.png",
+        "front_left_long.png",
+        "front_left_short.png",
+        "inspection.json",
+    }
+
     _REPORT_FIELDS = {
         "schema_version",
         "status",
@@ -430,8 +439,8 @@ class EightViewTrackedProfileBrightStreakPredictor:
         ):
             raise ValueError("追踪光痕v3 ROI必须包含四个整数")
         x1, y1, x2, y2 = roi
-        if not (0 <= x1 < x2 and 0 <= y1 < y2) or (y2 - y1, x2 - x1) != (613, 81):
-            raise ValueError("追踪光痕v3 ROI必须是81x613")
+        if (x1, y1, x2, y2) != self._FIXED_ROI:
+            raise ValueError("追踪光痕v3必须使用固定ROI [1792,1180,1873,1793]")
         geometry_values = payload["geometry"]
         threshold_values = payload["thresholds"]
         if not isinstance(geometry_values, dict) or set(geometry_values) != self._GEOMETRY_FIELDS:
@@ -443,6 +452,11 @@ class EightViewTrackedProfileBrightStreakPredictor:
             thresholds = TrackedProfileThresholds(**threshold_values)
         except (TypeError, ValueError) as error:
             raise ValueError(f"追踪光痕v3参数不正确：{error}") from error
+        required_width = geometry.candidate_width + 2 * (
+            geometry.background_gap + geometry.background_width
+        )
+        if required_width > self._FIXED_ROI[2] - self._FIXED_ROI[0]:
+            raise ValueError("追踪光痕v3 geometry超出固定ROI宽度")
         identities = payload["identities"]
         if (
             not isinstance(identities, dict)
@@ -472,6 +486,8 @@ class EightViewTrackedProfileBrightStreakPredictor:
         ).hexdigest()
         if roi_identity != identities["roi_config_sha256"]:
             raise ValueError("追踪光痕v3 source identity SHA256不匹配")
+        self._validate_confirmed_live_normal(payload["accepted_live_normals"])
+        self._validate_acceptance_evidence(payload)
         self._validate_artifact_inventory(path.parent, payload["artifact_identities"])
         self._roi = (x1, y1, x2, y2)
         self._geometry = geometry
@@ -482,6 +498,86 @@ class EightViewTrackedProfileBrightStreakPredictor:
         return isinstance(value, str) and len(value) == 64 and all(
             character in "0123456789abcdef" for character in value
         )
+
+    @classmethod
+    def _validate_confirmed_live_normal(cls, records: object) -> None:
+        expected_fields = {
+            "capture_id",
+            "file_sha256",
+            "predicted_status",
+            "provenance_kind",
+            "record_path",
+        }
+        if not isinstance(records, list) or len(records) != 1:
+            raise ValueError("追踪光痕v3缺少唯一确认的现场正常样本")
+        record = records[0]
+        if (
+            not isinstance(record, dict)
+            or set(record) != expected_fields
+            or record["capture_id"] != cls._CONFIRMED_LIVE_CAPTURE_ID
+            or record["predicted_status"] != "OK"
+            or record["provenance_kind"] != "user_confirmed_live_normal"
+            or not isinstance(record["record_path"], str)
+        ):
+            raise ValueError("追踪光痕v3现场正常样本身份不正确")
+        file_sha256 = record["file_sha256"]
+        if (
+            not isinstance(file_sha256, dict)
+            or set(file_sha256) != cls._CONFIRMED_LIVE_FILES
+            or any(not cls._is_sha256(digest) for digest in file_sha256.values())
+        ):
+            raise ValueError("追踪光痕v3现场正常样本文件身份不正确")
+        root = Path(record["record_path"]).expanduser().resolve()
+        files = {
+            "front_left_hdr.png": root / "images/front_left_hdr.png",
+            "front_left_long.png": root / "images/front_left_long.png",
+            "front_left_short.png": root / "images/front_left_short.png",
+            "inspection.json": root / "inspection.json",
+        }
+        if any(
+            not source.is_file() or _file_sha256(source) != file_sha256[name]
+            for name, source in files.items()
+        ):
+            raise ValueError("追踪光痕v3现场正常样本文件SHA256不匹配")
+
+    @staticmethod
+    def _validate_acceptance_evidence(payload: Mapping[str, object]) -> None:
+        gate = payload["acceptance_gate"]
+        calibration = payload["calibration_counts"]
+        final_test = payload["final_test"]
+        comparison = payload["comparison_to_v2"]
+        required_gate = {
+            "confirmed_live_normal_count": 1,
+            "no_streak_count": 8,
+            "normal_not_worse_than_v2_splits": ["calibration", "final_test"],
+            "passed": True,
+        }
+        required_calibration = {
+            "accepted_live_normal": 1,
+            "fit_total": 22,
+            "manifest_no_streak": 4,
+            "manifest_normal": 17,
+        }
+        if gate != required_gate or calibration != required_calibration:
+            raise ValueError("追踪光痕v3验收证据不完整")
+        if (
+            not isinstance(final_test, dict)
+            or final_test.get("count") != 20
+            or final_test.get("normal_count") != 16
+            or final_test.get("no_streak_count") != 4
+            or final_test.get("no_streak_false_accepts") != 0
+            or final_test.get("normal_false_rejects") != 1
+            or not isinstance(comparison, dict)
+        ):
+            raise ValueError("追踪光痕v3验收证据不完整")
+        for split in ("calibration", "final_test"):
+            split_evidence = comparison.get(split)
+            if (
+                not isinstance(split_evidence, dict)
+                or split_evidence.get("v3_normal_false_rejects")
+                > split_evidence.get("v2_normal_false_rejects", -1)
+            ):
+                raise ValueError("追踪光痕v3验收证据不完整")
 
     @classmethod
     def _validate_artifact_inventory(cls, root: Path, inventory: object) -> None:
@@ -535,8 +631,14 @@ class EightViewTrackedProfileBrightStreakPredictor:
                 color = (0, 255, 0)
             elif metrics.bridged_mask[row]:
                 color = (0, 200, 255)
-            else:
+            elif (
+                metrics.active_start_row is not None
+                and metrics.active_stop_row is not None
+                and metrics.active_start_row <= row < metrics.active_stop_row
+            ):
                 color = (0, 0, 255)
+            else:
+                color = (128, 128, 128)
             overlay[row, int(column)] = color
         present = bool(metrics.strong_mask.any())
         reason = (
