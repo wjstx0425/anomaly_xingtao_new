@@ -654,7 +654,6 @@ def _tracked_report(tmp_path: Path) -> Path:
     }
     for name, live_file in live_files.items():
         live_file.write_bytes(f"confirmed-live-normal:{name}".encode())
-    manifest.write_text("sample_id,label\nsynthetic,normal\n", encoding="utf-8")
     metric_rows = []
     final_outcomes = []
     for index in range(61):
@@ -700,6 +699,20 @@ def _tracked_report(tmp_path: Path) -> Path:
         writer = csv.DictWriter(stream, fieldnames=tuple(metric_rows[0]))
         writer.writeheader()
         writer.writerows(metric_rows)
+    manifest_rows = [
+        {
+            "sample_id": row["sample_id"],
+            "source_class": row["truth"],
+            "split": row["split"],
+            "expected_status": "NG_NO_STREAK" if row["truth"] == "no_streak" else "OK",
+        }
+        for row in metric_rows
+        if row["provenance_kind"] == "manifest"
+    ]
+    with manifest.open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=tuple(manifest_rows[0]))
+        writer.writeheader()
+        writer.writerows(manifest_rows)
     replay_payload = {
         "accuracy_denominator": 1,
         "count": 20,
@@ -707,7 +720,9 @@ def _tracked_report(tmp_path: Path) -> Path:
         "limit": 20,
         "outcomes": [
             {
-                "capture_id": "bmw_demo_20260812_211302" if index == 0 else f"replay_{index:04d}",
+                "capture_id": (
+                    "bmw_demo_20260812_211302" if index == 0 else f"synthetic_{index + 41:04d}"
+                ),
                 "included_in_accuracy": index == 0,
                 "truth": "normal" if index == 0 else "unknown",
                 "v3_predicted_status": "OK",
@@ -966,6 +981,22 @@ def test_tracked_profile_predictor_rejects_metrics_inventory_semantic_mismatch(t
     report.write_text(json.dumps(payload), encoding="utf-8")
 
     with pytest.raises(ValueError, match="metrics与profile inventory"):
+        EightViewTrackedProfileBrightStreakPredictor(report)
+
+
+def test_tracked_profile_predictor_rejects_duplicated_final_and_replay_identities(tmp_path: Path) -> None:
+    report = _tracked_report(tmp_path)
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    payload["final_test"]["outcomes"] = [payload["final_test"]["outcomes"][0]] * 20
+    payload["replay"]["outcomes"] = [payload["replay"]["outcomes"][0]] * 20
+    replay = report.parent / "replay_summary.json"
+    replay.write_text(json.dumps(payload["replay"]), encoding="utf-8")
+    payload["artifact_identities"]["replay_summary_sha256"] = hashlib.sha256(
+        replay.read_bytes()
+    ).hexdigest()
+    report.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="逐样本身份不一致"):
         EightViewTrackedProfileBrightStreakPredictor(report)
 
 

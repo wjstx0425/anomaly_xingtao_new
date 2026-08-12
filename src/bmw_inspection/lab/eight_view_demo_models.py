@@ -660,10 +660,45 @@ class EightViewTrackedProfileBrightStreakPredictor:
             or accepted[0]["tracked_profile_v3_predicted_status"] != "OK"
         ):
             raise ValueError("追踪光痕v3逐样本验收结果不一致")
+        manifest_metrics = {
+            row["sample_id"]: row for row in rows if row["provenance_kind"] == "manifest"
+        }
+        try:
+            with Path(payload["manifest"]).expanduser().resolve().open(
+                "r", encoding="utf-8", newline=""
+            ) as stream:
+                reader = csv.DictReader(stream)
+                required = {"sample_id", "source_class", "split", "expected_status"}
+                if reader.fieldnames is None or not required.issubset(reader.fieldnames):
+                    raise ValueError("追踪光痕v3 manifest schema不正确")
+                manifest_rows = [
+                    row
+                    for row in reader
+                    if row["source_class"] in {"normal", "no_streak"}
+                    and row["split"] in {"calibration", "final_test"}
+                ]
+        except OSError as error:
+            raise ValueError(f"追踪光痕v3 manifest不可用：{error}") from error
+        manifest_ids = [row["sample_id"] for row in manifest_rows]
+        if len(manifest_ids) != 41 or len(set(manifest_ids)) != 41 or set(manifest_ids) != set(manifest_metrics):
+            raise ValueError("追踪光痕v3 manifest逐样本身份不一致")
+        for manifest_row in manifest_rows:
+            metric = manifest_metrics[manifest_row["sample_id"]]
+            expected_truth = manifest_row["source_class"]
+            if (
+                metric["split"] != manifest_row["split"]
+                or metric["truth"] != expected_truth
+                or manifest_row["expected_status"]
+                != ("NG_NO_STREAK" if expected_truth == "no_streak" else "OK")
+            ):
+                raise ValueError("追踪光痕v3 manifest逐样本身份不一致")
         final_rows = {row["sample_id"]: row for row in rows if row["split"] == "final_test"}
         outcomes = payload["final_test"].get("outcomes")
         if not isinstance(outcomes, list) or len(outcomes) != 20 or len(final_rows) != 20:
             raise ValueError("追踪光痕v3 final-test逐样本证据不完整")
+        outcome_ids = [outcome.get("sample_id") for outcome in outcomes if isinstance(outcome, dict)]
+        if len(outcome_ids) != 20 or len(set(outcome_ids)) != 20 or set(outcome_ids) != set(final_rows):
+            raise ValueError("追踪光痕v3 final-test逐样本身份不一致")
         for outcome in outcomes:
             if not isinstance(outcome, dict) or outcome.get("sample_id") not in final_rows:
                 raise ValueError("追踪光痕v3 final-test逐样本证据不一致")
@@ -691,6 +726,20 @@ class EightViewTrackedProfileBrightStreakPredictor:
             or len(replay["outcomes"]) != 20
         ):
             raise ValueError("追踪光痕v3 replay证据不完整")
+        replay_ids = [
+            outcome.get("capture_id")
+            for outcome in replay["outcomes"]
+            if isinstance(outcome, dict)
+        ]
+        metric_replay_ids = {
+            row["sample_id"] for row in rows if row["split"] == "live_replay"
+        } | {cls._CONFIRMED_LIVE_CAPTURE_ID}
+        if (
+            len(replay_ids) != 20
+            or len(set(replay_ids)) != 20
+            or set(replay_ids) != metric_replay_ids
+        ):
+            raise ValueError("追踪光痕v3 replay逐样本身份不一致")
 
     def predict(self, image: np.ndarray) -> ModelOutput:
         from bmw_inspection.lab.bright_streak_tracked_profile import (
