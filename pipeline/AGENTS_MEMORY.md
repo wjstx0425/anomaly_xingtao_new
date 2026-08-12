@@ -1,5 +1,10 @@
 # Pipeline Memory
 
+## BMW 光痕 V3 与点击 UI 运行整合（2026-08-12）
+
+- `pipeline/bmw_lab_eight_view_demo.py` 于 `37172148` 接入现有点击 UI，`642a37c6` 修复 OpenCV 4.13 Qt 的中文窗口句柄问题。内部必须始终用 `BMW_EIGHT_VIEW_DEMO` 调用 `namedWindow` / `imshow` / `getWindowImageRect` / `setMouseCallback`，可见标题单独用 `setWindowTitle` 设为中文。
+- 干净快照回归是 `182 passed`；`211302` 离线重放光痕仍为 `PASS/OK`，非光痕 24 项完全不变。真机启动会话 `8809` 已完成模型/可信 OK 库预热并进入四相机 GUI 主循环，但未自动拍摄零件。
+
 ## BMW 光痕 tracked-profile V3 部署验收（2026-08-12）
 
 - 当前光痕后端提交为 `1ca4f471`，配置 `configs/bmw/experiments/bmw_eight_view_demo_v3_ng_evidence.json` 指向 `tracked_profile_v3` 的不可变 v8 报告（SHA256 `6b43690af67702333646fa7a88a2a5053a0afae6d19cb343bf6d3abb193c17d4`）。回退时只需恢复该配置的三个 `bright_streak` 字段到 `raw_profile_v2` 及 corrected v2 报告。
