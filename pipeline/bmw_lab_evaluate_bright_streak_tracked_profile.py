@@ -433,11 +433,18 @@ def _comparison_groups(
     comparable = [row for row in manifest_outcomes if row["sample_id"] in v2_outcomes]
     groups: dict[str, object] = {}
     for split in ("calibration", "final_test"):
+        all_split_rows = [row for row in manifest_outcomes if row["split"] == split]
+        all_normal_rows = [row for row in all_split_rows if row["expected_status"] == "OK"]
         split_rows = [row for row in comparable if row["split"] == split]
         normal_rows = [row for row in split_rows if row["expected_status"] == "OK"]
+        manifest_normal_ids = [str(row["sample_id"]) for row in all_normal_rows]
+        normal_ids = [str(row["sample_id"]) for row in normal_rows]
         groups[split] = {
             "count": len(split_rows),
+            "manifest_normal_count": len(all_normal_rows),
+            "manifest_normal_sample_ids": manifest_normal_ids,
             "normal_count": len(normal_rows),
+            "normal_sample_ids": normal_ids,
             "v2_normal_false_rejects": sum(
                 v2_outcomes[str(row["sample_id"])] != "OK" for row in normal_rows
             ),
@@ -488,6 +495,23 @@ def _enforce_acceptance_gate(
         if not isinstance(group, Mapping) or not group.get("normal_count"):
             raise RuntimeError(
                 "acceptance gate requires complete v2 normal comparison for " + split
+            )
+        if group.get("normal_count") != group.get("manifest_normal_count"):
+            raise RuntimeError(
+                "v2 normal comparison does not cover every manifest normal for " + split
+            )
+        manifest_ids = group.get("manifest_normal_sample_ids")
+        comparison_ids = group.get("normal_sample_ids")
+        if (
+            not isinstance(manifest_ids, list)
+            or not isinstance(comparison_ids, list)
+            or len(manifest_ids) != len(set(manifest_ids))
+            or len(comparison_ids) != len(set(comparison_ids))
+            or set(manifest_ids) != set(comparison_ids)
+        ):
+            raise RuntimeError(
+                "v2 comparison must exactly cover unique manifest normal sample IDs for "
+                + split
             )
         if group["v3_normal_false_rejects"] > group["v2_normal_false_rejects"]:
             raise RuntimeError(f"normal false rejects are worse than v2 for {split}")

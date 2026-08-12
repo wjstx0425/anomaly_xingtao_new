@@ -310,8 +310,11 @@ def test_tracked_profile_report_binds_fit_provenance_and_npz_evidence(
             [{"capture_id": "good", "predicted_status": "OK"}],
             [{"sample_id": "good", "predicted_status": "NG_NO_STREAK"}],
             {
-                "calibration": {
-                    "normal_count": 1,
+                    "calibration": {
+                        "manifest_normal_count": 1,
+                        "manifest_normal_sample_ids": ["a"],
+                        "normal_count": 1,
+                        "normal_sample_ids": ["a"],
                     "v2_normal_false_rejects": 0,
                     "v3_normal_false_rejects": 1,
                 }
@@ -325,6 +328,71 @@ def test_tracked_profile_report_binds_fit_provenance_and_npz_evidence(
             [{"sample_id": "good", "predicted_status": "NG_NO_STREAK"}],
             {},
             "requires complete v2 normal comparison",
+        ),
+        (
+            [{"capture_id": "good", "predicted_status": "OK"}],
+            [{"sample_id": "good", "predicted_status": "NG_NO_STREAK"}],
+            {
+                "calibration": {
+                    "manifest_normal_count": 2,
+                    "normal_count": 1,
+                    "v2_normal_false_rejects": 0,
+                    "v3_normal_false_rejects": 0,
+                },
+                "final_test": {
+                    "manifest_normal_count": 2,
+                    "normal_count": 1,
+                    "v2_normal_false_rejects": 0,
+                    "v3_normal_false_rejects": 0,
+                },
+            },
+            "does not cover every manifest normal",
+        ),
+        (
+            [{"capture_id": "good", "predicted_status": "OK"}],
+            [{"sample_id": "good", "predicted_status": "NG_NO_STREAK"}],
+            {
+                    "calibration": {
+                        "manifest_normal_count": 2,
+                        "manifest_normal_sample_ids": ["a", "b"],
+                    "normal_sample_ids": ["a", "a"],
+                    "normal_count": 2,
+                    "v2_normal_false_rejects": 0,
+                    "v3_normal_false_rejects": 0,
+                },
+                    "final_test": {
+                        "manifest_normal_count": 1,
+                    "manifest_normal_sample_ids": ["c"],
+                    "normal_sample_ids": ["c"],
+                    "normal_count": 1,
+                    "v2_normal_false_rejects": 0,
+                    "v3_normal_false_rejects": 0,
+                },
+            },
+            "must exactly cover unique manifest normal sample IDs",
+        ),
+        (
+            [{"capture_id": "good", "predicted_status": "OK"}],
+            [{"sample_id": "good", "predicted_status": "NG_NO_STREAK"}],
+            {
+                    "calibration": {
+                        "manifest_normal_count": 2,
+                        "manifest_normal_sample_ids": ["a", "b"],
+                    "normal_sample_ids": ["a", "extra"],
+                    "normal_count": 2,
+                    "v2_normal_false_rejects": 0,
+                    "v3_normal_false_rejects": 0,
+                },
+                    "final_test": {
+                        "manifest_normal_count": 1,
+                    "manifest_normal_sample_ids": ["c"],
+                    "normal_sample_ids": ["c"],
+                    "normal_count": 1,
+                    "v2_normal_false_rejects": 0,
+                    "v3_normal_false_rejects": 0,
+                },
+            },
+            "must exactly cover unique manifest normal sample IDs",
         ),
     ],
 )
