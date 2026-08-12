@@ -23,7 +23,6 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from bmw_inspection.lab.bright_streak_tracked_profile import (  # noqa: E402
-    BMW_TRACKED_PROFILE_V3_GEOMETRY,
     TRACKED_PROFILE_ROI_SHAPE,
     TrackedProfileGeometry,
     TrackedProfileMetrics,
@@ -55,6 +54,7 @@ _ACCEPTED_RECORD_FILES = (
     Path("images/front_left_short.png"),
     Path("images/front_left_long.png"),
 )
+GEOMETRY_CANDIDATE_WIDTHS = (5, 7, 9)
 
 
 def _absolute(path: Path) -> Path:
@@ -148,6 +148,8 @@ def _manifest_records(
     manifest_path: Path,
     roi_xyxy: tuple[int, int, int, int],
     geometry: TrackedProfileGeometry,
+    *,
+    splits: frozenset[str] = frozenset({"calibration", "final_test"}),
 ) -> list[dict[str, object]]:
     records: list[dict[str, object]] = []
     with manifest_path.open("r", newline="", encoding="utf-8-sig") as stream:
@@ -156,7 +158,7 @@ def _manifest_records(
         if reader.fieldnames is None or not required.issubset(reader.fieldnames):
             raise ValueError("bright-streak manifest is missing required fields")
         for row_number, row in enumerate(reader, start=2):
-            if row["split"] not in {"calibration", "final_test"}:
+            if row["split"] not in splits:
                 continue
             if row["expected_status"] not in {"OK", "NG_NO_STREAK"}:
                 continue
@@ -194,6 +196,136 @@ def _manifest_records(
     if not records:
         raise ValueError("bright-streak manifest has no calibration or final_test decision rows")
     return records
+
+
+def _selection_accepted_rows(
+    accepted_paths: Sequence[Path],
+    roi_xyxy: tuple[int, int, int, int],
+    geometry: TrackedProfileGeometry,
+) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for record_path in accepted_paths:
+        source_paths = _live_source_paths(record_path)
+        metrics, _ = _analyze(
+            source_paths["front_left_hdr.png"], roi_xyxy, geometry, _provisional_thresholds()
+        )
+        rows.append(
+            {
+                "label": "normal",
+                "path_scores": metrics.path_scores,
+                "source_path": source_paths["front_left_hdr.png"],
+            }
+        )
+    return rows
+
+
+def _select_geometry(
+    manifest_path: Path,
+    accepted_paths: Sequence[Path],
+    roi_xyxy: tuple[int, int, int, int],
+) -> tuple[TrackedProfileGeometry, dict[str, object]]:
+    """Select geometry using only calibration and explicitly confirmed normal inputs."""
+    candidates: list[dict[str, object]] = []
+    candidate_objects: dict[int, TrackedProfileGeometry] = {}
+    for candidate_width in GEOMETRY_CANDIDATE_WIDTHS:
+        geometry = TrackedProfileGeometry(candidate_width=candidate_width)
+        candidate_objects[candidate_width] = geometry
+        calibration = _manifest_records(
+            manifest_path,
+            roi_xyxy,
+            geometry,
+            splits=frozenset({"calibration"}),
+        )
+        accepted = _selection_accepted_rows(accepted_paths, roi_xyxy, geometry)
+        fit_rows = [*calibration, *accepted]
+        thresholds = fit_tracked_profile_thresholds(
+            [
+                {
+                    "label": row["label"],
+                    "path_scores": row["path_scores"],
+                    "split": "calibration",
+                    "final_test": False,
+                }
+                for row in fit_rows
+            ],
+            geometry,
+        )
+        normal_metrics: list[TrackedProfileMetrics] = []
+        normal_errors = no_streak_errors = accepted_errors = 0
+        for row in calibration:
+            metrics, _ = _analyze(Path(row["source_path"]), roi_xyxy, geometry, thresholds)
+            status = classify_tracked_profile(metrics, thresholds)
+            if row["label"] == "normal":
+                normal_metrics.append(metrics)
+                normal_errors += status != "OK"
+            else:
+                no_streak_errors += status != "NG_NO_STREAK"
+        for row in accepted:
+            metrics, _ = _analyze(Path(row["source_path"]), roi_xyxy, geometry, thresholds)
+            normal_metrics.append(metrics)
+            accepted_errors += classify_tracked_profile(metrics, thresholds) != "OK"
+        candidates.append(
+            {
+                "candidate_width": candidate_width,
+                "calibration_normal_false_rejects": normal_errors,
+                "calibration_no_streak_errors": no_streak_errors,
+                "accepted_live_false_rejects": accepted_errors,
+                "weakest_normal_coverage_ratio": min(
+                    item.coverage_ratio for item in normal_metrics
+                ),
+                "normal_max_gap_ratio": max(item.max_gap_ratio for item in normal_metrics),
+                "normal_max_gap_count": max(item.gap_count for item in normal_metrics),
+                "strong_row_score": thresholds.strong_row_score,
+                "weak_row_score": thresholds.weak_row_score,
+            }
+        )
+    valid = [
+        item
+        for item in candidates
+        if item["calibration_normal_false_rejects"] == 0
+        and item["calibration_no_streak_errors"] == 0
+        and item["accepted_live_false_rejects"] == 0
+    ]
+    if not valid:
+        raise RuntimeError("no tracked-profile geometry candidate passes calibration acceptance")
+    selected = max(
+        valid,
+        key=lambda item: (
+            item["weakest_normal_coverage_ratio"],
+            -item["normal_max_gap_count"],
+            -item["normal_max_gap_ratio"],
+            -abs(item["candidate_width"] - TrackedProfileGeometry().candidate_width),
+        ),
+    )
+    selection_inputs = {
+        "manifest_sha256": _sha256(manifest_path),
+        "roi_xyxy": list(roi_xyxy),
+        "candidate_widths": list(GEOMETRY_CANDIDATE_WIDTHS),
+        "algorithm_source_sha256": _sha256(
+            SRC_ROOT / "bmw_inspection/lab/bright_streak_tracked_profile.py"
+        ),
+        "accepted_files": {
+            path.name: {
+                name: _sha256(file_path)
+                for name, file_path in _live_source_paths(path).items()
+            }
+            for path in accepted_paths
+        },
+    }
+    evidence: dict[str, object] = {
+        "fit_data": "calibration_plus_user_confirmed_live_normal",
+        "final_test_used_for_selection": False,
+        "candidate_widths": list(GEOMETRY_CANDIDATE_WIDTHS),
+        "selection_rule": (
+            "require zero calibration/accepted errors; maximize weakest normal coverage; "
+            "then minimize max gap count, max gap ratio, and distance from Task-1 default"
+        ),
+        "candidates": candidates,
+        "selected_candidate_width": selected["candidate_width"],
+        "selection_input_sha256": _json_sha256(selection_inputs),
+    }
+    evidence["selection_evidence_sha256"] = _json_sha256(evidence)
+    return candidate_objects[int(selected["candidate_width"])], evidence
 
 
 def _live_source_paths(record_path: Path) -> dict[str, Path]:
@@ -294,6 +426,78 @@ def _metric_row(
     }
 
 
+def _comparison_groups(
+    manifest_outcomes: Sequence[Mapping[str, object]],
+    v2_outcomes: Mapping[str, str],
+) -> dict[str, object]:
+    comparable = [row for row in manifest_outcomes if row["sample_id"] in v2_outcomes]
+    groups: dict[str, object] = {}
+    for split in ("calibration", "final_test"):
+        split_rows = [row for row in comparable if row["split"] == split]
+        normal_rows = [row for row in split_rows if row["expected_status"] == "OK"]
+        groups[split] = {
+            "count": len(split_rows),
+            "normal_count": len(normal_rows),
+            "v2_normal_false_rejects": sum(
+                v2_outcomes[str(row["sample_id"])] != "OK" for row in normal_rows
+            ),
+            "v3_normal_false_rejects": sum(
+                row["predicted_status"] != "OK" for row in normal_rows
+            ),
+            "changes": [
+                {
+                    "sample_id": row["sample_id"],
+                    "expected_status": row["expected_status"],
+                    "v2_predicted_status": v2_outcomes[str(row["sample_id"])],
+                    "v3_predicted_status": row["predicted_status"],
+                }
+                for row in split_rows
+                if v2_outcomes[str(row["sample_id"])] != row["predicted_status"]
+            ],
+        }
+    return {"comparable_manifest_count": len(comparable), **groups}
+
+
+def _enforce_acceptance_gate(
+    accepted_outcomes: Sequence[Mapping[str, object]],
+    no_streak_outcomes: Sequence[Mapping[str, object]],
+    comparison: Mapping[str, object],
+) -> dict[str, object]:
+    rejected_accepted = [
+        str(row.get("capture_id"))
+        for row in accepted_outcomes
+        if row.get("predicted_status") != "OK"
+    ]
+    if rejected_accepted:
+        raise RuntimeError(
+            "confirmed live normal acceptance gate failed: " + ", ".join(rejected_accepted)
+        )
+    bad_no_streak = [
+        str(row.get("sample_id"))
+        for row in no_streak_outcomes
+        if row.get("predicted_status") != "NG_NO_STREAK"
+    ]
+    if bad_no_streak:
+        raise RuntimeError("no-streak acceptance gate failed: " + ", ".join(bad_no_streak))
+    for split in ("calibration", "final_test"):
+        group = comparison.get(split)
+        if not isinstance(group, Mapping) or not group.get("normal_count"):
+            continue
+        if group["v3_normal_false_rejects"] > group["v2_normal_false_rejects"]:
+            raise RuntimeError(f"normal false rejects are worse than v2 for {split}")
+    return {
+        "passed": True,
+        "confirmed_live_normal_count": len(accepted_outcomes),
+        "no_streak_count": len(no_streak_outcomes),
+        "normal_not_worse_than_v2_splits": [
+            split
+            for split in ("calibration", "final_test")
+            if isinstance(comparison.get(split), Mapping)
+            and comparison[split].get("normal_count")
+        ],
+    }
+
+
 def evaluate_bright_streak_tracked_profile(
     manifest: Path,
     output_dir: Path,
@@ -321,7 +525,9 @@ def evaluate_bright_streak_tracked_profile(
     for record in accepted_paths:
         _validate_accepted_record(record)
 
-    geometry = BMW_TRACKED_PROFILE_V3_GEOMETRY
+    geometry, geometry_selection = _select_geometry(
+        manifest_path, accepted_paths, roi_xyxy
+    )
     manifest_rows = _manifest_records(manifest_path, roi_xyxy, geometry)
     accepted_rows: list[dict[str, object]] = []
     initial_cpu_times = [float(row["initial_cpu_ms"]) for row in manifest_rows]
@@ -369,14 +575,41 @@ def evaluate_bright_streak_tracked_profile(
         geometry,
     )
 
-    # Reserve the destination only after every input and the fit contract validate.
+    v2_outcomes = _load_v2_outcomes()
+    preflight_manifest: list[dict[str, object]] = []
+    preflight_accepted: list[dict[str, object]] = []
+    for row in manifest_rows:
+        metrics, _ = _analyze(Path(row["source_path"]), roi_xyxy, geometry, thresholds)
+        preflight_manifest.append(
+            {
+                "sample_id": row["sample_id"],
+                "split": row["split"],
+                "expected_status": row["expected_status"],
+                "predicted_status": classify_tracked_profile(metrics, thresholds),
+            }
+        )
+    for row in accepted_rows:
+        metrics, _ = _analyze(Path(row["source_path"]), roi_xyxy, geometry, thresholds)
+        preflight_accepted.append(
+            {
+                "capture_id": row["capture_id"],
+                "predicted_status": classify_tracked_profile(metrics, thresholds),
+            }
+        )
+    preflight_comparison = _comparison_groups(preflight_manifest, v2_outcomes)
+    acceptance_gate = _enforce_acceptance_gate(
+        preflight_accepted,
+        [row for row in preflight_manifest if row["expected_status"] == "NG_NO_STREAK"],
+        preflight_comparison,
+    )
+
+    # Reserve the destination only after all fit and real acceptance gates pass.
     output_path.mkdir(parents=True)
     profiles_dir = output_path / "profiles"
     profiles_dir.mkdir()
     metrics_path = output_path / "metrics.csv"
     replay_path = output_path / "replay_summary.json"
     report_path = output_path / "report.json"
-    v2_outcomes = _load_v2_outcomes()
     metric_rows: list[dict[str, object]] = []
     final_outcomes: list[dict[str, object]] = []
     manifest_outcomes: list[dict[str, object]] = []
@@ -486,36 +719,20 @@ def evaluate_bright_streak_tracked_profile(
         "outcomes": replay_outcomes,
     }
     _write_json(replay_path, replay_summary)
+    artifact_identities = {
+        "metrics_csv_sha256": _sha256(metrics_path),
+        "replay_summary_sha256": _sha256(replay_path),
+        "profile_npz_sha256": {
+            path.name: _sha256(path) for path in sorted(profiles_dir.glob("*.npz"))
+        },
+    }
 
     normal_final = [row for row in final_outcomes if row["expected_status"] == "OK"]
     no_streak_final = [
         row for row in final_outcomes if row["expected_status"] == "NG_NO_STREAK"
     ]
-    comparable = [row for row in manifest_outcomes if row["sample_id"] in v2_outcomes]
-    comparison_groups: dict[str, object] = {}
-    for split in ("calibration", "final_test"):
-        split_rows = [row for row in comparable if row["split"] == split]
-        normal_rows = [row for row in split_rows if row["expected_status"] == "OK"]
-        comparison_groups[split] = {
-            "count": len(split_rows),
-            "normal_count": len(normal_rows),
-            "v2_normal_false_rejects": sum(
-                v2_outcomes[str(row["sample_id"])] != "OK" for row in normal_rows
-            ),
-            "v3_normal_false_rejects": sum(
-                row["predicted_status"] != "OK" for row in normal_rows
-            ),
-            "changes": [
-                {
-                    "sample_id": row["sample_id"],
-                    "expected_status": row["expected_status"],
-                    "v2_predicted_status": v2_outcomes[str(row["sample_id"])],
-                    "v3_predicted_status": row["predicted_status"],
-                }
-                for row in split_rows
-                if v2_outcomes[str(row["sample_id"])] != row["predicted_status"]
-            ],
-        }
+    comparison_groups = _comparison_groups(manifest_outcomes, v2_outcomes)
+    comparable_count = int(comparison_groups["comparable_manifest_count"])
     report: dict[str, object] = {
         "schema_version": 1,
         "status": "complete",
@@ -526,15 +743,7 @@ def evaluate_bright_streak_tracked_profile(
         "manifest": str(manifest_path),
         "roi_xyxy": list(roi_xyxy),
         "geometry": asdict(geometry),
-        "geometry_selection": {
-            "fit_data": "calibration_plus_user_confirmed_live_normal",
-            "selection_reason": (
-                "candidate_width=5 increased the weakest calibration normal coverage "
-                "and tightened the calibration gap envelope while retaining strict "
-                "normal/no-streak peak separation"
-            ),
-            "final_test_used_for_selection": False,
-        },
+        "geometry_selection": geometry_selection,
         "thresholds": asdict(thresholds),
         "calibration_counts": {
             "manifest_normal": sum(row["label"] == "normal" for row in calibration_rows),
@@ -543,13 +752,17 @@ def evaluate_bright_streak_tracked_profile(
             "fit_total": len(fit_rows),
         },
         "accepted_live_normals": accepted_outcomes,
+        "acceptance_gate": acceptance_gate,
         "comparison_to_v2": {
-            "available": bool(comparable),
-            "baseline_report": str(DEFAULT_V2_REPORT) if comparable else None,
-            "baseline_report_sha256": _sha256(DEFAULT_V2_REPORT) if comparable else None,
-            "baseline_metrics": str(DEFAULT_V2_METRICS) if comparable else None,
-            "baseline_metrics_sha256": _sha256(DEFAULT_V2_METRICS) if comparable else None,
-            "comparable_manifest_count": len(comparable),
+            "available": bool(comparable_count),
+            "baseline_report": str(DEFAULT_V2_REPORT) if comparable_count else None,
+            "baseline_report_sha256": (
+                _sha256(DEFAULT_V2_REPORT) if comparable_count else None
+            ),
+            "baseline_metrics": str(DEFAULT_V2_METRICS) if comparable_count else None,
+            "baseline_metrics_sha256": (
+                _sha256(DEFAULT_V2_METRICS) if comparable_count else None
+            ),
             **comparison_groups,
         },
         "final_test": {
@@ -561,6 +774,7 @@ def evaluate_bright_streak_tracked_profile(
             "outcomes": final_outcomes,
         },
         "replay": replay_summary,
+        "artifact_identities": artifact_identities,
         "cpu_per_image_ms": {
             "scope": "offline_process_cpu_not_hardware_cycle",
             "count": len(initial_cpu_times),

@@ -200,15 +200,24 @@ def test_tracked_profile_report_binds_fit_provenance_and_npz_evidence(tmp_path: 
     assert report["final_test_used_for_fit"] is False
     assert report["real_broken_samples"] == 0
     assert report["roi_xyxy"] == [0, 0, 81, 613]
-    assert report["geometry"] == {
-        "candidate_width": 5,
-        "background_width": 10,
-        "background_gap": 3,
-        "smooth_window": 5,
-        "max_step": 2,
-        "step_penalty": 1.0,
-    }
+    assert report["geometry"]["candidate_width"] in {5, 7, 9}
     assert report["geometry_selection"]["final_test_used_for_selection"] is False
+    assert report["geometry_selection"]["candidate_widths"] == [5, 7, 9]
+    assert len(report["geometry_selection"]["candidates"]) == 3
+    assert all(
+        set(candidate) >= {
+            "candidate_width",
+            "calibration_normal_false_rejects",
+            "calibration_no_streak_errors",
+            "accepted_live_false_rejects",
+            "weakest_normal_coverage_ratio",
+            "normal_max_gap_ratio",
+            "normal_max_gap_count",
+        }
+        for candidate in report["geometry_selection"]["candidates"]
+    )
+    assert len(report["geometry_selection"]["selection_input_sha256"]) == 64
+    assert len(report["geometry_selection"]["selection_evidence_sha256"]) == 64
     assert report["comparison_to_v2"]["available"] is False
     assert set(report["thresholds"]) == {
         "strong_row_score",
@@ -244,6 +253,13 @@ def test_tracked_profile_report_binds_fit_provenance_and_npz_evidence(tmp_path: 
         "algorithm_source_sha256",
         "evaluator_source_sha256",
     }
+    assert report["acceptance_gate"]["passed"] is True
+    assert set(report["artifact_identities"]) == {
+        "metrics_csv_sha256",
+        "replay_summary_sha256",
+        "profile_npz_sha256",
+    }
+    assert len(report["artifact_identities"]["profile_npz_sha256"]) == 5
     assert report["cpu_per_image_ms"]["count"] == 5
     assert report["cpu_per_image_ms"]["p50"] >= 0.0
     assert report["cpu_per_image_ms"]["max"] >= report["cpu_per_image_ms"]["p50"]
@@ -262,8 +278,40 @@ def test_tracked_profile_report_binds_fit_provenance_and_npz_evidence(tmp_path: 
             "accepted_mask",
             "bridged_mask",
         }
-        assert profile["response_map"].shape == (613, 51)
+        edge = report["geometry"]["candidate_width"] // 2 + 3 + 10
+        assert profile["response_map"].shape == (613, 81 - 2 * edge)
         assert profile["path_x"].shape == (613,)
+
+
+@pytest.mark.parametrize(
+    ("accepted", "no_streak", "comparison", "message"),
+    [
+        ([{"capture_id": "bad", "predicted_status": "NG_BROKEN"}], [], {}, "confirmed live normal"),
+        ([], [{"sample_id": "bad", "predicted_status": "OK"}], {}, "no-streak"),
+        (
+            [],
+            [],
+            {
+                "calibration": {
+                    "normal_count": 1,
+                    "v2_normal_false_rejects": 0,
+                    "v3_normal_false_rejects": 1,
+                }
+            },
+            "normal false rejects",
+        ),
+    ],
+)
+def test_tracked_profile_acceptance_gate_fails_closed_before_publication(
+    accepted: list[dict[str, object]],
+    no_streak: list[dict[str, object]],
+    comparison: dict[str, object],
+    message: str,
+) -> None:
+    module = _load_evaluator_module()
+
+    with pytest.raises(RuntimeError, match=message):
+        module._enforce_acceptance_gate(accepted, no_streak, comparison)
 
 
 def test_tracked_profile_replays_unconfirmed_recent_records_as_unknown_truth(

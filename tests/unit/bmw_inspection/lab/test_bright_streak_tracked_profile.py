@@ -9,7 +9,6 @@ import numpy as np
 import pytest
 
 from bmw_inspection.lab.bright_streak_tracked_profile import (
-    BMW_TRACKED_PROFILE_V3_GEOMETRY,
     TrackedProfileGeometry,
     TrackedProfileMetrics,
     TrackedProfileThresholds,
@@ -17,10 +16,6 @@ from bmw_inspection.lab.bright_streak_tracked_profile import (
     classify_tracked_profile,
     fit_tracked_profile_thresholds,
 )
-
-
-def test_bmw_v3_evaluation_geometry_uses_the_calibration_robust_candidate_width() -> None:
-    assert BMW_TRACKED_PROFILE_V3_GEOMETRY == TrackedProfileGeometry(candidate_width=5)
 
 
 def _thresholds() -> TrackedProfileThresholds:
