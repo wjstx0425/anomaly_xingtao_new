@@ -10,6 +10,11 @@
   structured result reasons, metrics, thresholds, overlays, ROI crops, capture-profile SHA/parameters, and an index
   below the configured result root. Offline UI panels explicitly state that short/long originals are unavailable.
 
+## BMW trusted-OK review package (2026-08-12)
+
+- `bmw_lab_prepare_trusted_ok_review.py` is a PENDING-only, atomic no-overwrite CLI for a human review queue. Its defaults bind the 21:00 prepared manifest and the ignored `dataset/bmw_trusted_ok_review/bmw_right_20260810_21_train_normal_v1` output; `--session-id` is mandatory.
+- It delegates strict schema/filter/hash validation to `bmw_inspection.lab.trusted_ok_reference`. The current actual package has 50 complete training-normal physical parts (400 images), 50 Chinese-labelled contact sheets, and no automatic approvals; reviewers must update decisions in a later explicit workflow.
+
 ## BMW 21-point Template-only diagnostic candidate (2026-08-11)
 
 - `bmw_lab_train_template_fixed_thresholds.py` is the isolated offline entrypoint. It accepts only the five
