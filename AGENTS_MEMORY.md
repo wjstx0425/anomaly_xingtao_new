@@ -640,6 +640,13 @@
 - Each evaluated sample writes `profiles/profile_<manifest-row>.npz` with `row_scores` and `mask`; `metrics.csv` links that artifact and records all continuity statistics. The code does not alter `src/bmw_inspection/detector.py` or the default Demo configuration.
 - Real final-test A/B on 20 held-out rows: corrected raw-profile v2 is 19/20 (95%), with 15/16 normal accepted and 4/4 no-streak detected; the unchanged current algorithm is 10/20 (50%). No real broken-but-present samples exist, so interrupted-streak recall remains unverified even though synthetic continuity tests pass.
 
+## BMW tracked-profile bright-streak v3 design (2026-08-12)
+
+- The accepted v3 design is `docs/superpowers/specs/2026-08-12-bmw-bright-streak-tracked-profile-v3-design.md`. It replaces v2's fixed central vertical band with a smooth slanted-path tracker inside the same `81x613` ROI, then applies strong/weak hysteresis along that path while retaining coverage/run/gap evidence.
+- The immediate accepted现场 normal `bmw_demo_20260812_211302` has sufficient presence and run evidence; v2 rejects it only because five rows scoring roughly `88.3-90.2` fall just below the single `92.43` row threshold. This is treated as a geometry/segmentation false break, not solved by globally relaxing the final gap limit.
+- Scope is bright streak only. Template, YOLO, EfficientAD, 25-row result structure, and whole-part fusion must stay unchanged. Existing v2 artifacts remain rollback assets.
+- Current labeled defects include complete `no_streak` only; no real broken-but-present samples exist. v3 must retain all no-streak rejects and synthetic broken-path checks, but interrupted-streak recall remains explicitly unverified until real samples are added.
+
 ## BMW 21:00 Template fixed-threshold diagnostic result (2026-08-11)
 
 - The isolated candidate changed only the five selected templates per view and reused the morning numeric thresholds, 512x512 preprocessing, and max shift 12. It used only 21:00 `train/normal` rows and did not update the Demo.
