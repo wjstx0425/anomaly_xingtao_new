@@ -11,6 +11,7 @@
 - The real fixed-threshold candidate reports 13/21 calibration parts passing and 8/20 final-test parts passing; changing only the template source did not fix the low whole-part pass rate. `front_right` and `front_secondary` are the dominant final-test rejection views.
 - The corrected 21:00 bright-streak candidate uses `--roi-xyxy 1792 1180 1873 1793` by default and writes `bmw_right_batch_20260810_21_bright_v2_roi_corrected`. Its held-out result is 19/20 versus 10/20 for the unchanged current detector; broken-but-present evidence is still absent.
 - `bmw_lab_prepare_template_21only_demo.py` creates a no-overwrite composite run for live single-variable testing: candidate `template`, baseline `efficientad`, and baseline `yolo`. Launch it with `bmw_eight_view_demo_template_21only_v1.json`; do not edit the default Demo config.
+- `bmw_lab_prepare_efficientad_bright_v2_demo.py` creates the second no-overwrite live-test composition: baseline Template/YOLO plus 21:00 EfficientAD. Launch it with `bmw_eight_view_demo_efficientad_bright_v2_v1.json`; this config also selects the SHA-bound corrected-ROI raw-profile bright-streak v2 report.
 
 ## Cropped six-view PatchCore retraining
 

@@ -154,6 +154,7 @@ def test_demo_config_resolves_current_model_assets(tmp_path: Path) -> None:
     assert config.views == VIEW_ORDER
     assert config.yolo_checkpoint == yolo.resolve()
     assert config.bright_streak_config == bright.resolve()
+    assert config.bright_streak_engine == "calibrated_rule_v1"
     assert tuple(config.template_models) == VIEW_ORDER
     assert tuple(config.efficientad_checkpoints) == VIEW_ORDER
     assert tuple(config.efficientad_thresholds) == VIEW_ORDER
@@ -162,6 +163,58 @@ def test_demo_config_resolves_current_model_assets(tmp_path: Path) -> None:
     )
     assert config.efficientad_threshold_source_csv == "/retired-calibration-host/efficientad_scores.csv"
     assert config.efficientad_threshold_source_csv_sha256 == "a" * 64
+
+
+def test_demo_config_loads_sha_bound_raw_profile_v2_asset(tmp_path: Path) -> None:
+    _roi, _capture, _run, threshold_artifact = _write_demo_assets(tmp_path)
+    report = tmp_path / "raw_profile_report.json"
+    report.write_text(
+        json.dumps(
+            {
+                "roi_xyxy": [1792, 1180, 1873, 1793],
+                "raw_profile_v2": {
+                    "thresholds": {
+                        "min_row_score": 30.0,
+                        "min_presence_coverage_ratio": 0.1,
+                        "min_longest_run_ratio": 0.1,
+                        "max_gap_ratio": 0.02,
+                        "max_gap_count": 2,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    payload = _demo_payload(tmp_path, threshold_artifact=threshold_artifact)
+    payload["bright_streak"] = {
+        "engine": "raw_profile_v2",
+        "config": str(report),
+        "config_sha256": hashlib.sha256(report.read_bytes()).hexdigest(),
+    }
+    config_path = tmp_path / "demo.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    config = load_demo_config(config_path)
+
+    assert config.bright_streak_engine == "raw_profile_v2"
+    assert config.bright_streak_config == report.resolve()
+
+
+def test_demo_config_rejects_changed_raw_profile_v2_asset(tmp_path: Path) -> None:
+    _roi, _capture, _run, threshold_artifact = _write_demo_assets(tmp_path)
+    report = tmp_path / "raw_profile_report.json"
+    report.write_text("{}", encoding="utf-8")
+    payload = _demo_payload(tmp_path, threshold_artifact=threshold_artifact)
+    payload["bright_streak"] = {
+        "engine": "raw_profile_v2",
+        "config": str(report),
+        "config_sha256": "0" * 64,
+    }
+    config_path = tmp_path / "demo.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="光痕配置资产 SHA256"):
+        load_demo_config(config_path)
 
 
 def test_demo_config_fails_closed_when_efficientad_checkpoint_changes(tmp_path: Path) -> None:
@@ -175,6 +228,27 @@ def test_demo_config_fails_closed_when_efficientad_checkpoint_changes(tmp_path: 
 
     with pytest.raises(ValueError, match="checkpoint SHA256"):
         load_demo_config(config_path)
+
+
+def test_demo_config_accepts_efficientad_asset_key_order_and_normalizes_views(tmp_path: Path) -> None:
+    _roi, _capture, _run, threshold_artifact = _write_demo_assets(tmp_path)
+    artifact = json.loads(threshold_artifact.read_text(encoding="utf-8"))
+    artifact["thresholds"] = {
+        view: artifact["thresholds"][view] for view in sorted(VIEW_ORDER)
+    }
+    artifact["checkpoint_sha256_by_view"] = {
+        view: artifact["checkpoint_sha256_by_view"][view] for view in sorted(VIEW_ORDER)
+    }
+    threshold_artifact.write_text(json.dumps(artifact), encoding="utf-8")
+    config_path = tmp_path / "demo.json"
+    config_path.write_text(
+        json.dumps(_demo_payload(tmp_path, threshold_artifact=threshold_artifact)),
+        encoding="utf-8",
+    )
+
+    config = load_demo_config(config_path)
+
+    assert tuple(config.efficientad_thresholds) == VIEW_ORDER
 
 
 def test_demo_config_fails_closed_when_threshold_artifact_changes(tmp_path: Path) -> None:

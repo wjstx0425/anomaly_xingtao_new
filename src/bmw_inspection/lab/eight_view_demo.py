@@ -121,6 +121,7 @@ class EightViewDemoConfig:
     efficientad_thresholds: Mapping[str, float]
     efficientad_threshold_source_csv: str
     efficientad_threshold_source_csv_sha256: str
+    bright_streak_engine: str
     bright_streak_config: Path
     yolo_checkpoint: Path
     yolo_candidate_conf: float
@@ -257,7 +258,7 @@ def _load_efficientad_thresholds(
         if payload.get(flag) is not True:
             raise ValueError(f"EfficientAD整件阈值资产必须显式标记{flag}=true")
     thresholds = payload.get("thresholds")
-    if not isinstance(thresholds, dict) or tuple(thresholds) != VIEW_ORDER:
+    if not isinstance(thresholds, dict) or set(thresholds) != set(VIEW_ORDER):
         raise ValueError("EfficientAD整件阈值资产必须按标准顺序覆盖八个视角")
     if any(isinstance(value, bool) or not isinstance(value, Real) for value in thresholds.values()):
         raise ValueError("EfficientAD整件阈值必须是有限数值")
@@ -267,7 +268,7 @@ def _load_efficientad_thresholds(
     from bmw_inspection.lab.efficientad_thresholds import _validated_thresholds
 
     try:
-        views, parsed = _validated_thresholds(thresholds)
+        views, parsed = _validated_thresholds({view: thresholds[view] for view in VIEW_ORDER})
     except ValueError as error:
         raise ValueError("EfficientAD整件阈值必须是有限数值") from error
     if views != VIEW_ORDER:
@@ -275,14 +276,15 @@ def _load_efficientad_thresholds(
     checkpoint_sha256 = payload.get("checkpoint_sha256_by_view")
     if (
         not isinstance(checkpoint_sha256, dict)
-        or tuple(checkpoint_sha256) != VIEW_ORDER
+        or set(checkpoint_sha256) != set(VIEW_ORDER)
         or any(
             not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None
             for value in checkpoint_sha256.values()
         )
     ):
         raise ValueError("EfficientAD阈值资产checkpoint_sha256_by_view必须按标准顺序覆盖八个视角")
-    return MappingProxyType(parsed), source_csv, source_csv_sha256, MappingProxyType(dict(checkpoint_sha256))
+    ordered_checkpoint_sha256 = {view: checkpoint_sha256[view] for view in VIEW_ORDER}
+    return MappingProxyType(parsed), source_csv, source_csv_sha256, MappingProxyType(ordered_checkpoint_sha256)
 
 
 def load_demo_config(path: Path) -> EightViewDemoConfig:
@@ -314,7 +316,19 @@ def load_demo_config(path: Path) -> EightViewDemoConfig:
     if isinstance(imgsz, bool) or not isinstance(imgsz, int) or imgsz <= 0:
         raise ValueError("yolo.imgsz必须是正整数")
     bright_streak_config = payload["bright_streak"]
-    if not isinstance(bright_streak_config, dict) or set(bright_streak_config) != {"config"}:
+    if not isinstance(bright_streak_config, dict):
+        raise ValueError("bright_streak配置字段不正确")
+    if set(bright_streak_config) == {"config"}:
+        bright_streak_engine = "calibrated_rule_v1"
+        bright_streak_sha256 = None
+    elif set(bright_streak_config) == {"engine", "config", "config_sha256"}:
+        bright_streak_engine = bright_streak_config["engine"]
+        bright_streak_sha256 = bright_streak_config["config_sha256"]
+        if bright_streak_engine != "raw_profile_v2":
+            raise ValueError("bright_streak.engine只支持raw_profile_v2")
+        if not isinstance(bright_streak_sha256, str) or re.fullmatch(r"[0-9a-f]{64}", bright_streak_sha256) is None:
+            raise ValueError("光痕配置资产 SHA256格式不正确")
+    else:
         raise ValueError("bright_streak配置字段不正确")
     efficientad_config = payload["efficientad"]
     if not isinstance(efficientad_config, dict) or set(efficientad_config) != {
@@ -334,6 +348,10 @@ def load_demo_config(path: Path) -> EightViewDemoConfig:
     roi_config = resolve(payload["roi_config"])
     training_run = resolve(payload["training_run"])
     bright = resolve(bright_streak_config["config"])
+    if bright_streak_sha256 is not None and (
+        not bright.is_file() or _sha256(bright) != bright_streak_sha256
+    ):
+        raise ValueError("光痕配置资产 SHA256不匹配")
     threshold_artifact = resolve(efficientad_config["threshold_artifact"])
     expected_threshold_sha256 = efficientad_config["threshold_artifact_sha256"]
     if not isinstance(expected_threshold_sha256, str) or re.fullmatch(r"[0-9a-f]{64}", expected_threshold_sha256) is None:
@@ -379,6 +397,7 @@ def load_demo_config(path: Path) -> EightViewDemoConfig:
         efficientad_thresholds=efficientad_thresholds,
         efficientad_threshold_source_csv=efficientad_source_csv,
         efficientad_threshold_source_csv_sha256=efficientad_source_csv_sha256,
+        bright_streak_engine=bright_streak_engine,
         bright_streak_config=bright,
         yolo_checkpoint=yolo_checkpoint,
         yolo_candidate_conf=candidate,

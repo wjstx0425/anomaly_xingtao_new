@@ -18,6 +18,7 @@ from bmw_inspection.lab.eight_view_demo_models import (
     EightViewModelSuite,
     EightViewTemplatePredictor,
     EightViewYoloPredictor,
+    EightViewRawProfileBrightStreakPredictor,
     ModelOutput,
     load_part_rois,
 )
@@ -163,6 +164,44 @@ def test_bright_streak_predictor_uses_trained_config() -> None:
     assert output.status in {BranchStatus.PASS, BranchStatus.NG}
     assert output.score is not None
     assert output.overlay is not None
+
+
+def test_raw_profile_bright_streak_predictor_uses_full_image_fixed_roi(tmp_path: Path) -> None:
+    report = tmp_path / "report.json"
+    report.write_text(
+        '{"roi_xyxy":[10,20,91,633],"raw_profile_v2":{"thresholds":'
+        '{"min_row_score":30.0,"min_presence_coverage_ratio":0.9,'
+        '"min_longest_run_ratio":0.9,"max_gap_ratio":0.01,"max_gap_count":0}}}',
+        encoding="utf-8",
+    )
+    image = np.full((700, 120), 20, dtype=np.uint8)
+    image[20:633, 46:55] = 180
+    predictor = EightViewRawProfileBrightStreakPredictor(report)
+
+    output = predictor.predict(image)
+
+    assert output.status is BranchStatus.PASS
+    assert output.score == pytest.approx(1.0)
+    assert output.threshold == pytest.approx(0.9)
+    assert "原灰度" in output.reason
+    assert output.overlay is not None
+    assert output.overlay.shape == (700, 120, 3)
+
+
+def test_raw_profile_bright_streak_predictor_reports_missing_streak(tmp_path: Path) -> None:
+    report = tmp_path / "report.json"
+    report.write_text(
+        '{"roi_xyxy":[0,0,81,613],"raw_profile_v2":{"thresholds":'
+        '{"min_row_score":30.0,"min_presence_coverage_ratio":0.1,'
+        '"min_longest_run_ratio":0.1,"max_gap_ratio":0.01,"max_gap_count":0}}}',
+        encoding="utf-8",
+    )
+    predictor = EightViewRawProfileBrightStreakPredictor(report)
+
+    output = predictor.predict(np.full((613, 81), 20, dtype=np.uint8))
+
+    assert output.status is BranchStatus.NG
+    assert "未检测到" in output.reason
 
 
 def test_efficientad_predictor_keeps_one_resident_predictor_per_view(tmp_path: Path) -> None:

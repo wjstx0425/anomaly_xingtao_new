@@ -218,6 +218,78 @@ class EightViewBrightStreakPredictor:
         )
 
 
+class EightViewRawProfileBrightStreakPredictor:
+    """Apply the calibrated raw-grayscale row profile to one fixed full-image ROI."""
+
+    def __init__(self, report_path: Path) -> None:
+        from bmw_inspection.lab.bright_streak_raw_profile import RawProfileThresholds
+
+        path = Path(report_path).expanduser().resolve()
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            roi = payload["roi_xyxy"]
+            values = payload["raw_profile_v2"]["thresholds"]
+            thresholds = RawProfileThresholds(
+                min_row_score=float(values["min_row_score"]),
+                min_presence_coverage_ratio=float(values["min_presence_coverage_ratio"]),
+                min_longest_run_ratio=float(values["min_longest_run_ratio"]),
+                max_gap_ratio=float(values["max_gap_ratio"]),
+                max_gap_count=int(values["max_gap_count"]),
+            )
+        except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError) as error:
+            raise ValueError(f"原灰度光痕v2配置不可用：{path}: {error}") from error
+        if (
+            not isinstance(roi, list)
+            or len(roi) != 4
+            or any(isinstance(value, bool) or not isinstance(value, int) for value in roi)
+        ):
+            raise ValueError("原灰度光痕v2 ROI必须包含四个整数")
+        x1, y1, x2, y2 = roi
+        if not (0 <= x1 < x2 and 0 <= y1 < y2) or (y2 - y1, x2 - x1) != (613, 81):
+            raise ValueError("原灰度光痕v2 ROI必须是81x613")
+        self._roi = (x1, y1, x2, y2)
+        self._thresholds = thresholds
+
+    def predict(self, image: np.ndarray) -> ModelOutput:
+        from bmw_inspection.lab.bright_streak_raw_profile import analyze_raw_profile, classify_raw_profile
+
+        x1, y1, x2, y2 = self._roi
+        height, width = image.shape[:2]
+        if x2 > width or y2 > height:
+            raise ValueError(f"原灰度光痕v2 ROI超出输入图像{width}x{height}")
+        gray = _gray(image)
+        metrics = analyze_raw_profile(
+            gray[y1:y2, x1:x2],
+            min_row_score=self._thresholds.min_row_score,
+        )
+        decision = classify_raw_profile(metrics, self._thresholds)
+        status = BranchStatus.PASS if decision == "OK" else BranchStatus.NG
+        overlay = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+        color = (0, 200, 0) if status is BranchStatus.PASS else (0, 0, 255)
+        cv2.rectangle(overlay, (x1, y1), (x2 - 1, y2 - 1), color, 4)
+        centre_x = (x1 + x2) // 2
+        active_rows = np.flatnonzero(metrics.mask)
+        overlay[y1 + active_rows, max(x1, centre_x - 2) : min(x2, centre_x + 3)] = color
+        if decision == "OK":
+            label = "原灰度光痕存在且连续"
+        elif decision == "NG_NO_STREAK":
+            label = "原灰度未检测到有效光痕"
+        else:
+            label = "原灰度光痕存在但不连续"
+        reason = (
+            f"{label}；覆盖率 {metrics.coverage_ratio:.3f}，"
+            f"最长连续段 {metrics.longest_run_ratio:.3f}，"
+            f"最大断点 {metrics.max_gap_ratio:.3f}，断点数 {metrics.gap_count}"
+        )
+        return ModelOutput(
+            status,
+            metrics.coverage_ratio,
+            self._thresholds.min_presence_coverage_ratio,
+            reason,
+            overlay,
+        )
+
+
 def _default_yolo_factory(path: Path) -> Any:
     from ultralytics import YOLO
 
@@ -510,7 +582,10 @@ class EightViewModelSuite:
 def build_model_suite(config: EightViewDemoConfig) -> EightViewModelSuite:
     """Build the four resident model branches from one resolved Demo profile."""
     template = EightViewTemplatePredictor(config.template_models)
-    bright_streak = EightViewBrightStreakPredictor(config.bright_streak_config)
+    if config.bright_streak_engine == "raw_profile_v2":
+        bright_streak = EightViewRawProfileBrightStreakPredictor(config.bright_streak_config)
+    else:
+        bright_streak = EightViewBrightStreakPredictor(config.bright_streak_config)
     yolo = EightViewYoloPredictor(
         config.yolo_checkpoint,
         candidate_conf=config.yolo_candidate_conf,
@@ -532,6 +607,7 @@ def build_model_suite(config: EightViewDemoConfig) -> EightViewModelSuite:
 
 __all__ = [
     "EightViewBrightStreakPredictor",
+    "EightViewRawProfileBrightStreakPredictor",
     "EightViewEfficientAdPredictor",
     "EightViewModelSuite",
     "EightViewTemplatePredictor",
