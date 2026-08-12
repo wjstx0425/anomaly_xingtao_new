@@ -643,6 +643,7 @@
 ## BMW tracked-profile bright-streak v3 design (2026-08-12)
 
 - The accepted v3 design is `docs/superpowers/specs/2026-08-12-bmw-bright-streak-tracked-profile-v3-design.md`. It replaces v2's fixed central vertical band with a smooth slanted-path tracker inside the same `81x613` ROI, then applies strong/weak hysteresis along that path while retaining coverage/run/gap evidence.
+- Execute it from `docs/superpowers/plans/2026-08-12-bmw-bright-streak-tracked-profile-v3.md`: core tracked profile, immutable evaluator/replay, Demo integration, then offline acceptance and live restart. Each stage is TDD and independently reviewed.
 - The immediate accepted现场 normal `bmw_demo_20260812_211302` has sufficient presence and run evidence; v2 rejects it only because five rows scoring roughly `88.3-90.2` fall just below the single `92.43` row threshold. This is treated as a geometry/segmentation false break, not solved by globally relaxing the final gap limit.
 - Scope is bright streak only. Template, YOLO, EfficientAD, 25-row result structure, and whole-part fusion must stay unchanged. Existing v2 artifacts remain rollback assets.
 - Current labeled defects include complete `no_streak` only; no real broken-but-present samples exist. v3 must retain all no-streak rejects and synthetic broken-path checks, but interrupted-streak recall remains explicitly unverified until real samples are added.
