@@ -163,6 +163,48 @@ def test_demo_config_resolves_current_model_assets(tmp_path: Path) -> None:
     )
     assert config.efficientad_threshold_source_csv == "/retired-calibration-host/efficientad_scores.csv"
     assert config.efficientad_threshold_source_csv_sha256 == "a" * 64
+    assert config.efficientad_base_thresholds == config.efficientad_thresholds
+    assert config.efficientad_threshold_margin == pytest.approx(0.0)
+
+
+def test_demo_config_loads_base_thresholds_and_deployment_margin(tmp_path: Path) -> None:
+    _roi, _capture, _run, threshold_artifact = _write_demo_assets(tmp_path)
+    artifact = json.loads(threshold_artifact.read_text(encoding="utf-8"))
+    artifact["base_thresholds"] = {
+        view: artifact["thresholds"][view] - 0.05 for view in VIEW_ORDER
+    }
+    artifact["threshold_margin"] = 0.05
+    threshold_artifact.write_text(json.dumps(artifact), encoding="utf-8")
+    config_path = tmp_path / "demo.json"
+    config_path.write_text(
+        json.dumps(_demo_payload(tmp_path, threshold_artifact=threshold_artifact)),
+        encoding="utf-8",
+    )
+
+    config = load_demo_config(config_path)
+
+    assert tuple(config.efficientad_base_thresholds) == VIEW_ORDER
+    assert config.efficientad_threshold_margin == pytest.approx(0.05)
+    for view in VIEW_ORDER:
+        assert config.efficientad_thresholds[view] == pytest.approx(
+            config.efficientad_base_thresholds[view] + 0.05
+        )
+
+
+def test_demo_config_rejects_inconsistent_base_threshold_margin(tmp_path: Path) -> None:
+    _roi, _capture, _run, threshold_artifact = _write_demo_assets(tmp_path)
+    artifact = json.loads(threshold_artifact.read_text(encoding="utf-8"))
+    artifact["base_thresholds"] = dict(artifact["thresholds"])
+    artifact["threshold_margin"] = 0.05
+    threshold_artifact.write_text(json.dumps(artifact), encoding="utf-8")
+    config_path = tmp_path / "demo.json"
+    config_path.write_text(
+        json.dumps(_demo_payload(tmp_path, threshold_artifact=threshold_artifact)),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="基础阈值.*部署阈值"):
+        load_demo_config(config_path)
 
 
 def test_demo_config_loads_sha_bound_raw_profile_v2_asset(tmp_path: Path) -> None:

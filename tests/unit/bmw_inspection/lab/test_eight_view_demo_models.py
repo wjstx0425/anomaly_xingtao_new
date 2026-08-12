@@ -146,6 +146,12 @@ def test_yolo_predictor_uses_separate_candidate_and_ng_thresholds(tmp_path: Path
     assert output.score == pytest.approx(0.8)
     assert output.threshold == pytest.approx(0.25)
     assert output.overlay is not None
+    assert output.details["evidence_type"] == "真实检测框"
+    assert output.details["final_box_count"] == 1
+    assert output.details["candidate_box_count"] == 2
+    assert output.details["boxes"][1]["confidence"] == pytest.approx(0.8)
+    assert "最高置信度 0.8000" in output.reason
+    assert "部署阈值 0.2500" in output.reason
 
 
 def test_bright_streak_predictor_uses_trained_config() -> None:
@@ -185,7 +191,13 @@ def test_raw_profile_bright_streak_predictor_uses_full_image_fixed_roi(tmp_path:
     assert output.threshold == pytest.approx(0.9)
     assert "原灰度" in output.reason
     assert output.overlay is not None
-    assert output.overlay.shape == (700, 120, 3)
+    assert output.overlay.shape == (613, 81, 3)
+    assert output.details["evidence_type"] == "规则 ROI 证据"
+    assert output.details["roi_xyxy"] == (10, 20, 91, 633)
+    assert output.details["coverage_ratio"] == pytest.approx(1.0)
+    assert output.details["gap_count"] == 0
+    assert "覆盖率阈值 0.900" in output.reason
+    assert "最长连续段阈值 0.900" in output.reason
 
 
 def test_raw_profile_bright_streak_predictor_reports_missing_streak(tmp_path: Path) -> None:
@@ -220,6 +232,8 @@ def test_efficientad_predictor_keeps_one_resident_predictor_per_view(tmp_path: P
     predictor = EightViewEfficientAdPredictor(
         checkpoints,
         thresholds={view: 0.5 for view in VIEW_ORDER},
+        base_thresholds={view: 0.45 for view in VIEW_ORDER},
+        threshold_margin=0.05,
         predictor_factory=factory,
     )
     output = predictor.predict("back_secondary", np.zeros((10, 10, 3), dtype=np.uint8))
@@ -229,6 +243,13 @@ def test_efficientad_predictor_keeps_one_resident_predictor_per_view(tmp_path: P
     assert output.score == pytest.approx(0.8)
     assert output.threshold == pytest.approx(0.5)
     assert output.overlay is not None
+    assert output.details["evidence_type"] == "诊断热区"
+    assert output.details["base_threshold"] == pytest.approx(0.45)
+    assert output.details["deployment_threshold"] == pytest.approx(0.5)
+    assert output.details["threshold_margin"] == pytest.approx(0.05)
+    assert output.details["threshold_exceedance"] == pytest.approx(0.3)
+    assert output.details["hotspot_x"] == 0
+    assert output.details["hotspot_y"] == 0
 
 
 def test_efficientad_predictor_uses_deployment_threshold_not_pred_label(tmp_path: Path) -> None:
@@ -248,12 +269,42 @@ def test_efficientad_predictor_uses_deployment_threshold_not_pred_label(tmp_path
 
     output = predictor.predict("front", image)
 
-    expected = cv2.addWeighted(image, 0.6, fixed_scale_heatmap(anomaly_map), 0.4, 0.0)
     assert output.status is BranchStatus.PASS
     assert output.score == pytest.approx(0.6)
     assert output.threshold == pytest.approx(0.8)
     assert output.raw_pred_label is True
-    assert np.array_equal(output.overlay, expected)
+    assert output.details["hotspot_x"] == 1
+    assert output.details["hotspot_y"] == 1
+    assert not np.array_equal(output.overlay, cv2.addWeighted(image, 0.6, fixed_scale_heatmap(anomaly_map), 0.4, 0.0))
+
+
+def test_template_difference_uses_best_match_alignment(tmp_path: Path) -> None:
+    model_paths = {}
+    base = np.zeros((16, 16), dtype=np.uint8)
+    base[4:9, 5:10] = 255
+    query = np.zeros_like(base)
+    query[4:9, 7:12] = 255
+    for view in VIEW_ORDER:
+        directory = tmp_path / view
+        directory.mkdir()
+        assert cv2.imwrite(str(directory / "template.png"), base)
+        (directory / "model.json").write_text(
+            '{"view_id":"%s","input_width":16,"input_height":16,'
+            '"threshold":1.0,"preprocess":{"target_width":16,"target_height":16,"max_shift":3},'
+            '"templates":[{"path":"template.png"}]}' % view,
+            encoding="utf-8",
+        )
+        model_paths[view] = directory / "model.json"
+    predictor = EightViewTemplatePredictor(model_paths)
+
+    output = predictor.predict("front", query)
+
+    assert output.details["evidence_type"] == "诊断热区"
+    assert output.details["best_shift_x"] == 2
+    assert output.details["best_shift_y"] == 0
+    assert output.details["aligned_mean_absolute_difference"] < 20
+    assert "最佳平移 (2, 0)" in output.reason
+    assert "诊断热区" in output.reason
 
 
 def test_efficientad_predictor_threshold_equality_is_ng_when_pred_label_is_false(tmp_path: Path) -> None:

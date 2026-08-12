@@ -1,5 +1,15 @@
 # Pipeline Memory
 
+## BMW v3 NG-evidence Demo entrypoints (2026-08-12)
+
+- `bmw_lab_prepare_v3_ng_evidence_demo.py` creates a no-overwrite composite from 21:00 Template, 21:00 EfficientAD-v2,
+  unchanged baseline YOLO, and a deployment threshold asset with an explicit `+0.05` margin. The bright-streak-v2
+  report is selected by `configs/bmw/experiments/bmw_eight_view_demo_v3_ng_evidence.json`.
+- `bmw_lab_eight_view_demo.py` now persists each completed inspection. Live runs save actual short/long/HDR sources;
+  offline samples are labeled `fused_only`. The experiment UI uses `N/P` for the NG/ERROR evidence queue and saves
+  structured result reasons, metrics, thresholds, overlays, ROI crops, capture-profile SHA/parameters, and an index
+  below the configured result root. Offline UI panels explicitly state that short/long originals are unavailable.
+
 ## BMW 21-point Template-only diagnostic candidate (2026-08-11)
 
 - `bmw_lab_train_template_fixed_thresholds.py` is the isolated offline entrypoint. It accepts only the five

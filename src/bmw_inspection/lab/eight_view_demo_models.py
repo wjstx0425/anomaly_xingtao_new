@@ -40,6 +40,7 @@ class ModelOutput:
     reason: str
     overlay: np.ndarray | None
     raw_pred_label: bool | None = None
+    details: Mapping[str, Any] = MappingProxyType({})
 
     def __post_init__(self) -> None:
         if not isinstance(self.status, BranchStatus):
@@ -52,6 +53,8 @@ class ModelOutput:
             raise ValueError("reason must not be empty")
         if self.raw_pred_label is not None and not isinstance(self.raw_pred_label, bool):
             raise TypeError("raw_pred_label must be bool or None")
+        if not isinstance(self.details, Mapping):
+            raise TypeError("details must be a mapping")
 
 
 ViewPredictor = Callable[[str, np.ndarray], ModelOutput]
@@ -163,24 +166,43 @@ class EightViewTemplatePredictor:
             model.max_shift,
             cv2.BORDER_REFLECT_101,
         )
-        matches: list[tuple[float, np.ndarray]] = []
+        matches: list[tuple[float, np.ndarray, tuple[int, int]]] = []
         for template in model.templates:
             response = cv2.matchTemplate(padded, template, cv2.TM_CCOEFF_NORMED)
-            _minimum, maximum, _minimum_location, _maximum_location = cv2.minMaxLoc(response)
-            matches.append((float(maximum), template))
-        similarity, best = max(matches, key=lambda item: item[0])
+            _minimum, maximum, _minimum_location, maximum_location = cv2.minMaxLoc(response)
+            matches.append((float(maximum), template, maximum_location))
+        similarity, best, best_location = max(matches, key=lambda item: item[0])
         risk = max(0.0, 1.0 - similarity)
-        difference = cv2.absdiff(query, best)
+        best_x, best_y = best_location
+        aligned_query = padded[
+            best_y : best_y + model.target_height,
+            best_x : best_x + model.target_width,
+        ]
+        difference = cv2.absdiff(aligned_query, best)
         heatmap = cv2.applyColorMap(difference, cv2.COLORMAP_TURBO)
-        base = cv2.cvtColor(query, cv2.COLOR_GRAY2BGR)
+        base = cv2.cvtColor(aligned_query, cv2.COLOR_GRAY2BGR)
         overlay = cv2.addWeighted(base, 0.65, heatmap, 0.35, 0.0)
         passed = risk <= model.threshold
         return ModelOutput(
             BranchStatus.PASS if passed else BranchStatus.NG,
             risk,
             model.threshold,
-            f"模板风险 {risk:.4f}，阈值 {model.threshold:.4f}",
+            (
+                f"Template 诊断热区：模板风险 {risk:.4f}，部署阈值 {model.threshold:.4f}；"
+                f"最佳平移 ({best_x - model.max_shift}, {best_y - model.max_shift})，"
+                f"对齐后平均绝对差 {float(difference.mean()):.3f}"
+            ),
             overlay,
+            details={
+                "evidence_type": "诊断热区",
+                "similarity": similarity,
+                "risk": risk,
+                "deployment_threshold": model.threshold,
+                "threshold_exceedance": risk - model.threshold,
+                "best_shift_x": best_x - model.max_shift,
+                "best_shift_y": best_y - model.max_shift,
+                "aligned_mean_absolute_difference": float(difference.mean()),
+            },
         )
 
 
@@ -215,6 +237,11 @@ class EightViewBrightStreakPredictor:
                 DemoStatus.ERROR: "光痕检测输入异常",
             }[decision.status],
             render_evidence(image, decision),
+            details={
+                "evidence_type": "规则 ROI 证据",
+                "coverage_ratio": None if metrics is None else metrics.coverage_ratio,
+                "deployment_threshold": self._config.min_coverage_ratio,
+            },
         )
 
 
@@ -264,12 +291,13 @@ class EightViewRawProfileBrightStreakPredictor:
         )
         decision = classify_raw_profile(metrics, self._thresholds)
         status = BranchStatus.PASS if decision == "OK" else BranchStatus.NG
-        overlay = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+        roi_gray = gray[y1:y2, x1:x2]
+        overlay = cv2.cvtColor(roi_gray, cv2.COLOR_GRAY2BGR)
         color = (0, 200, 0) if status is BranchStatus.PASS else (0, 0, 255)
-        cv2.rectangle(overlay, (x1, y1), (x2 - 1, y2 - 1), color, 4)
-        centre_x = (x1 + x2) // 2
+        cv2.rectangle(overlay, (0, 0), (overlay.shape[1] - 1, overlay.shape[0] - 1), color, 2)
+        centre_x = overlay.shape[1] // 2
         active_rows = np.flatnonzero(metrics.mask)
-        overlay[y1 + active_rows, max(x1, centre_x - 2) : min(x2, centre_x + 3)] = color
+        overlay[active_rows, max(0, centre_x - 2) : min(overlay.shape[1], centre_x + 3)] = color
         if decision == "OK":
             label = "原灰度光痕存在且连续"
         elif decision == "NG_NO_STREAK":
@@ -278,8 +306,11 @@ class EightViewRawProfileBrightStreakPredictor:
             label = "原灰度光痕存在但不连续"
         reason = (
             f"{label}；覆盖率 {metrics.coverage_ratio:.3f}，"
+            f"覆盖率阈值 {self._thresholds.min_presence_coverage_ratio:.3f}；"
             f"最长连续段 {metrics.longest_run_ratio:.3f}，"
-            f"最大断点 {metrics.max_gap_ratio:.3f}，断点数 {metrics.gap_count}"
+            f"最长连续段阈值 {self._thresholds.min_longest_run_ratio:.3f}；"
+            f"最大断点 {metrics.max_gap_ratio:.3f}（上限 {self._thresholds.max_gap_ratio:.3f}），"
+            f"断点数 {metrics.gap_count}（上限 {self._thresholds.max_gap_count}）"
         )
         return ModelOutput(
             status,
@@ -287,6 +318,21 @@ class EightViewRawProfileBrightStreakPredictor:
             self._thresholds.min_presence_coverage_ratio,
             reason,
             overlay,
+            details={
+                "evidence_type": "规则 ROI 证据",
+                "decision": decision,
+                "roi_xyxy": self._roi,
+                "row_count": int(len(metrics.mask)),
+                "coverage_ratio": metrics.coverage_ratio,
+                "longest_run_ratio": metrics.longest_run_ratio,
+                "max_gap_ratio": metrics.max_gap_ratio,
+                "gap_count": metrics.gap_count,
+                "min_row_score": self._thresholds.min_row_score,
+                "min_presence_coverage_ratio": self._thresholds.min_presence_coverage_ratio,
+                "min_longest_run_ratio": self._thresholds.min_longest_run_ratio,
+                "allowed_max_gap_ratio": self._thresholds.max_gap_ratio,
+                "allowed_max_gap_count": self._thresholds.max_gap_count,
+            },
         )
 
 
@@ -357,6 +403,7 @@ class EightViewYoloPredictor:
             raise ValueError("YOLO检测框字段长度不一致")
         overlay = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR) if image.ndim == 2 else image.copy()
         final_count = 0
+        box_details: list[dict[str, Any]] = []
         for xyxy, confidence, class_id in zip(coordinates, confidences, classes, strict=True):
             if int(class_id) != 0:
                 raise ValueError("YOLO输出了非defect类别")
@@ -375,13 +422,34 @@ class EightViewYoloPredictor:
                 2,
                 cv2.LINE_AA,
             )
+            box_details.append(
+                {
+                    "xyxy": (x1, y1, x2, y2),
+                    "confidence": float(confidence),
+                    "class_name": "defect",
+                    "is_final": final,
+                }
+            )
         score = max((float(value) for value in confidences), default=0.0)
         return ModelOutput(
             BranchStatus.NG if final_count else BranchStatus.PASS,
             score,
             self._final_threshold,
-            f"最终缺陷框 {final_count} 个，候选框 {len(confidences)} 个",
+            (
+                f"YOLO 真实检测框：最终缺陷框 {final_count} 个，候选框 {len(confidences)} 个；"
+                f"最高置信度 {score:.4f}，部署阈值 {self._final_threshold:.4f}，"
+                f"候选阈值 {self._candidate_conf:.4f}"
+            ),
             overlay,
+            details={
+                "evidence_type": "真实检测框",
+                "candidate_threshold": self._candidate_conf,
+                "deployment_threshold": self._final_threshold,
+                "threshold_exceedance": score - self._final_threshold,
+                "candidate_box_count": len(confidences),
+                "final_box_count": final_count,
+                "boxes": box_details,
+            },
         )
 
 
@@ -437,6 +505,8 @@ class EightViewEfficientAdPredictor:
         checkpoints: Mapping[str, Path],
         *,
         thresholds: Mapping[str, float],
+        base_thresholds: Mapping[str, float] | None = None,
+        threshold_margin: float = 0.0,
         predictor_factory: EfficientPredictorFactory = _AnomalibEfficientPredictor,
     ) -> None:
         if tuple(checkpoints) != VIEW_ORDER:
@@ -452,6 +522,25 @@ class EightViewEfficientAdPredictor:
         except ValueError as error:
             raise ValueError("EfficientAD阈值必须是有限数值") from error
         self._thresholds = MappingProxyType(threshold_values)
+        base_input = thresholds if base_thresholds is None else base_thresholds
+        if tuple(base_input) != VIEW_ORDER:
+            raise ValueError("EfficientAD基础阈值必须按标准顺序覆盖八个视角")
+        try:
+            _base_views, base_values = _validated_thresholds(base_input)
+        except ValueError as error:
+            raise ValueError("EfficientAD基础阈值必须是有限数值") from error
+        if isinstance(threshold_margin, bool) or not isinstance(threshold_margin, Real):
+            raise ValueError("EfficientAD阈值余量必须是有限非负数值")
+        margin = float(threshold_margin)
+        if not math.isfinite(margin) or margin < 0:
+            raise ValueError("EfficientAD阈值余量必须是有限非负数值")
+        if any(
+            not math.isclose(threshold_values[view], base_values[view] + margin, abs_tol=1e-12)
+            for view in VIEW_ORDER
+        ):
+            raise ValueError("EfficientAD基础阈值加余量必须等于部署阈值")
+        self._base_thresholds = MappingProxyType(base_values)
+        self._threshold_margin = margin
         predictors: dict[str, Callable[[np.ndarray], EfficientPrediction]] = {}
         for view in VIEW_ORDER:
             checkpoint = Path(checkpoints[view]).expanduser().resolve()
@@ -467,17 +556,37 @@ class EightViewEfficientAdPredictor:
         if not math.isfinite(score) or not np.isfinite(anomaly_map).all():
             raise ValueError("EfficientAD输出包含非有限数值")
         threshold = self._thresholds[view]
+        base_threshold = self._base_thresholds[view]
         heatmap = fixed_scale_heatmap(anomaly_map)
         base = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR) if image.ndim == 2 else image.copy()
         heatmap = cv2.resize(heatmap, (base.shape[1], base.shape[0]), interpolation=cv2.INTER_LINEAR)
         overlay = cv2.addWeighted(base, 0.6, heatmap, 0.4, 0.0)
+        hotspot_y, hotspot_x = np.unravel_index(int(np.argmax(anomaly_map)), anomaly_map.shape)
+        display_x = int(round(hotspot_x * max(0, base.shape[1] - 1) / max(1, anomaly_map.shape[1] - 1)))
+        display_y = int(round(hotspot_y * max(0, base.shape[0] - 1) / max(1, anomaly_map.shape[0] - 1)))
+        cv2.drawMarker(overlay, (display_x, display_y), (0, 0, 255), cv2.MARKER_CROSS, 13, 2)
         return ModelOutput(
             BranchStatus.NG if score >= threshold else BranchStatus.PASS,
             score,
             threshold,
-            f"EfficientAD异常分数 {score:.4f}，部署阈值 {threshold:.4f}",
+            (
+                f"EfficientAD异常分数 {score:.4f}，基础阈值 {base_threshold:.4f}，"
+                f"部署阈值 {threshold:.4f}，余量 {self._threshold_margin:.4f}"
+            ),
             overlay,
             raw_pred_label=raw_pred_label,
+            details={
+                "evidence_type": "诊断热区",
+                "score": score,
+                "base_threshold": base_threshold,
+                "deployment_threshold": threshold,
+                "threshold_margin": self._threshold_margin,
+                "threshold_exceedance": score - threshold,
+                "hotspot_x": int(hotspot_x),
+                "hotspot_y": int(hotspot_y),
+                "hotspot_value": float(anomaly_map[hotspot_y, hotspot_x]),
+                "raw_pred_label": raw_pred_label,
+            },
         )
 
 
@@ -565,6 +674,7 @@ class EightViewModelSuite:
                 reason=output.reason,
                 overlay=output.overlay,
                 raw_pred_label=output.raw_pred_label,
+                details=output.details,
             )
         except Exception as error:
             return DemoBranchResult(
@@ -576,6 +686,7 @@ class EightViewModelSuite:
                 elapsed_ms=(perf_counter() - started) * 1000.0,
                 reason=f"{branch.value}推理失败：{error}",
                 overlay=None,
+                details={"evidence_type": "不可用", "error": str(error)},
             )
 
 
@@ -595,6 +706,8 @@ def build_model_suite(config: EightViewDemoConfig) -> EightViewModelSuite:
     efficientad = EightViewEfficientAdPredictor(
         config.efficientad_checkpoints,
         thresholds=config.efficientad_thresholds,
+        base_thresholds=config.efficientad_base_thresholds,
+        threshold_margin=config.efficientad_threshold_margin,
     )
     return EightViewModelSuite(
         rois=load_part_rois(config.roi_config),

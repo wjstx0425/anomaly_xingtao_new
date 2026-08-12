@@ -28,6 +28,31 @@ class _HdrRuntimeConfig:
     capture_interval: float
 
 
+@dataclass(frozen=True, slots=True)
+class HdrSourceImages:
+    """Owned source frames retained for one semantic view of an HDR capture."""
+
+    short_image: np.ndarray
+    long_image: np.ndarray
+    fused_image: np.ndarray
+    fused_clip_pct: float
+    attempt: int
+    source_kind: str = "hdr_pair"
+
+    def __post_init__(self) -> None:
+        if self.source_kind not in {"hdr_pair", "fused_only"}:
+            raise ValueError("source_kind must be hdr_pair or fused_only")
+        if not isinstance(self.attempt, int) or self.attempt <= 0:
+            raise ValueError("attempt must be a positive integer")
+        for name in ("short_image", "long_image", "fused_image"):
+            image = getattr(self, name)
+            if not isinstance(image, np.ndarray) or image.dtype != np.uint8 or image.ndim not in {2, 3} or image.size == 0:
+                raise ValueError(f"{name} must be a non-empty uint8 grayscale/BGR image")
+            owned = image.copy()
+            owned.flags.writeable = False
+            object.__setattr__(self, name, owned)
+
+
 def _runtime_config(profile: BmwCaptureProfile) -> _HdrRuntimeConfig:
     hdr = profile.hdr
     return _HdrRuntimeConfig(
@@ -55,6 +80,7 @@ class FourCameraHdrSession:
         self._camera_context: Any = None
         self._handles: Any = None
         self._pacer: Any = None
+        self.last_sources: Mapping[str, HdrSourceImages] = MappingProxyType({})
 
     def __enter__(self) -> FourCameraHdrSession:
         from capture_data.collect_multicamera_dataset import GroupedTriggerPacer, HikvisionAdapter, open_cameras
@@ -90,15 +116,26 @@ class FourCameraHdrSession:
         if len(results) != 4:
             raise RuntimeError(f"HDR采集应返回4张融合图，实际为{len(results)}")
         images: dict[str, np.ndarray] = {}
+        sources: dict[str, HdrSourceImages] = {}
         for result in results:
             if result.camera_slot < 0 or result.camera_slot >= len(self.profile.slots):
                 raise RuntimeError(f"HDR返回未知相机槽位：{result.camera_slot}")
             slot = self.profile.slots[result.camera_slot]
             view = slot.front_view if round_id == "front" else slot.back_view
             images[view] = result.fused_image.copy()
+            sources[view] = HdrSourceImages(
+                short_image=result.short_image,
+                long_image=result.long_image,
+                fused_image=result.fused_image,
+                fused_clip_pct=result.fused_clip_pct,
+                attempt=result.attempt,
+            )
         expected = self.profile.front_views if round_id == "front" else self.profile.back_views
         if tuple(images) != expected:
             raise RuntimeError(f"HDR视角顺序不完整：{tuple(images)}")
+        cached = dict(self.last_sources)
+        cached.update(sources)
+        self.last_sources = MappingProxyType(cached)
         return MappingProxyType(images)
 
     def close(self) -> None:
@@ -117,4 +154,4 @@ class FourCameraHdrSession:
         return bool(context.__exit__(exc_type, exc, traceback))
 
 
-__all__ = ["FourCameraHdrSession"]
+__all__ = ["FourCameraHdrSession", "HdrSourceImages"]

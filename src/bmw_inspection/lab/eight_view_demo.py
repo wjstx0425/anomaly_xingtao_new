@@ -59,6 +59,7 @@ class DemoBranchResult:
     reason: str
     overlay: np.ndarray | None
     raw_pred_label: bool | None = None
+    details: Mapping[str, Any] = MappingProxyType({})
 
     def __post_init__(self) -> None:
         if self.view_id not in VIEW_ORDER:
@@ -75,6 +76,7 @@ class DemoBranchResult:
             raise ValueError("reason must not be empty")
         if self.raw_pred_label is not None and not isinstance(self.raw_pred_label, bool):
             raise TypeError("raw_pred_label must be bool or None")
+        object.__setattr__(self, "details", _immutable_details(self.details))
         if self.overlay is not None:
             if not isinstance(self.overlay, np.ndarray) or self.overlay.size == 0:
                 raise TypeError("overlay must be a non-empty numpy image or None")
@@ -104,6 +106,12 @@ class EightViewInspection:
         if not math.isfinite(float(self.elapsed_ms)) or self.elapsed_ms < 0:
             raise ValueError("elapsed_ms must be finite and non-negative")
 
+    def actionable_results(self) -> tuple[DemoBranchResult, ...]:
+        """Return NG and ERROR evidence in the model execution order."""
+        return tuple(
+            row for row in self.results if row.status in {BranchStatus.NG, BranchStatus.ERROR}
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class EightViewDemoConfig:
@@ -119,6 +127,8 @@ class EightViewDemoConfig:
     template_models: Mapping[str, Path]
     efficientad_checkpoints: Mapping[str, Path]
     efficientad_thresholds: Mapping[str, float]
+    efficientad_base_thresholds: Mapping[str, float]
+    efficientad_threshold_margin: float
     efficientad_threshold_source_csv: str
     efficientad_threshold_source_csv_sha256: str
     bright_streak_engine: str
@@ -133,6 +143,30 @@ class EightViewDemoConfig:
         object.__setattr__(self, "template_models", MappingProxyType(dict(self.template_models)))
         object.__setattr__(self, "efficientad_checkpoints", MappingProxyType(dict(self.efficientad_checkpoints)))
         object.__setattr__(self, "efficientad_thresholds", MappingProxyType(dict(self.efficientad_thresholds)))
+        object.__setattr__(
+            self,
+            "efficientad_base_thresholds",
+            MappingProxyType(dict(self.efficientad_base_thresholds)),
+        )
+
+
+def _immutable_value(value: Any) -> Any:
+    """Recursively own structured evidence while keeping it JSON-shaped."""
+    if value is None or isinstance(value, (str, bool, int, float)):
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ValueError("details must not contain non-finite values")
+        return value
+    if isinstance(value, Mapping):
+        return MappingProxyType({str(key): _immutable_value(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_immutable_value(item) for item in value)
+    raise TypeError(f"details contains unsupported value: {type(value).__name__}")
+
+
+def _immutable_details(details: Mapping[str, Any]) -> Mapping[str, Any]:
+    if not isinstance(details, Mapping):
+        raise TypeError("details must be a mapping")
+    return MappingProxyType({str(key): _immutable_value(value) for key, value in details.items()})
 
 
 def fuse_demo_status(results: tuple[DemoBranchResult, ...]) -> DemoFinalStatus:
@@ -240,7 +274,7 @@ def _sha256(path: Path) -> str:
 
 def _load_efficientad_thresholds(
     path: Path,
-) -> tuple[Mapping[str, float], str, str, Mapping[str, str]]:
+) -> tuple[Mapping[str, float], Mapping[str, float], float, str, str, Mapping[str, str]]:
     """Load the Task 3 threshold contract and reject unsafe Demo assets."""
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -273,6 +307,32 @@ def _load_efficientad_thresholds(
         raise ValueError("EfficientAD整件阈值必须是有限数值") from error
     if views != VIEW_ORDER:
         raise ValueError("EfficientAD整件阈值资产必须按标准顺序覆盖八个视角")
+    base_payload = payload.get("base_thresholds")
+    margin_payload = payload.get("threshold_margin")
+    if base_payload is None and margin_payload is None:
+        base_parsed = dict(parsed)
+        margin = 0.0
+    else:
+        if not isinstance(base_payload, dict) or set(base_payload) != set(VIEW_ORDER):
+            raise ValueError("EfficientAD基础阈值必须按标准顺序覆盖八个视角")
+        if isinstance(margin_payload, bool) or not isinstance(margin_payload, Real):
+            raise ValueError("EfficientAD阈值余量必须是有限非负数值")
+        margin = float(margin_payload)
+        if not math.isfinite(margin) or margin < 0:
+            raise ValueError("EfficientAD阈值余量必须是有限非负数值")
+        try:
+            base_views, base_parsed = _validated_thresholds(
+                {view: base_payload[view] for view in VIEW_ORDER}
+            )
+        except ValueError as error:
+            raise ValueError("EfficientAD基础阈值必须是有限数值") from error
+        if base_views != VIEW_ORDER:
+            raise ValueError("EfficientAD基础阈值必须按标准顺序覆盖八个视角")
+        if any(
+            not math.isclose(parsed[view], base_parsed[view] + margin, abs_tol=1e-12)
+            for view in VIEW_ORDER
+        ):
+            raise ValueError("EfficientAD基础阈值加余量必须等于部署阈值")
     checkpoint_sha256 = payload.get("checkpoint_sha256_by_view")
     if (
         not isinstance(checkpoint_sha256, dict)
@@ -284,7 +344,14 @@ def _load_efficientad_thresholds(
     ):
         raise ValueError("EfficientAD阈值资产checkpoint_sha256_by_view必须按标准顺序覆盖八个视角")
     ordered_checkpoint_sha256 = {view: checkpoint_sha256[view] for view in VIEW_ORDER}
-    return MappingProxyType(parsed), source_csv, source_csv_sha256, MappingProxyType(ordered_checkpoint_sha256)
+    return (
+        MappingProxyType(parsed),
+        MappingProxyType(base_parsed),
+        margin,
+        source_csv,
+        source_csv_sha256,
+        MappingProxyType(ordered_checkpoint_sha256),
+    )
 
 
 def load_demo_config(path: Path) -> EightViewDemoConfig:
@@ -360,6 +427,8 @@ def load_demo_config(path: Path) -> EightViewDemoConfig:
         raise ValueError("EfficientAD threshold artifact SHA256不匹配")
     (
         efficientad_thresholds,
+        efficientad_base_thresholds,
+        efficientad_threshold_margin,
         efficientad_source_csv,
         efficientad_source_csv_sha256,
         expected_checkpoint_sha256,
@@ -395,6 +464,8 @@ def load_demo_config(path: Path) -> EightViewDemoConfig:
         template_models=template_models,
         efficientad_checkpoints=efficientad,
         efficientad_thresholds=efficientad_thresholds,
+        efficientad_base_thresholds=efficientad_base_thresholds,
+        efficientad_threshold_margin=efficientad_threshold_margin,
         efficientad_threshold_source_csv=efficientad_source_csv,
         efficientad_threshold_source_csv_sha256=efficientad_source_csv_sha256,
         bright_streak_engine=bright_streak_engine,

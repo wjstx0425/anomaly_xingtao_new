@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "demo_id": "bmw-eight-view-right-v3-ng-evidence-demo-v1",
+  "capture_config": "../capture/bmw_4cam_eight_view_hdr_v1.json",
+  "roi_config": "../rois/bmw_right_hdr_eight_view_v1.json",
+  "prepared_manifest": "../../../dataset/bmw_lab_prepared/bmw_right_batch_20260810_21_v1/manifests/dataset_manifest.csv",
+  "training_run": "../../../results/bmw_lab_one_click/bmw_right_batch_20260810_21_v3_ng_evidence_demo_v1",
+  "result_root": "../../../results/bmw_eight_view_demo_v3_ng_evidence_v1",
+  "bright_streak": {
+    "engine": "raw_profile_v2",
+    "config": "../../../results/bmw_lab_one_click/bmw_right_batch_20260810_21_bright_v2_roi_corrected/report.json",
+    "config_sha256": "24250c00b8518e3c886673815b696f0a4b6cfd5ffdb0fb1dc7d2fd8a5799268d"
+  },
+  "efficientad": {
+    "threshold_artifact": "../../../results/bmw_lab_one_click/bmw_right_batch_20260810_21_v3_ng_evidence_demo_v1/efficientad_thresholds_deployment_v3.json",
+    "threshold_artifact_sha256": "1c7e9f9e0f1750aabba62846f816d0cd273f23047e2ce6a6100e3c43fde2417e"
+  },
+  "yolo": {
+    "candidate_conf": 0.1,
+    "final_threshold": 0.25,
+    "imgsz": 640
+  }
+}

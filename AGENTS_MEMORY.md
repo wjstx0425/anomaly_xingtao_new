@@ -1,5 +1,47 @@
 # AGENTS Memory
 
+## BMW v3 NG evidence laboratory Demo (2026-08-12)
+
+- The independent v3 profile is `configs/bmw/experiments/bmw_eight_view_demo_v3_ng_evidence.json`; it does not replace
+  the default Demo. Its immutable composition uses the 21:00 Template candidate, corrected `raw_profile_v2`
+  bright-streak report, unchanged morning YOLO, and the 21:00 EfficientAD-v2 checkpoints.
+- `pipeline/bmw_lab_prepare_v3_ng_evidence_demo.py` generates the no-overwrite composite run and a SHA-bound
+  EfficientAD deployment asset. The base per-view thresholds stay recorded, while v3 adds a fixed experimental
+  `threshold_margin=0.05`, producing deployment thresholds around `0.55`. This reduces false NG but has no independent
+  defect-validation evidence, so it remains a lab-only recall-risk experiment.
+- Every model result carries structured `details`. Template records similarity/risk, best translation and aligned mean
+  absolute difference; bright-streak records presence/continuity/gap metrics; YOLO records real defect boxes; EfficientAD
+  records base/deployment thresholds, margin, exceedance and anomaly hotspot. Template/EfficientAD heatmaps are
+  diagnostic localization, not classified defect boxes.
+- The Chinese 1600x900 experiment UI exposes short exposure, long exposure, fused HDR and selected evidence side by
+  side. `N/P` cycles only NG/ERROR rows; `1-8` selects views and `T/L/Y/E` selects branches. Full untruncated reasons and
+  threshold fields are shown in the right panel.
+- Live capture persistence writes physical short/long/HDR frames. Offline prepared samples cannot recover historical
+  source exposures and are explicitly saved as `source_kind=fused_only`, with the same fused image occupying the three
+  storage slots; the UI hides the unavailable short/long panels instead of presenting duplicates as real exposures.
+- Every `inspection.json` snapshots the capture-profile path/SHA, camera slot/serial/view mapping, configured HDR
+  exposures, gain and fusion parameters. These are marked `configured_not_camera_readback`; ISO is not applicable to
+  this industrial-camera contract, and aperture/focus/lamp output remain explicitly unrecorded physical controls.
+- The selected bright-streak ROI evidence is rotated 90 degrees clockwise in the four-panel comparison so the narrow
+  vertical ROI remains legible, matching the previously approved Demo convention.
+- Fresh focused verification is `66 passed`; an offline CPU smoke on `bmw_right_normal_group001_000001` completed all
+  25 checks with 21 PASS, 4 NG and 0 ERROR, wrote the evidence directory/JSON/index, and rendered the v3 dashboard.
+
+## BMW v3 HDR source and inspection persistence (2026-08-12)
+
+- `FourCameraHdrSession.capture_round()` still returns the existing fused-image mapping. It now also retains immutable
+  `last_sources` entries for every captured semantic view: short image, long image, fused HDR, clip percentage, and
+  HDR attempt. After front and back rounds the mapping follows canonical `VIEW_ORDER`.
+- `bmw_inspection.lab.eight_view_demo_persistence.persist_inspection(config, inspection, source_images)` publishes one
+  no-overwrite `<result_root>/<capture_id>` directory by staging then atomically renaming. It writes the three source
+  images per view, ROI images and their statistics/SHA-256, non-null model overlays, `inspection.json`, and appends
+  `inspection_index.csv` only after the directory is published.
+- Live callers pass `camera.last_sources`. Offline callers must use `fused_only_sources(images)`, which deliberately
+  records `source_kind="fused_only"` and stores the fused sample in all three image slots without presenting it as a
+  physical HDR short/long pair.
+- Persistence is covered by the current v3 focused verification gate; its earlier transient cross-task collection
+  concern was resolved when the UI and entrypoint integration landed.
+
 ## BMW right multisource models integrated into eight-view Demo (2026-08-11)
 
 - The active BMW Demo profile in this worktree now binds the right-hand fixed ROI

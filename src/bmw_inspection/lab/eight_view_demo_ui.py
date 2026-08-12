@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from enum import Enum
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
 import cv2
 import numpy as np
@@ -41,6 +42,7 @@ class EightViewUiState:
     selected_view: str = "front_left"
     selected_branch: DemoBranch = DemoBranch.BRIGHT_STREAK
     experiment_mode: bool = False
+    source_images: Mapping[str, Any] | None = None
 
 
 _WHITE = (255, 255, 255)
@@ -126,6 +128,122 @@ def preferred_selection(inspection: EightViewInspection) -> tuple[str, DemoBranc
     return "front_left", DemoBranch.BRIGHT_STREAK
 
 
+def step_actionable_selection(
+    inspection: EightViewInspection,
+    current_view: str,
+    current_branch: DemoBranch,
+    step: int,
+) -> tuple[str, DemoBranch]:
+    """Move through NG/ERROR evidence with deterministic circular navigation."""
+    if step == 0:
+        raise ValueError("step不能为0")
+    actionable = inspection.actionable_results()
+    if not actionable:
+        return current_view, current_branch
+    selected = next(
+        (
+            index
+            for index, row in enumerate(actionable)
+            if row.view_id == current_view and row.branch is current_branch
+        ),
+        -1 if step > 0 else 0,
+    )
+    row = actionable[(selected + (1 if step > 0 else -1)) % len(actionable)]
+    return row.view_id, row.branch
+
+
+def _source_image(state: EightViewUiState, kind: str) -> np.ndarray | None:
+    sources = state.source_images
+    if sources is None:
+        return None
+    by_view = sources.get(state.selected_view)
+    if isinstance(by_view, Mapping):
+        image = by_view.get(kind)
+    else:
+        by_kind = sources.get(kind)
+        image = by_kind.get(state.selected_view) if isinstance(by_kind, Mapping) else None
+        if image is None and by_view is not None:
+            attribute = {"short": "short_image", "long": "long_image", "hdr": "fused_image"}[kind]
+            image = getattr(by_view, attribute, None)
+    return image if isinstance(image, np.ndarray) and image.size else None
+
+
+def _source_kind(state: EightViewUiState) -> str | None:
+    sources = state.source_images
+    if sources is None:
+        return None
+    by_view = sources.get(state.selected_view)
+    if isinstance(by_view, Mapping):
+        value = by_view.get("source_kind")
+    else:
+        value = getattr(by_view, "source_kind", None)
+    return value if isinstance(value, str) else None
+
+
+def evidence_comparison_images(
+    state: EightViewUiState,
+) -> tuple[tuple[str, np.ndarray | None], ...]:
+    """Expose the exact four image panels used by the result dashboard."""
+    inspection = state.inspection
+    selected_row = None if inspection is None else next(
+        (
+            row
+            for row in inspection.results
+            if row.view_id == state.selected_view and row.branch is state.selected_branch
+        ),
+        None,
+    )
+    hdr = _source_image(state, "hdr")
+    if hdr is None and inspection is not None:
+        hdr = inspection.images[state.selected_view]
+    evidence_type = {
+        DemoBranch.YOLO: "真实检测框",
+        DemoBranch.BRIGHT_STREAK: "规则 ROI 证据",
+        DemoBranch.TEMPLATE: "诊断热区",
+        DemoBranch.EFFICIENTAD: "诊断热区",
+    }[state.selected_branch]
+    if selected_row is not None:
+        evidence_type = str(selected_row.details.get("evidence_type", evidence_type))
+    evidence = None if selected_row is None else selected_row.overlay
+    if evidence is not None and state.selected_branch is DemoBranch.BRIGHT_STREAK:
+        evidence = cv2.rotate(evidence, cv2.ROTATE_90_CLOCKWISE)
+    if _source_kind(state) == "fused_only":
+        return (
+            ("无短曝光原图", None),
+            ("无长曝光原图", None),
+            ("历史融合图", hdr),
+            (evidence_type, evidence),
+        )
+    return (
+        ("短曝光", _source_image(state, "short")),
+        ("长曝光", _source_image(state, "long")),
+        ("融合 HDR", hdr),
+        (evidence_type, evidence),
+    )
+
+
+def _wrapped_lines(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    *,
+    font: ImageFont.FreeTypeFont,
+    width: int,
+) -> list[str]:
+    """Wrap Chinese/Latin result text without truncating its reason."""
+    lines: list[str] = []
+    current = ""
+    for character in text:
+        candidate = current + character
+        if current and draw.textlength(candidate, font=font) > width:
+            lines.append(current)
+            current = character
+        else:
+            current = candidate
+    if current or not lines:
+        lines.append(current)
+    return lines
+
+
 def render_eight_view_dashboard(state: EightViewUiState) -> np.ndarray:
     """Render a deterministic 1600x900 presentation/experiment dashboard."""
     canvas = np.full((900, 1600, 3), _rgb_to_bgr(_SURFACE), dtype=np.uint8)
@@ -149,18 +267,16 @@ def render_eight_view_dashboard(state: EightViewUiState) -> np.ndarray:
         (row for row in results if row.view_id == state.selected_view and row.branch is state.selected_branch),
         None,
     )
-    evidence = None if selected_row is None else selected_row.overlay
-    if evidence is not None and state.selected_branch is DemoBranch.BRIGHT_STREAK:
-        evidence = cv2.rotate(evidence, cv2.ROTATE_90_CLOCKWISE)
-    cv2.rectangle(canvas, (24, 584), (648, 840), _rgb_to_bgr(_WHITE), -1)
-    if evidence is not None:
-        canvas[584:840, 24:648] = _fit_image(evidence, 624, 256)
-        evidence_border = _status(selected_row.status)[1] if selected_row is not None else _BLUE
-        cv2.rectangle(canvas, (24, 584), (647, 839), _rgb_to_bgr(evidence_border), 2)
-    else:
-        cv2.rectangle(canvas, (24, 584), (647, 839), _rgb_to_bgr(_GRID), 1)
-    cv2.rectangle(canvas, (674, 584), (1034, 840), _rgb_to_bgr(_WHITE), -1)
-    cv2.rectangle(canvas, (674, 584), (1034, 840), _rgb_to_bgr(_GRID), 1)
+    comparison = evidence_comparison_images(state)
+    panel_rectangles: list[tuple[str, np.ndarray | None, int]] = []
+    for index, (label, panel_image) in enumerate(comparison):
+        x = 24 + index * 255
+        panel_rectangles.append((label, panel_image, x))
+        cv2.rectangle(canvas, (x, 610), (x + 230, 840), _rgb_to_bgr(_WHITE), -1)
+        if panel_image is not None:
+            canvas[610:840, x : x + 230] = _fit_image(panel_image, 230, 230)
+        border_color = _status(selected_row.status)[1] if index == 3 and selected_row is not None else _GRID
+        cv2.rectangle(canvas, (x, 610), (x + 229, 839), _rgb_to_bgr(border_color), 2 if index == 3 else 1)
 
     if state.phase is DemoUiPhase.RESULT and state.inspection is not None:
         final = state.inspection.final_status
@@ -215,43 +331,68 @@ def render_eight_view_dashboard(state: EightViewUiState) -> np.ndarray:
         draw.text((x + 16, y + 56), label, font=_demo_font(25, "bold"), fill=branch_color)
     draw.text(
         (24, 548),
-        f"证据放大：{_VIEW_LABELS[state.selected_view]} · {_BRANCH_LABELS[state.selected_branch]}",
+        f"证据对比：{_VIEW_LABELS[state.selected_view]} · {_BRANCH_LABELS[state.selected_branch]}",
         font=_demo_font(20, "bold"),
         fill=_INK,
     )
-    if evidence is None:
-        draw.text((336, 712), "当前项目暂无证据", font=_demo_font(21), fill=_MUTED, anchor="mm")
-    draw.text((694, 602), "检测信息", font=_demo_font(23, "bold"), fill=_INK)
-    detail_rows = [
-        ("视角", _VIEW_LABELS[state.selected_view]),
-        ("检测项目", _BRANCH_LABELS[state.selected_branch]),
-        ("结果", "未执行" if selected_row is None else _status(selected_row.status)[0]),
-    ]
-    if state.experiment_mode:
-        detail_rows.extend(
-            [
-                ("分数", "不可用" if selected_row is None or selected_row.score is None else f"{selected_row.score:.6g}"),
-                ("阈值", "不可用" if selected_row is None or selected_row.threshold is None else f"{selected_row.threshold:.6g}"),
-                ("耗时", "不可用" if selected_row is None else f"{selected_row.elapsed_ms:.1f} 毫秒"),
-            ]
-        )
-    elif selected_row is not None:
-        detail_rows.append(("说明", selected_row.reason[:18]))
-    for index, (label, value) in enumerate(detail_rows[:6]):
-        y = 650 + index * 29
-        draw.text((694, y), label, font=_demo_font(16), fill=_MUTED)
-        draw.text((790, y), value, font=_demo_font(16), fill=_INK)
+    for label, panel_image, x in panel_rectangles:
+        draw.text((x, 580), label, font=_demo_font(17, "bold"), fill=_INK)
+        if panel_image is None:
+            draw.text((x + 115, 725), "暂无图像", font=_demo_font(16), fill=_MUTED, anchor="mm")
     controls = "空格：拍摄/继续　R：重置　Q：退出"
     if state.experiment_mode:
-        controls += "\n1–8：视角　T/L/Y/E：证据"
+        controls += "\n1–8：视角　T/L/Y/E：证据\nN/P：下一条/上一条 NG/异常"
     for index, line in enumerate(controls.splitlines()):
-        draw.text((1084, 542 + index * 29), line, font=_demo_font(16), fill=_MUTED)
+        draw.text((1084, 520 + index * 26), line, font=_demo_font(15), fill=_MUTED)
+    if state.inspection is not None:
+        actionable = state.inspection.actionable_results()
+        current_index = next(
+            (
+                index
+                for index, row in enumerate(actionable)
+                if row.view_id == state.selected_view and row.branch is state.selected_branch
+            ),
+            None,
+        )
+        queue_text = "当前为手动选择" if current_index is None else f"NG/异常 {current_index + 1}/{len(actionable)}"
+        draw.text((1084, 602), queue_text, font=_demo_font(17, "bold"), fill=_RED if actionable else _GREEN)
+    detail_y = 630
+    detail_rows = [
+        ("视角", _VIEW_LABELS[state.selected_view]),
+        ("项目", _BRANCH_LABELS[state.selected_branch]),
+        ("结果", "未执行" if selected_row is None else _status(selected_row.status)[0]),
+    ]
+    if selected_row is not None:
+        base_threshold = selected_row.details.get("base_threshold")
+        deployment_threshold = selected_row.details.get("deployment_threshold", selected_row.threshold)
+        margin = selected_row.details.get("threshold_margin")
+        exceedance = selected_row.details.get("threshold_exceedance")
+        detail_rows.extend(
+            [
+                ("分数", "不可用" if selected_row.score is None else f"{selected_row.score:.6g}"),
+                ("基础阈值", "不可用" if base_threshold is None else f"{float(base_threshold):.6g}"),
+                ("部署阈值", "不可用" if deployment_threshold is None else f"{float(deployment_threshold):.6g}"),
+                ("阈值余量", "不可用" if margin is None else f"{float(margin):.6g}"),
+                ("超限量", "不可用" if exceedance is None else f"{float(exceedance):+.6g}"),
+            ]
+        )
+    for index, (label, value) in enumerate(detail_rows):
+        y = detail_y + index * 20
+        draw.text((1084, y), label, font=_demo_font(13), fill=_MUTED)
+        draw.text((1192, y), value, font=_demo_font(13), fill=_INK)
+    if selected_row is not None:
+        reason_y = detail_y + len(detail_rows) * 20 + 5
+        draw.text((1084, reason_y), "完整原因", font=_demo_font(13, "bold"), fill=_MUTED)
+        for index, line in enumerate(_wrapped_lines(draw, selected_row.reason, font=_demo_font(12), width=465)):
+            draw.text((1084, reason_y + 21 + index * 17), line, font=_demo_font(12), fill=_INK)
     return cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR)
 
 
 __all__ = [
     "DemoUiPhase",
     "EightViewUiState",
+    "evidence_comparison_images",
     "preferred_selection",
     "render_eight_view_dashboard",
+    "step_actionable_selection",
 ]

@@ -32,11 +32,16 @@ from bmw_inspection.lab.eight_view_demo import (  # noqa: E402
 )
 from bmw_inspection.lab.eight_view_demo_capture import FourCameraHdrSession  # noqa: E402
 from bmw_inspection.lab.eight_view_demo_models import EightViewModelSuite, build_model_suite  # noqa: E402
+from bmw_inspection.lab.eight_view_demo_persistence import (  # noqa: E402
+    fused_only_sources,
+    persist_inspection,
+)
 from bmw_inspection.lab.eight_view_demo_ui import (  # noqa: E402
     DemoUiPhase,
     EightViewUiState,
     preferred_selection,
     render_eight_view_dashboard,
+    step_actionable_selection,
 )
 
 
@@ -78,6 +83,20 @@ def _save_dashboard(path: Path, dashboard: np.ndarray) -> None:
         raise RuntimeError(f"无法保存界面截图：{target}")
 
 
+def _jsonable(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_jsonable(item) for item in value]
+    return value
+
+
+def _persist_result(config: object, inspection: object, source_images: Mapping[str, object] | None) -> None:
+    """Persist live HDR sources, or explicitly adapt an offline fused-only sample."""
+    sources = fused_only_sources(inspection.images) if source_images is None else source_images
+    persist_inspection(config, inspection, sources)
+
+
 def _summary(inspection: object) -> dict[str, object]:
     rows = inspection.results
     return {
@@ -97,6 +116,7 @@ def _summary(inspection: object) -> dict[str, object]:
                 "score": row.score,
                 "threshold": row.threshold,
                 "reason": row.reason,
+                "details": _jsonable(row.details),
             }
             for row in rows
             if row.status.value in {"NG", "ERROR"}
@@ -110,6 +130,7 @@ def _run_no_gui(
     models: EightViewModelSuite,
     offline: tuple[str, Mapping[str, np.ndarray]] | None,
 ) -> int:
+    source_images: Mapping[str, object] | None = None
     if offline is not None:
         capture_id, images = offline
     else:
@@ -118,14 +139,17 @@ def _run_no_gui(
             front = camera.capture_round("front")
             input("翻转同一零件并固定，按回车拍摄反面：")
             back = camera.capture_round("back")
+            source_images = camera.last_sources
         capture_id = datetime.now().strftime("bmw_demo_%Y%m%d_%H%M%S")
         images = _merge_rounds(front, back)
     inspection = models.inspect(images, capture_id=capture_id)
+    _persist_result(config, inspection, source_images)
     state = EightViewUiState(
         phase=DemoUiPhase.RESULT,
         message="检测完成",
         images=images,
         inspection=inspection,
+        source_images=fused_only_sources(images) if source_images is None else source_images,
         experiment_mode=args.experiment_mode,
     )
     selected_view, selected_branch = preferred_selection(inspection)
@@ -172,6 +196,15 @@ def _run_gui(
                     }[ord(chr(key).lower())]
                     state = replace(state, selected_branch=branch)
                     continue
+                if state.inspection is not None and key in {ord("n"), ord("N"), ord("p"), ord("P")}:
+                    selected_view, selected_branch = step_actionable_selection(
+                        state.inspection,
+                        state.selected_view,
+                        state.selected_branch,
+                        1 if key in {ord("n"), ord("N")} else -1,
+                    )
+                    state = replace(state, selected_view=selected_view, selected_branch=selected_branch)
+                    continue
                 if key != ord(" "):
                     continue
                 try:
@@ -196,6 +229,12 @@ def _run_gui(
                     cv2.imshow(title, render_eight_view_dashboard(state))
                     cv2.waitKey(1)
                     inspection = models.inspect(images, capture_id=capture_id)
+                    source_images = (
+                        fused_only_sources(images)
+                        if offline is not None
+                        else camera.last_sources
+                    )
+                    persist_inspection(config, inspection, source_images)
                     selected_view, selected_branch = preferred_selection(inspection)
                     state = replace(
                         state,
@@ -203,6 +242,7 @@ def _run_gui(
                         message="检测完成",
                         images=images,
                         inspection=inspection,
+                        source_images=source_images,
                         selected_view=selected_view,
                         selected_branch=selected_branch,
                     )
