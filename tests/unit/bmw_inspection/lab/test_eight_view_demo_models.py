@@ -643,6 +643,8 @@ def _tracked_report(tmp_path: Path) -> Path:
     metrics = artifact_root / "metrics.csv"
     replay = artifact_root / "replay_summary.json"
     profile = profiles / "profile_0001.npz"
+    manifest = tmp_path / "bright_streak.csv"
+    manifest.write_text("sample_id,label\nsynthetic,normal\n", encoding="utf-8")
     metrics.write_text("record_id,status\nsynthetic,OK\n", encoding="utf-8")
     replay.write_text('{"count":0,"outcomes":[]}', encoding="utf-8")
     np.savez_compressed(profile, path_x=np.zeros(613, dtype=np.int64))
@@ -659,7 +661,7 @@ def _tracked_report(tmp_path: Path) -> Path:
                 "fit_split": "calibration",
                 "final_test_used_for_fit": False,
                 "real_broken_samples": 0,
-                "manifest": str(tmp_path / "bright_streak.csv"),
+                "manifest": str(manifest),
                 "roi_xyxy": [0, 0, 81, 613],
                 "geometry": {
                     "candidate_width": 5,
@@ -687,8 +689,14 @@ def _tracked_report(tmp_path: Path) -> Path:
                 "identities": {
                     "algorithm_source_sha256": hashlib.sha256(algorithm_source.read_bytes()).hexdigest(),
                     "evaluator_source_sha256": hashlib.sha256(evaluator_source.read_bytes()).hexdigest(),
-                    "manifest_sha256": "a" * 64,
-                    "roi_config_sha256": "b" * 64,
+                    "manifest_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest(),
+                    "roi_config_sha256": hashlib.sha256(
+                        json.dumps(
+                            {"roi_xyxy": [0, 0, 81, 613]},
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ).encode()
+                    ).hexdigest(),
                 },
                 "geometry_selection": {},
                 "calibration_counts": {},
@@ -778,6 +786,15 @@ def test_tracked_profile_predictor_rejects_unknown_report_fields(tmp_path: Path)
     report.write_text(json.dumps(payload), encoding="utf-8")
 
     with pytest.raises(ValueError, match="report schema"):
+        EightViewTrackedProfileBrightStreakPredictor(report)
+
+
+def test_tracked_profile_predictor_rejects_changed_manifest_source(tmp_path: Path) -> None:
+    report = _tracked_report(tmp_path)
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    Path(payload["manifest"]).write_text("changed", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="source identity SHA256"):
         EightViewTrackedProfileBrightStreakPredictor(report)
 
 

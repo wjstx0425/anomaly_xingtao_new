@@ -456,11 +456,21 @@ class EightViewTrackedProfileBrightStreakPredictor:
             / "src/bmw_inspection/lab/bright_streak_tracked_profile.py",
             "evaluator_source_sha256": repository_root
             / "pipeline/bmw_lab_evaluate_bright_streak_tracked_profile.py",
+            "manifest_sha256": Path(payload["manifest"]).expanduser().resolve(),
         }
         if any(
             not source.is_file() or _file_sha256(source) != identities[field]
             for field, source in bound_sources.items()
         ):
+            raise ValueError("追踪光痕v3 source identity SHA256不匹配")
+        roi_identity = hashlib.sha256(
+            json.dumps(
+                {"roi_xyxy": roi},
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        if roi_identity != identities["roi_config_sha256"]:
             raise ValueError("追踪光痕v3 source identity SHA256不匹配")
         self._validate_artifact_inventory(path.parent, payload["artifact_identities"])
         self._roi = (x1, y1, x2, y2)
