@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import cv2
 import numpy as np
 
 from bmw_inspection.lab.eight_view_dataset import VIEW_ORDER
 from pipeline import bmw_lab_eight_view_demo as entrypoint
-from bmw_inspection.lab.eight_view_demo_ui import EightViewUiState
+from bmw_inspection.lab.eight_view_demo_ui import DemoUiPage, EightViewUiState
 
 
 def test_persist_result_adapts_offline_images_and_preserves_live_sources(monkeypatch) -> None:
@@ -52,3 +53,55 @@ def test_o_shortcut_handler_toggles_only_when_inspection_exists() -> None:
     assert toggled.inspection is inspection
     assert toggled.inspection.results == ("unchanged",)
     assert entrypoint._handle_trusted_ok_shortcut(toggled, ord("x")) is toggled
+
+
+def test_logical_canvas_coordinates_scale_default_and_resized_viewports() -> None:
+    assert entrypoint._logical_canvas_coordinates(720, 405, 1440, 810) == (800, 450)
+    assert entrypoint._logical_canvas_coordinates(1000, 500, 2000, 1000) == (800, 450)
+    assert entrypoint._logical_canvas_coordinates(-1, 0, 1440, 810) is None
+    assert entrypoint._logical_canvas_coordinates(1440, 0, 1440, 810) is None
+    assert entrypoint._logical_canvas_coordinates(0, 810, 1440, 810) is None
+    assert entrypoint._logical_canvas_coordinates(0, 0, 0, 810) is None
+
+
+def test_mouse_callback_only_queues_left_button_releases_and_consumption_applies_hit(monkeypatch) -> None:
+    releases: list[tuple[int, int]] = []
+
+    entrypoint._queue_left_button_release(cv2.EVENT_MOUSEMOVE, 10, 20, 0, releases)
+    entrypoint._queue_left_button_release(cv2.EVENT_LBUTTONUP, 720, 405, 0, releases)
+
+    assert releases == [(720, 405)]
+    selected = []
+    monkeypatch.setattr(entrypoint, "dashboard_hit_test", lambda x, y: (x, y))
+    monkeypatch.setattr(
+        entrypoint,
+        "apply_dashboard_click",
+        lambda state, hit: selected.append(hit) or state,
+    )
+    state = EightViewUiState()
+
+    assert entrypoint._consume_mouse_releases(state, releases, 1440, 810) is state
+    assert selected == [(800, 450)]
+    assert releases == []
+
+
+def test_page_key_handling_returns_detail_to_dashboard_and_preserves_dashboard_escape() -> None:
+    detail = EightViewUiState(page=DemoUiPage.DETAIL, experiment_mode=True)
+
+    returned, action = entrypoint._handle_gui_key(detail, 27)
+    dashboard, dashboard_action = entrypoint._handle_gui_key(EightViewUiState(), 27)
+    _, quit_action = entrypoint._handle_gui_key(detail, ord("q"))
+    reset, reset_action = entrypoint._handle_gui_key(detail, ord("r"))
+
+    assert returned.page is DemoUiPage.DASHBOARD
+    assert action is entrypoint._GuiAction.CONTINUE
+    for key in (ord(" "), ord("t"), ord("l"), ord("y"), ord("e"), ord("n"), ord("p"), ord("o"), *range(ord("1"), ord("8") + 1)):
+        ignored, ignored_action = entrypoint._handle_gui_key(detail, key)
+        assert ignored is detail
+        assert ignored_action is entrypoint._GuiAction.CONTINUE
+    assert dashboard.page is DemoUiPage.DASHBOARD
+    assert dashboard_action is entrypoint._GuiAction.CONTINUE
+    assert quit_action is entrypoint._GuiAction.EXIT
+    assert reset.page is DemoUiPage.DASHBOARD
+    assert reset.experiment_mode is True
+    assert reset_action is entrypoint._GuiAction.RESET

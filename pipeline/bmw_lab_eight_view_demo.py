@@ -10,6 +10,7 @@ from collections.abc import Mapping
 from contextlib import nullcontext
 from dataclasses import replace
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
 
 import cv2
@@ -38,12 +39,29 @@ from bmw_inspection.lab.eight_view_demo_persistence import (  # noqa: E402
 )
 from bmw_inspection.lab.eight_view_demo_ui import (  # noqa: E402
     DemoUiPhase,
+    DemoUiPage,
     EightViewUiState,
+    apply_dashboard_click,
+    dashboard_hit_test,
     preferred_selection,
     render_eight_view_dashboard,
+    render_eight_view_screen,
     step_actionable_selection,
     toggle_trusted_ok_mode,
 )
+
+
+_LOGICAL_CANVAS_WIDTH = 1600
+_LOGICAL_CANVAS_HEIGHT = 900
+
+
+class _GuiAction(str, Enum):
+    """Non-rendering commands consumed by the OpenCV loop."""
+
+    CONTINUE = "CONTINUE"
+    EXIT = "EXIT"
+    RESET = "RESET"
+    CAPTURE = "CAPTURE"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -103,6 +121,93 @@ def _handle_trusted_ok_shortcut(state: EightViewUiState, key: int) -> EightViewU
     if key not in {ord("o"), ord("O")}:
         return state
     return toggle_trusted_ok_mode(state)
+
+
+def _logical_canvas_coordinates(
+    x: int,
+    y: int,
+    display_width: int,
+    display_height: int,
+) -> tuple[int, int] | None:
+    """Convert one displayed-window click into the fixed 1600x900 canvas domain."""
+    if (
+        display_width <= 0
+        or display_height <= 0
+        or x < 0
+        or y < 0
+        or x >= display_width
+        or y >= display_height
+    ):
+        return None
+    return (
+        x * _LOGICAL_CANVAS_WIDTH // display_width,
+        y * _LOGICAL_CANVAS_HEIGHT // display_height,
+    )
+
+
+def _queue_left_button_release(
+    event: int,
+    x: int,
+    y: int,
+    _flags: int,
+    releases: list[tuple[int, int]],
+) -> None:
+    """Queue a mouse release; state transitions stay in the main OpenCV loop."""
+    if event == cv2.EVENT_LBUTTONUP:
+        releases.append((x, y))
+
+
+def _consume_mouse_releases(
+    state: EightViewUiState,
+    releases: list[tuple[int, int]],
+    display_width: int,
+    display_height: int,
+) -> EightViewUiState:
+    """Apply queued dashboard clicks using the current displayed image dimensions."""
+    while releases:
+        x, y = releases.pop(0)
+        logical = _logical_canvas_coordinates(x, y, display_width, display_height)
+        if logical is not None:
+            state = apply_dashboard_click(state, dashboard_hit_test(*logical))
+    return state
+
+
+def _handle_gui_key(state: EightViewUiState, key: int) -> tuple[EightViewUiState, _GuiAction]:
+    """Apply page-aware shortcuts without capturing or rerunning inspection work."""
+    if key in {ord("q"), ord("Q")}:
+        return state, _GuiAction.EXIT
+    if key in {ord("r"), ord("R")}:
+        return EightViewUiState(experiment_mode=state.experiment_mode), _GuiAction.RESET
+    if state.page is DemoUiPage.DETAIL:
+        if key == 27:
+            return replace(state, page=DemoUiPage.DASHBOARD), _GuiAction.CONTINUE
+        return state, _GuiAction.CONTINUE
+    if key == 27:
+        return state, _GuiAction.CONTINUE
+    toggled = _handle_trusted_ok_shortcut(state, key)
+    if toggled is not state:
+        return toggled, _GuiAction.CONTINUE
+    if state.experiment_mode and ord("1") <= key <= ord("8"):
+        return replace(state, selected_view=VIEW_ORDER[key - ord("1")]), _GuiAction.CONTINUE
+    if state.experiment_mode and key in {ord("t"), ord("T"), ord("l"), ord("L"), ord("y"), ord("Y"), ord("e"), ord("E")}:
+        branch = {
+            ord("t"): DemoBranch.TEMPLATE,
+            ord("l"): DemoBranch.BRIGHT_STREAK,
+            ord("y"): DemoBranch.YOLO,
+            ord("e"): DemoBranch.EFFICIENTAD,
+        }[ord(chr(key).lower())]
+        return replace(state, selected_branch=branch), _GuiAction.CONTINUE
+    if state.inspection is not None and key in {ord("n"), ord("N"), ord("p"), ord("P")}:
+        selected_view, selected_branch = step_actionable_selection(
+            state.inspection,
+            state.selected_view,
+            state.selected_branch,
+            1 if key in {ord("n"), ord("N")} else -1,
+        )
+        return replace(state, selected_view=selected_view, selected_branch=selected_branch), _GuiAction.CONTINUE
+    if key == ord(" "):
+        return state, _GuiAction.CAPTURE
+    return state, _GuiAction.CONTINUE
 
 
 def _summary(inspection: object) -> dict[str, object]:
@@ -177,47 +282,25 @@ def _run_gui(
     title = "BMW 零件八视图检测"
     cv2.namedWindow(title, cv2.WINDOW_NORMAL)
     cv2.resizeWindow(title, 1440, 810)
+    mouse_releases: list[tuple[int, int]] = []
+    cv2.setMouseCallback(title, _queue_left_button_release, mouse_releases)
     state = EightViewUiState(experiment_mode=args.experiment_mode)
     front: Mapping[str, np.ndarray] | None = None
     camera_context = nullcontext(None) if offline is not None else FourCameraHdrSession(config.capture_config)
     try:
         with camera_context as camera:
             while True:
-                dashboard = render_eight_view_dashboard(state)
-                cv2.imshow(title, dashboard)
+                _, _, display_width, display_height = cv2.getWindowImageRect(title)
+                state = _consume_mouse_releases(state, mouse_releases, display_width, display_height)
+                cv2.imshow(title, render_eight_view_screen(state))
                 key = cv2.waitKey(30) & 0xFF
-                if key in {ord("q"), ord("Q"), 27}:
+                state, action = _handle_gui_key(state, key)
+                if action is _GuiAction.EXIT:
                     return 0
-                if key in {ord("r"), ord("R")}:
+                if action is _GuiAction.RESET:
                     front = None
-                    state = EightViewUiState(experiment_mode=args.experiment_mode)
                     continue
-                toggled = _handle_trusted_ok_shortcut(state, key)
-                if toggled is not state:
-                    state = toggled
-                    continue
-                if args.experiment_mode and ord("1") <= key <= ord("8"):
-                    state = replace(state, selected_view=VIEW_ORDER[key - ord("1")])
-                    continue
-                if args.experiment_mode and key in {ord("t"), ord("T"), ord("l"), ord("L"), ord("y"), ord("Y"), ord("e"), ord("E")}:
-                    branch = {
-                        ord("t"): DemoBranch.TEMPLATE,
-                        ord("l"): DemoBranch.BRIGHT_STREAK,
-                        ord("y"): DemoBranch.YOLO,
-                        ord("e"): DemoBranch.EFFICIENTAD,
-                    }[ord(chr(key).lower())]
-                    state = replace(state, selected_branch=branch)
-                    continue
-                if state.inspection is not None and key in {ord("n"), ord("N"), ord("p"), ord("P")}:
-                    selected_view, selected_branch = step_actionable_selection(
-                        state.inspection,
-                        state.selected_view,
-                        state.selected_branch,
-                        1 if key in {ord("n"), ord("N")} else -1,
-                    )
-                    state = replace(state, selected_view=selected_view, selected_branch=selected_branch)
-                    continue
-                if key != ord(" "):
+                if action is not _GuiAction.CAPTURE:
                     continue
                 try:
                     if offline is not None:
@@ -238,7 +321,7 @@ def _run_gui(
                         images = _merge_rounds(front, back)
                         capture_id = datetime.now().strftime("bmw_demo_%Y%m%d_%H%M%S")
                     state = replace(state, phase=DemoUiPhase.PROCESSING, message="四类模型正在推理", images=images)
-                    cv2.imshow(title, render_eight_view_dashboard(state))
+                    cv2.imshow(title, render_eight_view_screen(state))
                     cv2.waitKey(1)
                     inspection = models.inspect(images, capture_id=capture_id)
                     source_images = (
