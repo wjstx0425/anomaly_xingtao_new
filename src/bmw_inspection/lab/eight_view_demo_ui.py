@@ -33,6 +33,32 @@ class DemoUiPhase(str, Enum):
     ERROR = "ERROR"
 
 
+class DemoUiPage(str, Enum):
+    """The in-window page currently shown to the operator."""
+
+    DASHBOARD = "DASHBOARD"
+    DETAIL = "DETAIL"
+
+
+@dataclass(frozen=True, slots=True)
+class DashboardHit:
+    """One logical 1600x900 dashboard target, or no target when all fields are empty."""
+
+    branch: DemoBranch | None = None
+    view_id: str | None = None
+    evidence_index: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class EvidenceDetailImages:
+    """The truthful fixed-reference/current pair for one selected branch."""
+
+    left_label: str
+    left_image: np.ndarray | None
+    right_label: str
+    right_image: np.ndarray | None
+
+
 @dataclass(frozen=True, slots=True)
 class EightViewUiState:
     phase: DemoUiPhase = DemoUiPhase.IDLE
@@ -44,6 +70,7 @@ class EightViewUiState:
     experiment_mode: bool = False
     source_images: Mapping[str, Any] | None = None
     trusted_ok_mode: bool = False
+    page: DemoUiPage = DemoUiPage.DASHBOARD
 
 
 _WHITE = (255, 255, 255)
@@ -73,6 +100,21 @@ _BRANCH_LABELS = {
     DemoBranch.YOLO: "缺陷检测",
     DemoBranch.EFFICIENTAD: "异常检测",
 }
+
+_VIEW_CARD_X = 24
+_VIEW_CARD_Y = 92
+_VIEW_CARD_WIDTH = 230
+_VIEW_CARD_HEIGHT = 182
+_VIEW_CARD_STEP_X = 255
+_VIEW_CARD_STEP_Y = 210
+_EVIDENCE_Y = 610
+_EVIDENCE_HEIGHT = 230
+_BRANCH_CARD_X = 1084
+_BRANCH_CARD_Y = 258
+_BRANCH_CARD_WIDTH = 232
+_BRANCH_CARD_HEIGHT = 108
+_BRANCH_CARD_STEP_X = 250
+_BRANCH_CARD_STEP_Y = 132
 
 
 @lru_cache(maxsize=2)
@@ -151,6 +193,75 @@ def step_actionable_selection(
     )
     row = actionable[(selected + (1 if step > 0 else -1)) % len(actionable)]
     return row.view_id, row.branch
+
+
+def dashboard_hit_test(x: int, y: int) -> DashboardHit | None:
+    """Map one logical canvas coordinate to a stable clickable dashboard target."""
+    for index, view in enumerate(VIEW_ORDER):
+        card_x = _VIEW_CARD_X + (index % 4) * _VIEW_CARD_STEP_X
+        card_y = _VIEW_CARD_Y + (index // 4) * _VIEW_CARD_STEP_Y
+        if card_x <= x <= card_x + _VIEW_CARD_WIDTH and card_y <= y <= card_y + _VIEW_CARD_HEIGHT:
+            return DashboardHit(view_id=view)
+    for index, branch in enumerate(DemoBranch):
+        card_x = _BRANCH_CARD_X + (index % 2) * _BRANCH_CARD_STEP_X
+        card_y = _BRANCH_CARD_Y + (index // 2) * _BRANCH_CARD_STEP_Y
+        if card_x <= x <= card_x + _BRANCH_CARD_WIDTH and card_y <= y <= card_y + _BRANCH_CARD_HEIGHT:
+            return DashboardHit(branch=branch)
+    for index in range(4):
+        panel_x = _VIEW_CARD_X + index * _VIEW_CARD_STEP_X
+        if panel_x <= x <= panel_x + _VIEW_CARD_WIDTH and _EVIDENCE_Y <= y <= _EVIDENCE_Y + _EVIDENCE_HEIGHT:
+            return DashboardHit(evidence_index=index)
+    return None
+
+
+def _selected_row(state: EightViewUiState) -> DemoBranchResult | None:
+    if state.inspection is None:
+        return None
+    return next(
+        (
+            row
+            for row in state.inspection.results
+            if row.view_id == state.selected_view and row.branch is state.selected_branch
+        ),
+        None,
+    )
+
+
+def select_branch(state: EightViewUiState, branch: DemoBranch) -> EightViewUiState:
+    """Select a branch, prioritising its first ERROR, then NG, then PASS evidence."""
+    if state.inspection is None:
+        return replace(state, selected_branch=branch)
+    branch_rows = tuple(row for row in state.inspection.results if row.branch is branch)
+    target = next(
+        (
+            row
+            for status in (BranchStatus.ERROR, BranchStatus.NG, BranchStatus.PASS)
+            for row in branch_rows
+            if row.status is status
+        ),
+        None,
+    )
+    if target is None:
+        return replace(state, selected_branch=branch)
+    return replace(state, selected_view=target.view_id, selected_branch=branch)
+
+
+def apply_dashboard_click(state: EightViewUiState, hit: DashboardHit | None) -> EightViewUiState:
+    """Apply one dashboard target without changing the immutable inspection result."""
+    if state.page is not DemoUiPage.DASHBOARD or hit is None:
+        return state
+    if hit.branch is not None:
+        return select_branch(state, hit.branch)
+    if hit.view_id is not None:
+        return replace(state, selected_view=hit.view_id)
+    if hit.evidence_index is None:
+        return state
+    panels = evidence_comparison_images(state)
+    if not 0 <= hit.evidence_index < len(panels) or panels[hit.evidence_index][1] is None:
+        return state
+    if _selected_row(state) is None:
+        return state
+    return replace(state, page=DemoUiPage.DETAIL)
 
 
 def _trusted_ok_available(state: EightViewUiState) -> bool:
@@ -293,6 +404,52 @@ def evidence_comparison_images(
     )
 
 
+def _bright_streak_reference_roi(match: Any, row: DemoBranchResult) -> np.ndarray | None:
+    roi = row.details.get("roi_xyxy")
+    if (
+        not isinstance(roi, tuple)
+        or len(roi) != 4
+        or any(isinstance(value, bool) or not isinstance(value, int) for value in roi)
+    ):
+        return None
+    x1, y1, x2, y2 = roi
+    reference = match.reference_full_image
+    if not (0 <= x1 < x2 <= reference.shape[1] and 0 <= y1 < y2 <= reference.shape[0]):
+        return None
+    return reference[y1:y2, x1:x2]
+
+
+def evidence_detail_images(state: EightViewUiState) -> EvidenceDetailImages:
+    """Build the approved-reference/current pair in the selected algorithm's native domain."""
+    row = _selected_row(state)
+    if row is None:
+        return EvidenceDetailImages("当前项目无检测结果", None, "当前检测证据", None)
+    current = row.overlay
+    if row.status is BranchStatus.PASS:
+        if state.selected_branch is DemoBranch.BRIGHT_STREAK and current is not None:
+            current = cv2.rotate(current, cv2.ROTATE_90_CLOCKWISE)
+        return EvidenceDetailImages("当前项目通过，无需NG参考", None, "当前检测证据", current)
+    mode = "full" if state.selected_branch is DemoBranch.BRIGHT_STREAK else "roi"
+    match = None if state.inspection is None else state.inspection.trusted_ok_by_comparison.get((state.selected_view, mode))
+    if match is None:
+        if state.selected_branch is DemoBranch.BRIGHT_STREAK and current is not None:
+            current = cv2.rotate(current, cv2.ROTATE_90_CLOCKWISE)
+        return EvidenceDetailImages("无可信OK参考", None, "当前检测证据", current)
+    if state.selected_branch is DemoBranch.TEMPLATE:
+        return EvidenceDetailImages("可信OK对齐参考", match.aligned_reference_roi, "当前差异证据", match.difference_overlay)
+    if state.selected_branch in {DemoBranch.YOLO, DemoBranch.EFFICIENTAD}:
+        return EvidenceDetailImages("可信OK参考ROI", match.reference_roi, "当前ROI覆盖图", current)
+    reference_roi = _bright_streak_reference_roi(match, row)
+    if reference_roi is None:
+        return EvidenceDetailImages("可信OK参考ROI不可用", None, "当前光痕ROI证据", None if current is None else cv2.rotate(current, cv2.ROTATE_90_CLOCKWISE))
+    return EvidenceDetailImages(
+        "可信OK光痕ROI",
+        cv2.rotate(reference_roi, cv2.ROTATE_90_CLOCKWISE),
+        "当前光痕ROI证据",
+        None if current is None else cv2.rotate(current, cv2.ROTATE_90_CLOCKWISE),
+    )
+
+
 def _wrapped_lines(
     draw: ImageDraw.ImageDraw,
     text: str,
@@ -326,13 +483,15 @@ def render_eight_view_dashboard(state: EightViewUiState) -> np.ndarray:
     results = () if state.inspection is None else state.inspection.results
     for index, view in enumerate(VIEW_ORDER):
         column, row_index = index % 4, index // 4
-        x, y = 24 + column * 255, 92 + row_index * 210
+        x = _VIEW_CARD_X + column * _VIEW_CARD_STEP_X
+        y = _VIEW_CARD_Y + row_index * _VIEW_CARD_STEP_Y
         cv2.rectangle(canvas, (x, y + 32), (x + 230, y + 182), _rgb_to_bgr(_WHITE), -1)
         view_rows = tuple(item for item in results if item.view_id == view)
-        border = _rgb_to_bgr(_GRID if not view_rows else _status(_aggregate(view_rows))[1])
+        selected = view == state.selected_view
+        border = _rgb_to_bgr(_BLUE if selected else (_GRID if not view_rows else _status(_aggregate(view_rows))[1]))
         if images is not None and view in images:
             canvas[y + 32 : y + 182, x : x + 230] = _fit_image(images[view], 230, 150)
-        cv2.rectangle(canvas, (x, y + 32), (x + 229, y + 181), border, 2)
+        cv2.rectangle(canvas, (x, y + 32), (x + 229, y + 181), border, 4 if selected else 2)
 
     selected_row = next(
         (row for row in results if row.view_id == state.selected_view and row.branch is state.selected_branch),
@@ -341,7 +500,7 @@ def render_eight_view_dashboard(state: EightViewUiState) -> np.ndarray:
     comparison = evidence_comparison_images(state)
     panel_rectangles: list[tuple[str, np.ndarray | None, int]] = []
     for index, (label, panel_image) in enumerate(comparison):
-        x = 24 + index * 255
+        x = _VIEW_CARD_X + index * _VIEW_CARD_STEP_X
         panel_rectangles.append((label, panel_image, x))
         cv2.rectangle(canvas, (x, 610), (x + 230, 840), _rgb_to_bgr(_WHITE), -1)
         if panel_image is not None:
@@ -368,14 +527,20 @@ def render_eight_view_dashboard(state: EightViewUiState) -> np.ndarray:
 
     branch_rectangles: list[tuple[DemoBranch, int, int]] = []
     for index, branch in enumerate(DemoBranch):
-        x = 1084 + (index % 2) * 250
-        y = 258 + (index // 2) * 132
+        x = _BRANCH_CARD_X + (index % 2) * _BRANCH_CARD_STEP_X
+        y = _BRANCH_CARD_Y + (index // 2) * _BRANCH_CARD_STEP_Y
         branch_rectangles.append((branch, x, y))
         branch_rows = tuple(row for row in results if row.branch is branch)
         branch_status = _aggregate(branch_rows)
         branch_color = _status(branch_status)[1]
         cv2.rectangle(canvas, (x, y), (x + 232, y + 108), _rgb_to_bgr(_WHITE), -1)
-        cv2.rectangle(canvas, (x, y), (x + 232, y + 108), _rgb_to_bgr(branch_color), 2)
+        cv2.rectangle(
+            canvas,
+            (x, y),
+            (x + _BRANCH_CARD_WIDTH, y + _BRANCH_CARD_HEIGHT),
+            _rgb_to_bgr(_BLUE if branch is state.selected_branch else branch_color),
+            4 if branch is state.selected_branch else 2,
+        )
 
     image = Image.fromarray(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB))
     draw = ImageDraw.Draw(image)
@@ -472,12 +637,70 @@ def render_eight_view_dashboard(state: EightViewUiState) -> np.ndarray:
     return cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR)
 
 
+def _detail_status_text(state: EightViewUiState) -> tuple[str, str, str, tuple[int, int, int]]:
+    row = _selected_row(state)
+    if row is None:
+        return (_BRANCH_LABELS[state.selected_branch], _VIEW_LABELS[state.selected_view], "未执行", _MUTED)
+    label, color = _status(row.status)
+    return (_BRANCH_LABELS[row.branch], _VIEW_LABELS[row.view_id], label, color)
+
+
+def render_eight_view_detail(state: EightViewUiState) -> np.ndarray:
+    """Render one 1600x900 fixed-reference detail page from immutable source arrays."""
+    canvas = np.full((900, 1600, 3), _rgb_to_bgr(_SURFACE), dtype=np.uint8)
+    detail = evidence_detail_images(state)
+    branch_label, view_label, status_label, status_color = _detail_status_text(state)
+    panels = ((24, detail.left_label, detail.left_image), (820, detail.right_label, detail.right_image))
+    for x, _label, panel_image in panels:
+        cv2.rectangle(canvas, (x, 158), (x + 756, 806), _rgb_to_bgr(_WHITE), -1)
+        if panel_image is not None:
+            canvas[158:806, x : x + 756] = _fit_image(panel_image, 756, 648)
+        cv2.rectangle(canvas, (x, 158), (x + 755, 805), _rgb_to_bgr(_BLUE), 3)
+    image = Image.fromarray(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB))
+    draw = ImageDraw.Draw(image)
+    draw.text((24, 18), "BMW 检测证据详情", font=_demo_font(31, "bold"), fill=_INK)
+    draw.text((24, 72), f"{branch_label} · {view_label}", font=_demo_font(23, "bold"), fill=_INK)
+    draw.text((560, 76), status_label, font=_demo_font(22, "bold"), fill=status_color)
+    for x, label, panel_image in panels:
+        draw.text((x, 118), label, font=_demo_font(20, "bold"), fill=_INK)
+        if panel_image is None:
+            draw.text((x + 378, 482), label, font=_demo_font(21), fill=_MUTED, anchor="mm")
+    row = _selected_row(state)
+    if row is not None:
+        score = "不可用" if row.score is None else f"{row.score:.6g}"
+        threshold = "不可用" if row.threshold is None else f"{row.threshold:.6g}"
+        draw.text((24, 830), f"分数：{score}　阈值：{threshold}　原因：{row.reason}", font=_demo_font(16), fill=_INK)
+    match = None
+    if state.inspection is not None:
+        mode = "full" if state.selected_branch is DemoBranch.BRIGHT_STREAK else "roi"
+        match = state.inspection.trusted_ok_by_comparison.get((state.selected_view, mode))
+    reference_text = "参考样本：无可信OK参考" if match is None else f"参考零件：{match.physical_part_id}　参考样本：{match.sample_id}"
+    draw.text((24, 862), f"{reference_text}　Esc：返回主页面　Q：退出　R：重置", font=_demo_font(15), fill=_MUTED)
+    return cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR)
+
+
+def render_eight_view_screen(state: EightViewUiState) -> np.ndarray:
+    """Dispatch the fixed-size window to dashboard or trusted-reference detail page."""
+    if state.page is DemoUiPage.DETAIL:
+        return render_eight_view_detail(state)
+    return render_eight_view_dashboard(state)
+
+
 __all__ = [
+    "DashboardHit",
+    "DemoUiPage",
     "DemoUiPhase",
+    "EvidenceDetailImages",
     "EightViewUiState",
+    "apply_dashboard_click",
+    "dashboard_hit_test",
+    "evidence_detail_images",
     "evidence_comparison_images",
     "preferred_selection",
+    "render_eight_view_detail",
     "render_eight_view_dashboard",
+    "render_eight_view_screen",
+    "select_branch",
     "step_actionable_selection",
     "toggle_trusted_ok_mode",
 ]

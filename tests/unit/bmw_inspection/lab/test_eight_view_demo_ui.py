@@ -13,13 +13,20 @@ from bmw_inspection.lab.eight_view_demo import (
     EightViewInspection,
 )
 from bmw_inspection.lab.eight_view_demo_ui import (
+    DashboardHit,
+    DemoUiPage,
     DemoUiPhase,
     EightViewUiState,
     _demo_font_path,
     _trusted_ok_available,
     _trusted_reference_details,
+    apply_dashboard_click,
+    dashboard_hit_test,
+    evidence_detail_images,
     evidence_comparison_images,
     render_eight_view_dashboard,
+    render_eight_view_screen,
+    select_branch,
     step_actionable_selection,
     toggle_trusted_ok_mode,
 )
@@ -369,3 +376,174 @@ def test_trusted_mode_selects_front_left_full_or_roi_match_by_branch() -> None:
     assert int(streak_panels[0][1].mean()) == 31
     assert template_panels[0][1].shape[:2] == (12, 16)
     assert streak_panels[0][1].shape[:2] == (24, 32)
+
+
+def test_algorithm_card_prioritizes_error_then_ng_and_falls_back_to_first_pass() -> None:
+    inspection = _inspection()
+    state = EightViewUiState(
+        phase=DemoUiPhase.RESULT,
+        inspection=inspection,
+        selected_view="front",
+        selected_branch=DemoBranch.TEMPLATE,
+    )
+
+    yolo = select_branch(state, DemoBranch.YOLO)
+    efficientad = select_branch(state, DemoBranch.EFFICIENTAD)
+    template = select_branch(state, DemoBranch.TEMPLATE)
+
+    assert (yolo.selected_view, yolo.selected_branch) == ("front_right", DemoBranch.YOLO)
+    assert (efficientad.selected_view, efficientad.selected_branch) == ("back_left", DemoBranch.EFFICIENTAD)
+    assert (template.selected_view, template.selected_branch) == ("front", DemoBranch.TEMPLATE)
+
+
+def test_dashboard_view_card_only_changes_view_and_empty_evidence_panel_is_noop() -> None:
+    state = EightViewUiState(
+        phase=DemoUiPhase.RESULT,
+        inspection=_inspection(),
+        selected_view="front_right",
+        selected_branch=DemoBranch.YOLO,
+    )
+
+    view_changed = apply_dashboard_click(state, dashboard_hit_test(300, 120))
+    unchanged = apply_dashboard_click(state, DashboardHit(evidence_index=0))
+
+    assert (view_changed.selected_view, view_changed.selected_branch) == ("front_left", DemoBranch.YOLO)
+    assert view_changed.page is DemoUiPage.DASHBOARD
+    assert unchanged is state
+
+
+def test_dashboard_hit_regions_and_selected_borders_are_stable() -> None:
+    state = EightViewUiState(
+        phase=DemoUiPhase.RESULT,
+        inspection=_inspection(),
+        selected_view="front_right",
+        selected_branch=DemoBranch.YOLO,
+    )
+
+    assert dashboard_hit_test(24, 92) == DashboardHit(view_id="front")
+    assert dashboard_hit_test(254, 274) == DashboardHit(view_id="front")
+    assert dashboard_hit_test(279, 92) == DashboardHit(view_id="front_left")
+    assert dashboard_hit_test(1084, 258) == DashboardHit(branch=DemoBranch.TEMPLATE)
+    assert dashboard_hit_test(1334, 366) == DashboardHit(branch=DemoBranch.BRIGHT_STREAK)
+    assert dashboard_hit_test(24, 610) == DashboardHit(evidence_index=0)
+    assert dashboard_hit_test(254, 840) == DashboardHit(evidence_index=0)
+    assert dashboard_hit_test(23, 610) is None
+
+    dashboard = render_eight_view_dashboard(state)
+    assert tuple(int(value) for value in dashboard[124, 534]) == (167, 47, 0)
+    assert tuple(int(value) for value in dashboard[390, 1084]) == (167, 47, 0)
+
+
+def test_evidence_detail_pairs_keep_algorithm_coordinate_domains() -> None:
+    base = _inspection()
+    template_row = DemoBranchResult(
+        DemoBranch.TEMPLATE,
+        "front",
+        BranchStatus.NG,
+        0.3,
+        0.2,
+        1.0,
+        "模板不通过",
+        np.full((10, 10, 3), 10, dtype=np.uint8),
+    )
+    template_match = _match(base, "front")
+    yolo_match = _match(base, "front_right")
+    efficientad_match = _match(base, "back_left")
+    reference_full = np.zeros((10, 20, 3), dtype=np.uint8)
+    reference_full[2:8, 4:12] = 90
+    streak_row = DemoBranchResult(
+        DemoBranch.BRIGHT_STREAK,
+        "front_left",
+        BranchStatus.NG,
+        0.0,
+        0.1,
+        1.0,
+        "光痕断续",
+        np.full((6, 8, 3), 120, dtype=np.uint8),
+        details={"roi_xyxy": (4, 2, 12, 8)},
+    )
+    full_match = _match(base, "front_left", "full")
+    full_match = TrustedOkMatch(
+        view_id=full_match.view_id,
+        comparison_mode=full_match.comparison_mode,
+        physical_part_id=full_match.physical_part_id,
+        sample_id=full_match.sample_id,
+        similarity=full_match.similarity,
+        shift_x=full_match.shift_x,
+        shift_y=full_match.shift_y,
+        current_full_image=full_match.current_full_image,
+        reference_full_image=reference_full,
+        current_roi=full_match.current_roi,
+        reference_roi=full_match.reference_roi,
+        aligned_reference_roi=full_match.aligned_reference_roi,
+        difference_overlay=full_match.difference_overlay,
+        source_sha256=full_match.source_sha256,
+        reference_full_sha256=full_match.reference_full_sha256,
+        reference_roi_sha256=full_match.reference_roi_sha256,
+        index_sha256=full_match.index_sha256,
+        whitelist_sha256=full_match.whitelist_sha256,
+    )
+    inspection = EightViewInspection(
+        base.capture_id,
+        base.images,
+        (template_row, *base.results[1:], streak_row),
+        base.final_status,
+        base.elapsed_ms,
+        roi_images=base.roi_images,
+        trusted_ok_by_comparison={
+            ("front", "roi"): template_match,
+            ("front_right", "roi"): yolo_match,
+            ("back_left", "roi"): efficientad_match,
+            ("front_left", "full"): full_match,
+        },
+    )
+
+    template = evidence_detail_images(EightViewUiState(
+        phase=DemoUiPhase.RESULT, inspection=inspection, selected_view="front", selected_branch=DemoBranch.TEMPLATE,
+    ))
+    yolo = evidence_detail_images(EightViewUiState(
+        phase=DemoUiPhase.RESULT, inspection=inspection, selected_view="front_right", selected_branch=DemoBranch.YOLO,
+    ))
+    efficientad = evidence_detail_images(EightViewUiState(
+        phase=DemoUiPhase.RESULT, inspection=inspection, selected_view="back_left", selected_branch=DemoBranch.EFFICIENTAD,
+    ))
+    streak = evidence_detail_images(EightViewUiState(
+        phase=DemoUiPhase.RESULT, inspection=inspection, selected_view="front_left", selected_branch=DemoBranch.BRIGHT_STREAK,
+    ))
+
+    assert int(template.left_image.mean()) == 70
+    assert int(template.right_image.mean()) == 80
+    assert int(yolo.left_image.mean()) == 60
+    assert int(yolo.right_image.mean()) == 20
+    assert int(efficientad.left_image.mean()) == 60
+    assert efficientad.right_image is None
+    assert streak.left_image.shape == (8, 6, 3)
+    assert np.all(streak.left_image == 90)
+    assert streak.right_image.shape == (8, 6, 3)
+    assert int(streak.right_image.mean()) == 120
+
+
+def test_detail_page_is_opened_only_for_valid_evidence_and_reports_pass_or_missing_reference() -> None:
+    base = _inspection()
+    pass_state = EightViewUiState(
+        phase=DemoUiPhase.RESULT,
+        inspection=base,
+        selected_view="front",
+        selected_branch=DemoBranch.TEMPLATE,
+    )
+    missing_reference = EightViewUiState(
+        phase=DemoUiPhase.RESULT,
+        inspection=base,
+        selected_view="front_right",
+        selected_branch=DemoBranch.YOLO,
+    )
+
+    opened = apply_dashboard_click(pass_state, DashboardHit(evidence_index=3))
+    missing = evidence_detail_images(missing_reference)
+
+    assert opened.page is DemoUiPage.DETAIL
+    assert opened.inspection is base
+    assert "无需NG参考" in evidence_detail_images(pass_state).left_label
+    assert missing.left_image is None
+    assert "无可信OK参考" in missing.left_label
+    assert render_eight_view_screen(opened).shape == (900, 1600, 3)
