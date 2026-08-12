@@ -588,3 +588,9 @@
 
 - The isolated candidate changed only the five selected templates per view and reused the morning numeric thresholds, 512x512 preprocessing, and max shift 12. It used only 21:00 `train/normal` rows and did not update the Demo.
 - Whole-part normal pass rate is 13/21 (61.9%) on calibration and 8/20 (40.0%) on final_test. The worst final-test false-reject views are `front_right` (8/20) and `front_secondary` (5/20). Therefore replacing afternoon templates with 21:00 templates alone does not solve Template instability; threshold/registration sensitivity remains the main follow-up.
+
+## BMW 21:00 Template-only live Demo (2026-08-12)
+
+- Use `pipeline/bmw_lab_prepare_template_21only_demo.py` to create the immutable composite run `results/bmw_lab_one_click/bmw_right_batch_20260810_21_template_demo_v1`. Its `template` link targets the 21:00 candidate; `efficientad` and `yolo` target the morning baseline run. Existing output is always rejected.
+- Start the single-variable live test with `configs/bmw/experiments/bmw_eight_view_demo_template_21only_v1.json`. It keeps the morning bright-streak config, EfficientAD threshold asset/checkpoints, YOLO parameters, ROI, and HDR capture config; only `demo_id`, `training_run`, and `result_root` differ from the default config.
+- The worktree virtual environment lacks `ultralytics`; run the worktree script through the root workspace uv environment. Offline normal `bmw_right_normal_group001_000001` loaded all models and completed 25 checks: 21 PASS and 4 NG. Candidate Template rejected `back` and `back_left`; unchanged morning EfficientAD also rejected those two views. Exit 1 is the business NG result, not a runtime failure.
