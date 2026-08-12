@@ -97,3 +97,19 @@
 - Backend initialization failures publish per-view error JSON and a REVIEW/incomplete generation instead of exiting without diagnostics.
 - Final related verification after implementation and safety review fixes: 267 tests passed; config assets and the 36 runtime/profile model groups aligned; compileall, full Ruff on new files, focused F/I on touched legacy files, JSON check, CLI help, and `git diff --check` passed.
 - Real CPU smoke used all six `group001` normal images from session `20260711_165347_078120` and wrote `/tmp/zs32-stage32-real-smoke`: 6 PatchCore rows, 6 YOLO rows, 12 calibration rows, 6 heatmaps, and 6 YOLO overlays with no runtime errors. It correctly remained REVIEW because no threshold/template/quality/registration/geometry bundle was supplied. Observed PatchCore scores were `0.39345, 0.49116, 0.38902, 0.32278, 0.30612, 0.10668`; YOLO retained low-confidence candidates in the first three views and explicit empty lists for the last three.
+## BMW tracked-profile bright-streak v3 Demo handoff (2026-08-12)
+
+- `configs/bmw/experiments/bmw_eight_view_demo_v3_ng_evidence.json` pins ignored report
+  `results/bmw_lab_one_click/bmw_right_batch_20260810_21_bright_v3_tracked_v8/report.json` at SHA-256
+  `6b43690af67702333646fa7a88a2a5053a0afae6d19cb343bf6d3abb193c17d4`; only its `bright_streak.engine`,
+  `.config`, and `.config_sha256` fields changed. The rollback engine is `raw_profile_v2` with corrected-v2 report SHA
+  `24250c00b8518e3c886673815b696f0a4b6cfd5ffdb0fb1dc7d2fd8a5799268d`.
+- Runtime geometry remains fixed to ROI `[1792,1180,1873,1793]`; selected candidate width is 5, max step 2, strong
+  threshold `136.85`, weak threshold `128.20`, minimum coverage `0.0848287113`, minimum run `0.0440456770`, maximum
+  gap `0.1060358891`, and maximum gap count 2. Strong/bridged/gap path colors are green/orange/red diagnostic
+  centreline evidence rather than segmentation truth.
+- Real saved HDR `bmw_demo_20260812_211302` is `PASS/OK`: coverage `0.1076672104`, longest run `0.0554649266`,
+  max gap `0.0032626427`, one gap, 20 bridged rows. The report records 8/8 no-streak NG, calibration normal false
+  rejects 0, final-test normal false rejects 1 (not worse than v2), and a 20-record replay with 19 truth-unknown rows.
+- Preserve the 25-row contract and exact equality of all 24 non-bright tuples across the engine switch. The report has
+  `real_broken_samples=0`; synthetic broken-path checks do not establish real broken-streak recall.

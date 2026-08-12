@@ -688,3 +688,27 @@
 - Trusted matches are keyed by `(view, comparison_mode)` rather than view alone. `front_left/full` belongs only to bright-streak evidence, while Template/YOLO/EfficientAD use `<view>/roi`; simultaneous front-left light-streak and appearance NG therefore retain two independent matches.
 - After an actionable inspection, `O` toggles trusted-reference comparison without rerunning models; `N`/`P` still navigate the immutable NG/ERROR rows. The lower area shows `现场NG`, `可信OK`, `对齐差异`, and current model evidence only for the selected NG/ERROR row. A selected PASS row explicitly says `当前项目通过，无需NG对比`; a missing ROI match uses the retained part ROI, never the full image as an ROI substitute.
 - Capture persistence writes each selected reference full image, ROI, aligned region, and difference under `references/<view>/<mode>/`, plus source/full/ROI/index/whitelist and saved-file hashes with `reference_is_diagnostic_only=true`. Legacy records with no reference diagnostics retain their former metadata shape.
+
+## BMW tracked-profile bright-streak v3 Demo integration (2026-08-12)
+
+- The isolated v3 Demo now selects `tracked_profile_v3` through exactly the three `bright_streak` fields in
+  `configs/bmw/experiments/bmw_eight_view_demo_v3_ng_evidence.json`. Its ignored immutable report is
+  `results/bmw_lab_one_click/bmw_right_batch_20260810_21_bright_v3_tracked_v8/report.json`, pinned by SHA-256
+  `6b43690af67702333646fa7a88a2a5053a0afae6d19cb343bf6d3abb193c17d4`. Roll back only those three fields to
+  engine `raw_profile_v2`, report `bmw_right_batch_20260810_21_bright_v2_roi_corrected/report.json`, SHA-256
+  `24250c00b8518e3c886673815b696f0a4b6cfd5ffdb0fb1dc7d2fd8a5799268d`.
+- The fixed full-image ROI remains `[1792,1180,1873,1793]` (`81x613`). Selected geometry is candidate width 5,
+  background width 10, gap 3, median window 5, max step 2, and step penalty 1.0. Thresholds are strong
+  `136.85`, weak `128.20`, minimum coverage `0.0848287113`, minimum longest run `0.0440456770`, maximum gap
+  `0.1060358891`, and maximum gap count 2.
+- The predictor validates the report identity, current algorithm/evaluator source hashes, and every metrics/replay/NPZ
+  inventory hash before use. Evidence colors the diagnostic tracked centreline green for strong rows, orange for weak
+  bridged rows, and red for gaps; this is path evidence, not defect segmentation truth.
+- The user-confirmed normal `bmw_demo_20260812_211302` replays as `OK` (`PASS`) with coverage `0.1076672104`,
+  longest run `0.0554649266`, maximum gap `0.0032626427`, one gap, and 20 bridged rows. The report retains all
+  8/8 labeled no-streak rows as NG; calibration normal false rejects are 0 and final-test normal false rejects remain
+  1, equal to v2. Recent replay has 20 records: one confirmed normal and 19 truth-unknown records.
+- Only the bright-streak result may change. The invariant remains exactly 25 rows total and exact equality of all 24
+  Template, YOLO, and EfficientAD `(branch, view, status, score, threshold, reason)` tuples. There are zero real
+  broken-but-present samples, so broken-path handling is synthetic regression evidence only and real broken-streak
+  recall remains unverified.

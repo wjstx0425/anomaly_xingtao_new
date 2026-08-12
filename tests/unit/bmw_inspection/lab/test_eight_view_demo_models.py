@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,7 +11,6 @@ from types import SimpleNamespace
 import cv2
 import numpy as np
 import pytest
-import hashlib
 
 from bmw_inspection.lab import eight_view_demo_models as demo_models
 from bmw_inspection.lab.eight_view_dataset import VIEW_ORDER
@@ -22,6 +23,7 @@ from bmw_inspection.lab.eight_view_demo_models import (
     EightViewTemplatePredictor,
     EightViewYoloPredictor,
     EightViewRawProfileBrightStreakPredictor,
+    EightViewTrackedProfileBrightStreakPredictor,
     ModelOutput,
     build_model_suite,
     load_part_rois,
@@ -632,6 +634,191 @@ def test_raw_profile_bright_streak_predictor_reports_missing_streak(tmp_path: Pa
 
     assert output.status is BranchStatus.NG
     assert "未检测到" in output.reason
+
+
+def _tracked_report(tmp_path: Path) -> Path:
+    artifact_root = tmp_path / "bmw_right_batch_20260810_21_bright_v3_tracked_v8"
+    profiles = artifact_root / "profiles"
+    profiles.mkdir(parents=True)
+    metrics = artifact_root / "metrics.csv"
+    replay = artifact_root / "replay_summary.json"
+    profile = profiles / "profile_0001.npz"
+    metrics.write_text("record_id,status\nsynthetic,OK\n", encoding="utf-8")
+    replay.write_text('{"count":0,"outcomes":[]}', encoding="utf-8")
+    np.savez_compressed(profile, path_x=np.zeros(613, dtype=np.int64))
+    root = Path(__file__).resolve().parents[4]
+    algorithm_source = root / "src/bmw_inspection/lab/bright_streak_tracked_profile.py"
+    evaluator_source = root / "pipeline/bmw_lab_evaluate_bright_streak_tracked_profile.py"
+    report = artifact_root / "report.json"
+    report.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "status": "complete",
+                "algorithm": "tracked_profile_v3",
+                "fit_split": "calibration",
+                "final_test_used_for_fit": False,
+                "real_broken_samples": 0,
+                "manifest": str(tmp_path / "bright_streak.csv"),
+                "roi_xyxy": [0, 0, 81, 613],
+                "geometry": {
+                    "candidate_width": 5,
+                    "background_width": 10,
+                    "background_gap": 3,
+                    "smooth_window": 5,
+                    "max_step": 2,
+                    "step_penalty": 1.0,
+                },
+                "thresholds": {
+                    "strong_row_score": 60.0,
+                    "weak_row_score": 30.0,
+                    "min_presence_coverage_ratio": 0.08,
+                    "min_longest_run_ratio": 0.04,
+                    "max_gap_ratio": 0.10,
+                    "max_gap_count": 2,
+                },
+                "artifact_identities": {
+                    "metrics_csv_sha256": hashlib.sha256(metrics.read_bytes()).hexdigest(),
+                    "replay_summary_sha256": hashlib.sha256(replay.read_bytes()).hexdigest(),
+                    "profile_npz_sha256": {
+                        profile.name: hashlib.sha256(profile.read_bytes()).hexdigest()
+                    },
+                },
+                "identities": {
+                    "algorithm_source_sha256": hashlib.sha256(algorithm_source.read_bytes()).hexdigest(),
+                    "evaluator_source_sha256": hashlib.sha256(evaluator_source.read_bytes()).hexdigest(),
+                    "manifest_sha256": "a" * 64,
+                    "roi_config_sha256": "b" * 64,
+                },
+                "geometry_selection": {},
+                "calibration_counts": {},
+                "accepted_live_normals": [],
+                "acceptance_gate": {"passed": True},
+                "comparison_to_v2": {},
+                "final_test": {},
+                "replay": {},
+                "cpu_per_image_ms": {},
+                "metrics_csv": str(metrics),
+                "profiles_dir": str(profiles),
+                "replay_summary_json": str(replay),
+                "report_json": str(report),
+            }
+        ),
+        encoding="utf-8",
+    )
+    return report
+
+
+def _tracked_roi(kind: str) -> np.ndarray:
+    image = np.full((613, 81), 20, dtype=np.uint8)
+    if kind == "absent":
+        return image
+    for row in range(613):
+        centre = 35 + row // 120
+        value = 180
+        if kind == "bridged" and 290 <= row < 295:
+            value = 70
+        if kind == "broken" and 280 <= row < 360:
+            continue
+        image[row, centre - 2 : centre + 3] = value
+    return image
+
+
+@pytest.mark.parametrize(
+    ("kind", "expected_status", "decision"),
+    [
+        ("diagonal", BranchStatus.PASS, "OK"),
+        ("absent", BranchStatus.NG, "NG_NO_STREAK"),
+        ("bridged", BranchStatus.PASS, "OK"),
+        ("broken", BranchStatus.NG, "NG_BROKEN"),
+    ],
+)
+def test_tracked_profile_predictor_exposes_chinese_metrics_and_colored_path(
+    tmp_path: Path,
+    kind: str,
+    expected_status: BranchStatus,
+    decision: str,
+) -> None:
+    predictor = EightViewTrackedProfileBrightStreakPredictor(_tracked_report(tmp_path))
+
+    output = predictor.predict(_tracked_roi(kind))
+
+    assert output.status is expected_status
+    assert output.details["decision"] == decision
+    assert output.overlay is not None
+    assert output.overlay.shape == (613, 81, 3)
+    for phrase in ("是否存在", "覆盖率", "最长连续段", "最大断点", "断点数", "强阈值", "弱阈值", "桥接行"):
+        assert phrase in output.reason
+    if kind == "bridged":
+        assert output.details["bridged_rows"] > 0
+    path_colors = {
+        tuple(pixel) for pixel in output.overlay.reshape(-1, 3)
+        if tuple(pixel) in {(0, 255, 0), (0, 200, 255), (0, 0, 255)}
+    }
+    if kind == "diagonal":
+        assert (0, 255, 0) in path_colors
+    elif kind == "bridged":
+        assert {(0, 255, 0), (0, 200, 255)}.issubset(path_colors)
+    elif kind == "broken":
+        assert {(0, 255, 0), (0, 0, 255)}.issubset(path_colors)
+
+
+def test_tracked_profile_predictor_rejects_incomplete_artifact_inventory(tmp_path: Path) -> None:
+    report = _tracked_report(tmp_path)
+    (report.parent / "profiles/profile_0001.npz").unlink()
+
+    with pytest.raises(ValueError, match="artifact inventory"):
+        EightViewTrackedProfileBrightStreakPredictor(report)
+
+
+def test_tracked_profile_predictor_rejects_unknown_report_fields(tmp_path: Path) -> None:
+    report = _tracked_report(tmp_path)
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    payload["unexpected"] = True
+    report.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="report schema"):
+        EightViewTrackedProfileBrightStreakPredictor(report)
+
+
+def test_bright_engine_change_preserves_every_field_of_all_24_non_bright_rows() -> None:
+    images = {view: np.full((20, 20, 3), index, dtype=np.uint8) for index, view in enumerate(VIEW_ORDER)}
+
+    def output(branch: str, view: str, _image: np.ndarray) -> ModelOutput:
+        index = list(VIEW_ORDER).index(view)
+        return ModelOutput(
+            BranchStatus.NG if index % 3 == 0 else BranchStatus.PASS,
+            index / 10,
+            0.55,
+            f"{branch}/{view}/fixed",
+            None,
+        )
+
+    def suite(bright_reason: str) -> EightViewModelSuite:
+        return EightViewModelSuite(
+            rois={view: (0, 0, 20, 20) for view in VIEW_ORDER},
+            template_predictor=lambda view, image: output("template", view, image),
+            bright_streak_predictor=lambda _image: ModelOutput(
+                BranchStatus.PASS, 0.8, 0.1, bright_reason, None
+            ),
+            yolo_predictor=lambda view, image: output("yolo", view, image),
+            efficientad_predictor=lambda view, image: output("efficientad", view, image),
+        )
+
+    old_rows = suite("raw_profile_v2").inspect(images, capture_id="same").results
+    new_rows = suite("tracked_profile_v3").inspect(images, capture_id="same").results
+    fields = lambda row: (
+        row.branch.value, row.view_id, row.status.value, row.score, row.threshold, row.reason
+    )
+    old_non_bright = [fields(row) for row in old_rows if row.branch.value != "bright_streak"]
+    new_non_bright = [fields(row) for row in new_rows if row.branch.value != "bright_streak"]
+
+    assert len(old_rows) == len(new_rows) == 25
+    assert len(old_non_bright) == len(new_non_bright) == 24
+    assert old_non_bright == new_non_bright
+    assert [fields(row) for row in old_rows if row.branch.value == "bright_streak"] != [
+        fields(row) for row in new_rows if row.branch.value == "bright_streak"
+    ]
 
 
 def test_efficientad_predictor_keeps_one_resident_predictor_per_view(tmp_path: Path) -> None:

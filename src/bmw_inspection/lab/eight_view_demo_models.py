@@ -341,6 +341,234 @@ class EightViewRawProfileBrightStreakPredictor:
         )
 
 
+class EightViewTrackedProfileBrightStreakPredictor:
+    """Apply one immutable tracked-profile v3 report to its fixed full-image ROI."""
+
+    _REPORT_FIELDS = {
+        "schema_version",
+        "status",
+        "algorithm",
+        "fit_split",
+        "final_test_used_for_fit",
+        "real_broken_samples",
+        "manifest",
+        "roi_xyxy",
+        "geometry",
+        "geometry_selection",
+        "thresholds",
+        "calibration_counts",
+        "accepted_live_normals",
+        "acceptance_gate",
+        "comparison_to_v2",
+        "final_test",
+        "replay",
+        "artifact_identities",
+        "cpu_per_image_ms",
+        "metrics_csv",
+        "profiles_dir",
+        "replay_summary_json",
+        "report_json",
+        "identities",
+    }
+    _GEOMETRY_FIELDS = {
+        "candidate_width",
+        "background_width",
+        "background_gap",
+        "smooth_window",
+        "max_step",
+        "step_penalty",
+    }
+    _THRESHOLD_FIELDS = {
+        "strong_row_score",
+        "weak_row_score",
+        "min_presence_coverage_ratio",
+        "min_longest_run_ratio",
+        "max_gap_ratio",
+        "max_gap_count",
+    }
+    _IDENTITY_FIELDS = {
+        "algorithm_source_sha256",
+        "evaluator_source_sha256",
+        "manifest_sha256",
+        "roi_config_sha256",
+    }
+    _ARTIFACT_FIELDS = {
+        "metrics_csv_sha256",
+        "replay_summary_sha256",
+        "profile_npz_sha256",
+    }
+
+    def __init__(self, report_path: Path) -> None:
+        from bmw_inspection.lab.bright_streak_tracked_profile import (
+            TrackedProfileGeometry,
+            TrackedProfileThresholds,
+        )
+
+        path = Path(report_path).expanduser().resolve()
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise ValueError(f"追踪光痕v3报告不可用：{path}: {error}") from error
+        if not isinstance(payload, dict) or set(payload) != self._REPORT_FIELDS:
+            raise ValueError("追踪光痕v3 report schema不正确")
+        if (
+            payload["schema_version"] != 1
+            or payload["status"] != "complete"
+            or payload["algorithm"] != "tracked_profile_v3"
+            or payload["fit_split"] != "calibration"
+            or payload["final_test_used_for_fit"] is not False
+            or payload["real_broken_samples"] != 0
+            or not isinstance(payload["acceptance_gate"], dict)
+            or payload["acceptance_gate"].get("passed") is not True
+        ):
+            raise ValueError("追踪光痕v3 report identity不正确")
+        roi = payload["roi_xyxy"]
+        if (
+            not isinstance(roi, list)
+            or len(roi) != 4
+            or any(isinstance(value, bool) or not isinstance(value, int) for value in roi)
+        ):
+            raise ValueError("追踪光痕v3 ROI必须包含四个整数")
+        x1, y1, x2, y2 = roi
+        if not (0 <= x1 < x2 and 0 <= y1 < y2) or (y2 - y1, x2 - x1) != (613, 81):
+            raise ValueError("追踪光痕v3 ROI必须是81x613")
+        geometry_values = payload["geometry"]
+        threshold_values = payload["thresholds"]
+        if not isinstance(geometry_values, dict) or set(geometry_values) != self._GEOMETRY_FIELDS:
+            raise ValueError("追踪光痕v3 geometry schema不正确")
+        if not isinstance(threshold_values, dict) or set(threshold_values) != self._THRESHOLD_FIELDS:
+            raise ValueError("追踪光痕v3 thresholds schema不正确")
+        try:
+            geometry = TrackedProfileGeometry(**geometry_values)
+            thresholds = TrackedProfileThresholds(**threshold_values)
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"追踪光痕v3参数不正确：{error}") from error
+        identities = payload["identities"]
+        if (
+            not isinstance(identities, dict)
+            or set(identities) != self._IDENTITY_FIELDS
+            or any(not self._is_sha256(value) for value in identities.values())
+        ):
+            raise ValueError("追踪光痕v3 source identity不正确")
+        repository_root = Path(__file__).resolve().parents[3]
+        bound_sources = {
+            "algorithm_source_sha256": repository_root
+            / "src/bmw_inspection/lab/bright_streak_tracked_profile.py",
+            "evaluator_source_sha256": repository_root
+            / "pipeline/bmw_lab_evaluate_bright_streak_tracked_profile.py",
+        }
+        if any(
+            not source.is_file() or _file_sha256(source) != identities[field]
+            for field, source in bound_sources.items()
+        ):
+            raise ValueError("追踪光痕v3 source identity SHA256不匹配")
+        self._validate_artifact_inventory(path.parent, payload["artifact_identities"])
+        self._roi = (x1, y1, x2, y2)
+        self._geometry = geometry
+        self._thresholds = thresholds
+
+    @staticmethod
+    def _is_sha256(value: object) -> bool:
+        return isinstance(value, str) and len(value) == 64 and all(
+            character in "0123456789abcdef" for character in value
+        )
+
+    @classmethod
+    def _validate_artifact_inventory(cls, root: Path, inventory: object) -> None:
+        if not isinstance(inventory, dict) or set(inventory) != cls._ARTIFACT_FIELDS:
+            raise ValueError("追踪光痕v3 artifact inventory不正确")
+        profiles = inventory["profile_npz_sha256"]
+        if (
+            not cls._is_sha256(inventory["metrics_csv_sha256"])
+            or not cls._is_sha256(inventory["replay_summary_sha256"])
+            or not isinstance(profiles, dict)
+            or not profiles
+            or any(
+                not isinstance(name, str)
+                or Path(name).name != name
+                or not name.endswith(".npz")
+                or not cls._is_sha256(digest)
+                for name, digest in profiles.items()
+            )
+        ):
+            raise ValueError("追踪光痕v3 artifact inventory不正确")
+        expected = {
+            root / "metrics.csv": inventory["metrics_csv_sha256"],
+            root / "replay_summary.json": inventory["replay_summary_sha256"],
+            **{root / "profiles" / name: digest for name, digest in profiles.items()},
+        }
+        if any(not file.is_file() or _file_sha256(file) != digest for file, digest in expected.items()):
+            raise ValueError("追踪光痕v3 artifact inventory SHA256不匹配")
+        actual_profiles = {path.name for path in (root / "profiles").glob("*.npz")}
+        if actual_profiles != set(profiles):
+            raise ValueError("追踪光痕v3 artifact inventory不完整")
+
+    def predict(self, image: np.ndarray) -> ModelOutput:
+        from bmw_inspection.lab.bright_streak_tracked_profile import (
+            analyze_tracked_profile,
+            classify_tracked_profile,
+        )
+
+        if not isinstance(image, np.ndarray) or image.dtype != np.uint8 or image.ndim not in {2, 3}:
+            raise ValueError("追踪光痕v3输入必须是uint8灰度或BGR图像")
+        x1, y1, x2, y2 = self._roi
+        height, width = image.shape[:2]
+        if x2 > width or y2 > height:
+            raise ValueError(f"追踪光痕v3 ROI超出输入图像{width}x{height}")
+        roi_gray = _gray(image)[y1:y2, x1:x2]
+        metrics = analyze_tracked_profile(roi_gray, self._geometry, self._thresholds)
+        decision = classify_tracked_profile(metrics, self._thresholds)
+        status = BranchStatus.PASS if decision == "OK" else BranchStatus.NG
+        overlay = cv2.cvtColor(roi_gray, cv2.COLOR_GRAY2BGR)
+        for row, column in enumerate(metrics.path_x):
+            if metrics.strong_mask[row]:
+                color = (0, 255, 0)
+            elif metrics.bridged_mask[row]:
+                color = (0, 200, 255)
+            else:
+                color = (0, 0, 255)
+            overlay[row, int(column)] = color
+        present = bool(metrics.strong_mask.any())
+        reason = (
+            f"追踪光痕判定 {decision}；是否存在 {'是' if present else '否'}；"
+            f"覆盖率 {metrics.coverage_ratio:.3f}（阈值 "
+            f"{self._thresholds.min_presence_coverage_ratio:.3f}）；"
+            f"最长连续段 {metrics.longest_run_ratio:.3f}（阈值 "
+            f"{self._thresholds.min_longest_run_ratio:.3f}）；"
+            f"最大断点 {metrics.max_gap_ratio:.3f}（上限 {self._thresholds.max_gap_ratio:.3f}）；"
+            f"断点数 {metrics.gap_count}（上限 {self._thresholds.max_gap_count}）；"
+            f"强阈值 {self._thresholds.strong_row_score:.3f}，"
+            f"弱阈值 {self._thresholds.weak_row_score:.3f}，"
+            f"桥接行 {int(np.count_nonzero(metrics.bridged_mask))}"
+        )
+        return ModelOutput(
+            status,
+            metrics.coverage_ratio,
+            self._thresholds.min_presence_coverage_ratio,
+            reason,
+            overlay,
+            details={
+                "evidence_type": "追踪中心线诊断证据",
+                "decision": decision,
+                "roi_xyxy": self._roi,
+                "presence": present,
+                "coverage_ratio": metrics.coverage_ratio,
+                "longest_run_px": metrics.longest_run_px,
+                "longest_run_ratio": metrics.longest_run_ratio,
+                "max_gap_px": metrics.max_gap_px,
+                "max_gap_ratio": metrics.max_gap_ratio,
+                "gap_count": metrics.gap_count,
+                "strong_row_score": self._thresholds.strong_row_score,
+                "weak_row_score": self._thresholds.weak_row_score,
+                "bridged_rows": int(np.count_nonzero(metrics.bridged_mask)),
+                "active_start_row": metrics.active_start_row,
+                "active_stop_row": metrics.active_stop_row,
+                "max_step": self._geometry.max_step,
+                "tracked_centerline_x": tuple(int(value) for value in metrics.path_x),
+            },
+        )
+
+
 def _default_yolo_factory(path: Path) -> Any:
     from ultralytics import YOLO
 
@@ -742,6 +970,8 @@ def build_model_suite(
     template = EightViewTemplatePredictor(config.template_models)
     if config.bright_streak_engine == "raw_profile_v2":
         bright_streak = EightViewRawProfileBrightStreakPredictor(config.bright_streak_config)
+    elif config.bright_streak_engine == "tracked_profile_v3":
+        bright_streak = EightViewTrackedProfileBrightStreakPredictor(config.bright_streak_config)
     else:
         bright_streak = EightViewBrightStreakPredictor(config.bright_streak_config)
     yolo = EightViewYoloPredictor(
@@ -806,6 +1036,7 @@ def _file_sha256(path: Path) -> str:
 __all__ = [
     "EightViewBrightStreakPredictor",
     "EightViewRawProfileBrightStreakPredictor",
+    "EightViewTrackedProfileBrightStreakPredictor",
     "EightViewEfficientAdPredictor",
     "EightViewModelSuite",
     "EightViewTemplatePredictor",

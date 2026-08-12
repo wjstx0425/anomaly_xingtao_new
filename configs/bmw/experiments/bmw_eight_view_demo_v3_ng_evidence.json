@@ -7,9 +7,9 @@
   "training_run": "../../../results/bmw_lab_one_click/bmw_right_batch_20260810_21_v3_ng_evidence_demo_v1",
   "result_root": "../../../results/bmw_eight_view_demo_v3_ng_evidence_v1",
   "bright_streak": {
-    "engine": "raw_profile_v2",
-    "config": "../../../results/bmw_lab_one_click/bmw_right_batch_20260810_21_bright_v2_roi_corrected/report.json",
-    "config_sha256": "24250c00b8518e3c886673815b696f0a4b6cfd5ffdb0fb1dc7d2fd8a5799268d"
+    "engine": "tracked_profile_v3",
+    "config": "../../../results/bmw_lab_one_click/bmw_right_batch_20260810_21_bright_v3_tracked_v8/report.json",
+    "config_sha256": "6b43690af67702333646fa7a88a2a5053a0afae6d19cb343bf6d3abb193c17d4"
   },
   "efficientad": {
     "threshold_artifact": "../../../results/bmw_lab_one_click/bmw_right_batch_20260810_21_v3_ng_evidence_demo_v1/efficientad_thresholds_deployment_v3.json",

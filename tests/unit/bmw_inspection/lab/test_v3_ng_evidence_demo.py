@@ -105,12 +105,21 @@ def test_prepare_v3_composes_requested_models_and_margin_threshold_asset(tmp_pat
         )
 
 
-def test_v3_config_pins_raw_profile_v2_and_generated_threshold_asset() -> None:
+def test_v3_config_pins_tracked_profile_v3_and_generated_threshold_asset() -> None:
     base = json.loads(BASE_CONFIG.read_text(encoding="utf-8"))
     candidate = json.loads(CONFIG.read_text(encoding="utf-8"))
 
     assert candidate["training_run"].endswith("bmw_right_batch_20260810_21_v3_ng_evidence_demo_v1")
-    assert candidate["bright_streak"]["engine"] == "raw_profile_v2"
+    assert candidate["bright_streak"] == {
+        "engine": "tracked_profile_v3",
+        "config": (
+            "../../../results/bmw_lab_one_click/"
+            "bmw_right_batch_20260810_21_bright_v3_tracked_v8/report.json"
+        ),
+        "config_sha256": "6b43690af67702333646fa7a88a2a5053a0afae6d19cb343bf6d3abb193c17d4",
+    }
+    report = (CONFIG.parent / candidate["bright_streak"]["config"]).resolve()
+    assert hashlib.sha256(report.read_bytes()).hexdigest() == candidate["bright_streak"]["config_sha256"]
     assert candidate["yolo"] == base["yolo"]
     assert candidate["trusted_ok_reference"] == {
         "index": (

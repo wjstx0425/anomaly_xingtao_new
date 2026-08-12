@@ -375,6 +375,60 @@ def test_demo_config_rejects_changed_raw_profile_v2_asset(tmp_path: Path) -> Non
         load_demo_config(config_path)
 
 
+def test_demo_config_loads_sha_bound_tracked_profile_v3_asset(tmp_path: Path) -> None:
+    _roi, _capture, _run, threshold_artifact = _write_demo_assets(tmp_path)
+    report = tmp_path / "tracked_profile_report.json"
+    report.write_text('{"algorithm":"tracked_profile_v3"}', encoding="utf-8")
+    payload = _demo_payload(tmp_path, threshold_artifact=threshold_artifact)
+    payload["bright_streak"] = {
+        "engine": "tracked_profile_v3",
+        "config": str(report),
+        "config_sha256": hashlib.sha256(report.read_bytes()).hexdigest(),
+    }
+    config_path = tmp_path / "demo.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    config = load_demo_config(config_path)
+
+    assert config.bright_streak_engine == "tracked_profile_v3"
+    assert config.bright_streak_config == report.resolve()
+
+
+def test_demo_config_rejects_changed_tracked_profile_v3_asset(tmp_path: Path) -> None:
+    _roi, _capture, _run, threshold_artifact = _write_demo_assets(tmp_path)
+    report = tmp_path / "tracked_profile_report.json"
+    report.write_text('{"algorithm":"tracked_profile_v3"}', encoding="utf-8")
+    payload = _demo_payload(tmp_path, threshold_artifact=threshold_artifact)
+    payload["bright_streak"] = {
+        "engine": "tracked_profile_v3",
+        "config": str(report),
+        "config_sha256": hashlib.sha256(report.read_bytes()).hexdigest(),
+    }
+    config_path = tmp_path / "demo.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+    report.write_text(report.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="光痕配置资产 SHA256"):
+        load_demo_config(config_path)
+
+
+def test_demo_config_rejects_unknown_sha_bound_bright_streak_engine(tmp_path: Path) -> None:
+    _roi, _capture, _run, threshold_artifact = _write_demo_assets(tmp_path)
+    report = tmp_path / "unknown.json"
+    report.write_text("{}", encoding="utf-8")
+    payload = _demo_payload(tmp_path, threshold_artifact=threshold_artifact)
+    payload["bright_streak"] = {
+        "engine": "unknown_v9",
+        "config": str(report),
+        "config_sha256": hashlib.sha256(report.read_bytes()).hexdigest(),
+    }
+    config_path = tmp_path / "demo.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="bright_streak.engine"):
+        load_demo_config(config_path)
+
+
 def test_demo_config_fails_closed_when_efficientad_checkpoint_changes(tmp_path: Path) -> None:
     _roi, _capture, run, threshold_artifact = _write_demo_assets(tmp_path)
     config_path = tmp_path / "demo.json"

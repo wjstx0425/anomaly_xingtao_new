@@ -421,8 +421,8 @@ def load_demo_config(path: Path) -> EightViewDemoConfig:
     elif set(bright_streak_config) == {"engine", "config", "config_sha256"}:
         bright_streak_engine = bright_streak_config["engine"]
         bright_streak_sha256 = bright_streak_config["config_sha256"]
-        if bright_streak_engine != "raw_profile_v2":
-            raise ValueError("bright_streak.engine只支持raw_profile_v2")
+        if bright_streak_engine not in {"raw_profile_v2", "tracked_profile_v3"}:
+            raise ValueError("bright_streak.engine只支持raw_profile_v2或tracked_profile_v3")
         if not isinstance(bright_streak_sha256, str) or re.fullmatch(r"[0-9a-f]{64}", bright_streak_sha256) is None:
             raise ValueError("光痕配置资产 SHA256格式不正确")
     else:
