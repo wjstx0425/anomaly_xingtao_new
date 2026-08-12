@@ -160,8 +160,10 @@ def _inspection_payload(
         for result in inspection.results
     }
     trusted_references = {
-        view: {
+        f"{view}/{mode}": {
             "reference_is_diagnostic_only": True,
+            "view_id": view,
+            "comparison_mode": mode,
             "physical_part_id": match.physical_part_id,
             "sample_id": match.sample_id,
             "similarity": match.similarity,
@@ -172,14 +174,14 @@ def _inspection_payload(
             "reference_full_sha256": match.reference_full_sha256,
             "reference_roi_sha256": match.reference_roi_sha256,
             "files": {
-                "full": f"references/{view}/full.png",
-                "roi": f"references/{view}/roi.png",
-                "aligned_roi": f"references/{view}/aligned_roi.png",
-                "difference": f"references/{view}/difference.png",
+                "full": f"references/{view}/{mode}/reference_full.png",
+                "roi": f"references/{view}/{mode}/reference_roi.png",
+                "aligned_roi": f"references/{view}/{mode}/aligned_region.png",
+                "difference": f"references/{view}/{mode}/difference.png",
             },
             "saved_sha256": {},
         }
-        for view, match in inspection.trusted_ok_by_view.items()
+        for (view, mode), match in inspection.trusted_ok_by_comparison.items()
     }
     payload: dict[str, Any] = {
         "schema_version": 1,
@@ -277,7 +279,8 @@ def persist_inspection(
             if result.overlay is not None:
                 _write_image(staging / "evidence" / f"{result.branch.value}_{result.view_id}.png", result.overlay)
         payload = _inspection_payload(config, inspection, source_kind, validated_sources, statistics)
-        for view, match in inspection.trusted_ok_by_view.items():
+        for (view, mode), match in inspection.trusted_ok_by_comparison.items():
+            comparison_id = f"{view}/{mode}"
             reference_images = {
                 "full": match.reference_full_image,
                 "roi": match.reference_roi,
@@ -285,10 +288,10 @@ def persist_inspection(
                 "difference": match.difference_overlay,
             }
             for name, image in reference_images.items():
-                relative = Path(payload["trusted_ok_references"][view]["files"][name])
+                relative = Path(payload["trusted_ok_references"][comparison_id]["files"][name])
                 target = staging / relative
                 _write_image(target, image)
-                payload["trusted_ok_references"][view]["saved_sha256"][name] = _sha256(target)
+                payload["trusted_ok_references"][comparison_id]["saved_sha256"][name] = _sha256(target)
         (staging / "inspection.json").write_text(
             json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
             encoding="utf-8",

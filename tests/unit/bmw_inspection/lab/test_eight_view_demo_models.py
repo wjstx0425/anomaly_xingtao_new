@@ -32,11 +32,13 @@ def _trusted_match(
     view: str,
     current_full: np.ndarray,
     current_roi: np.ndarray,
+    comparison_mode: str = "roi",
 ) -> TrustedOkMatch:
     reference_full = np.full_like(current_full, 10)
     reference_roi = np.full_like(current_roi, 10)
     return TrustedOkMatch(
         view_id=view,
+        comparison_mode=comparison_mode,
         physical_part_id=f"trusted-{view}",
         sample_id=f"sample-{view}",
         similarity=0.9,
@@ -136,7 +138,7 @@ def test_model_suite_matches_only_unique_actionable_views_after_decisions(
             comparison_mode: str,
         ) -> TrustedOkMatch:
             calls.append((view, current_full.shape[:2], current_roi.shape[:2], comparison_mode))
-            return _trusted_match(view, current_full, current_roi)
+            return _trusted_match(view, current_full, current_roi, comparison_mode)
 
     def output(branch: str, view: str, _image: np.ndarray) -> ModelOutput:
         status = BranchStatus.PASS
@@ -160,7 +162,7 @@ def test_model_suite_matches_only_unique_actionable_views_after_decisions(
     assert [row[0] for row in calls] == ["front", "front_left"]
     assert calls[0][1:] == ((20, 20), (10, 10), "roi")
     assert calls[1][1:] == ((20, 20), (10, 10), "full")
-    assert tuple(inspection.trusted_ok_by_view) == ("front", "front_left")
+    assert tuple(inspection.trusted_ok_by_comparison) == (("front", "roi"), ("front_left", "full"))
     assert inspection.results == baseline.results
     assert inspection.final_status is baseline.final_status is DemoFinalStatus.NG
 
@@ -186,7 +188,7 @@ def test_model_suite_pass_only_inspection_does_not_call_matcher() -> None:
     )
 
     assert inspection.final_status is DemoFinalStatus.OK
-    assert dict(inspection.trusted_ok_by_view) == {}
+    assert dict(inspection.trusted_ok_by_comparison) == {}
 
 
 def test_matcher_failure_is_diagnostic_only_and_keeps_model_decisions(
@@ -220,9 +222,9 @@ def test_matcher_failure_is_diagnostic_only_and_keeps_model_decisions(
         images, capture_id="broken"
     )
 
-    assert dict(inspection.trusted_ok_by_view) == {}
+    assert dict(inspection.trusted_ok_by_comparison) == {}
     assert inspection.diagnostic_metadata["trusted_ok_match_errors"] == {
-        "front": "reference bank unavailable"
+        "front/roi": "reference bank unavailable"
     }
     assert inspection.results == baseline.results
     assert inspection.final_status is baseline.final_status is DemoFinalStatus.NG
@@ -270,8 +272,50 @@ def test_build_model_suite_keeps_trusted_ok_disabled_without_explicit_injection(
     assert suite._trusted_ok_matcher_error is None
     assert len(inspection.results) == 25
     assert inspection.final_status is DemoFinalStatus.OK
-    assert dict(inspection.trusted_ok_by_view) == {}
+    assert dict(inspection.trusted_ok_by_comparison) == {}
     assert dict(inspection.diagnostic_metadata) == {}
+
+
+def test_model_suite_matches_front_left_full_and_roi_independently_when_both_are_ng() -> None:
+    calls: list[tuple[str, str]] = []
+
+    class Matcher:
+        def match(
+            self,
+            view: str,
+            current_full: np.ndarray,
+            current_roi: np.ndarray,
+            *,
+            comparison_mode: str,
+        ) -> TrustedOkMatch:
+            calls.append((view, comparison_mode))
+            return _trusted_match(view, current_full, current_roi, comparison_mode)
+
+    def template(view: str, _image: np.ndarray) -> ModelOutput:
+        return ModelOutput(
+            BranchStatus.NG if view == "front_left" else BranchStatus.PASS,
+            0.1, 0.2, view, None,
+        )
+
+    suite = EightViewModelSuite(
+        rois={view: (0, 0, 10, 10) for view in VIEW_ORDER},
+        template_predictor=template,
+        bright_streak_predictor=lambda _image: ModelOutput(BranchStatus.NG, 0.1, 0.2, "bright", None),
+        yolo_predictor=lambda *_args: ModelOutput(BranchStatus.PASS, 0.1, 0.2, "pass", None),
+        efficientad_predictor=lambda *_args: ModelOutput(BranchStatus.PASS, 0.1, 0.2, "pass", None),
+        trusted_ok_matcher=Matcher(),
+    )
+
+    inspection = suite.inspect(
+        {view: np.zeros((20, 20, 3), dtype=np.uint8) for view in VIEW_ORDER},
+        capture_id="front-left-dual",
+    )
+
+    assert calls == [("front_left", "roi"), ("front_left", "full")]
+    assert tuple(inspection.trusted_ok_by_comparison) == (
+        ("front_left", "roi"),
+        ("front_left", "full"),
+    )
 
 
 def test_build_model_suite_preloads_configured_matcher_before_injection(

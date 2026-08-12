@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -131,9 +132,9 @@ def test_persist_inspection_writes_exact_trusted_reference_evidence_and_hashes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     base = _inspection()
-    current = base.images["front"]
+    current = base.images["front_left"]
     match = TrustedOkMatch(
-        view_id="front", physical_part_id="normal-train-001",
+        view_id="front_left", comparison_mode="roi", physical_part_id="normal-train-001",
         sample_id="normal-train-001_000001", similarity=0.91, shift_x=2, shift_y=-1,
         current_full_image=current, reference_full_image=np.full_like(current, 10),
         current_roi=np.full((6, 9, 3), 20, dtype=np.uint8),
@@ -144,9 +145,21 @@ def test_persist_inspection_writes_exact_trusted_reference_evidence_and_hashes(
         reference_roi_sha256="c" * 64, index_sha256="d" * 64,
         whitelist_sha256="e" * 64,
     )
+    full_match = replace(
+        match,
+        comparison_mode="full",
+        physical_part_id="normal-train-002",
+        sample_id="normal-train-002_000001",
+        current_roi=current,
+        aligned_reference_roi=np.full((8, 8, 3), 60, dtype=np.uint8),
+        difference_overlay=np.full((8, 8, 3), 70, dtype=np.uint8),
+    )
     inspection = EightViewInspection(
         base.capture_id, base.images, base.results, base.final_status, base.elapsed_ms,
-        trusted_ok_by_view={"front": match},
+        trusted_ok_by_comparison={
+            ("front_left", "roi"): match,
+            ("front_left", "full"): full_match,
+        },
     )
     capture_config = tmp_path / "capture.json"
     capture_config.write_text("{}", encoding="utf-8")
@@ -174,7 +187,7 @@ def test_persist_inspection_writes_exact_trusted_reference_evidence_and_hashes(
     published = persist_inspection(config, inspection, fused_only_sources(inspection.images))
     payload = json.loads((published / "inspection.json").read_text(encoding="utf-8"))
 
-    reference = payload["trusted_ok_references"]["front"]
+    reference = payload["trusted_ok_references"]["front_left/roi"]
     assert payload["reference_is_diagnostic_only"] is True
     assert reference["reference_is_diagnostic_only"] is True
     assert reference["physical_part_id"] == "normal-train-001"
@@ -190,3 +203,9 @@ def test_persist_inspection_writes_exact_trusted_reference_evidence_and_hashes(
         path = published / reference["files"][name]
         assert path.is_file()
         assert len(reference["saved_sha256"][name]) == 64
+    assert reference["comparison_mode"] == "roi"
+    assert all(path.startswith("references/front_left/roi/") for path in reference["files"].values())
+    full_reference = payload["trusted_ok_references"]["front_left/full"]
+    assert full_reference["comparison_mode"] == "full"
+    assert full_reference["physical_part_id"] == "normal-train-002"
+    assert all(path.startswith("references/front_left/full/") for path in full_reference["files"].values())

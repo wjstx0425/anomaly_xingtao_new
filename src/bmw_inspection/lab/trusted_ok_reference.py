@@ -169,6 +169,7 @@ class TrustedOkMatch:
     """Display-only nearest approved reference for one actionable view."""
 
     view_id: str
+    comparison_mode: Literal["roi", "full"]
     physical_part_id: str
     sample_id: str
     similarity: float
@@ -189,6 +190,10 @@ class TrustedOkMatch:
     def __post_init__(self) -> None:
         if self.view_id not in VIEW_ORDER:
             raise ValueError(f"unknown BMW view: {self.view_id}")
+        if self.comparison_mode not in {"roi", "full"}:
+            raise ValueError("comparison_mode must be roi or full")
+        if self.comparison_mode == "full" and self.view_id != "front_left":
+            raise ValueError("full comparison_mode is reserved for front_left bright streak")
         if not self.physical_part_id.strip() or not self.sample_id.strip():
             raise ValueError("trusted reference identity must not be empty")
         if not math.isfinite(float(self.similarity)) or not -1.0 <= float(self.similarity) <= 1.0:
@@ -629,6 +634,7 @@ class TrustedOkMatcher:
             reference_region = self._load_verified(row.roi_path, row.roi_sha256)
         return TrustedOkMatch(
             view_id=view_id,
+            comparison_mode=comparison_mode,
             physical_part_id=row.physical_part_id,
             sample_id=row.sample_id,
             similarity=similarity,

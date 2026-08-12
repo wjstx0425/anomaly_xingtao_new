@@ -122,10 +122,11 @@ def test_inspection_trusted_ok_diagnostics_default_to_empty_immutable_mappings()
         elapsed_ms=1.0,
     )
 
-    assert dict(inspection.trusted_ok_by_view) == {}
+    assert dict(inspection.trusted_ok_by_comparison) == {}
+    assert dict(inspection.roi_images) == {}
     assert dict(inspection.diagnostic_metadata) == {}
     with pytest.raises(TypeError):
-        inspection.trusted_ok_by_view["front"] = object()  # type: ignore[index]
+        inspection.trusted_ok_by_comparison[("front", "roi")] = object()  # type: ignore[index]
 
 
 def test_capture_directory_requires_exactly_eight_named_images(tmp_path: Path) -> None:
@@ -206,6 +207,36 @@ def test_demo_config_loads_explicit_sha_bound_trusted_ok_index(tmp_path: Path) -
     assert config.trusted_ok_reference_index == index.resolve()
     assert config.trusted_ok_reference_index_sha256 == hashlib.sha256(index.read_bytes()).hexdigest()
     assert config.trusted_ok_reference_error is None
+
+
+def test_trusted_ok_relative_index_resolves_with_each_checkout_root(tmp_path: Path) -> None:
+    _roi, _capture, _run, threshold_artifact = _write_demo_assets(tmp_path)
+    expected_paths = []
+    for checkout_name in ("root-checkout", "worktree-checkout"):
+        checkout = tmp_path / checkout_name
+        config_dir = checkout / "configs/bmw/experiments"
+        config_dir.mkdir(parents=True)
+        release = checkout / "dataset/bmw_trusted_ok_reference/bmw_right_20260810_21_train_normal_approved_v2"
+        release.mkdir(parents=True)
+        index = release / "reference_index.json"
+        index.write_text('{"schema_version": 1}\n', encoding="utf-8")
+        payload = _demo_payload(tmp_path, threshold_artifact=threshold_artifact)
+        payload["trusted_ok_reference"] = {
+            "index": (
+                "../../../dataset/bmw_trusted_ok_reference/"
+                "bmw_right_20260810_21_train_normal_approved_v2/reference_index.json"
+            ),
+            "index_sha256": hashlib.sha256(index.read_bytes()).hexdigest(),
+        }
+        config_path = config_dir / "demo.json"
+        config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+        expected_paths.append(load_demo_config(config_path).trusted_ok_reference_index)
+
+    assert expected_paths == [
+        (tmp_path / "root-checkout/dataset/bmw_trusted_ok_reference/bmw_right_20260810_21_train_normal_approved_v2/reference_index.json").resolve(),
+        (tmp_path / "worktree-checkout/dataset/bmw_trusted_ok_reference/bmw_right_20260810_21_train_normal_approved_v2/reference_index.json").resolve(),
+    ]
 
 
 def test_demo_config_records_trusted_ok_sha_failure_without_blocking_detector_config(

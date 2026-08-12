@@ -147,7 +147,7 @@ Run all trusted-reference tests, compile the module and CLI, validate JSON, and 
 **Interfaces:**
 - Produces core contract `TrustedOkMatch(view_id, physical_part_id, sample_id, similarity, shift_x, shift_y, current_full_image, reference_full_image, current_roi, reference_roi, aligned_reference_roi, difference_overlay, source_sha256, reference_full_sha256, reference_roi_sha256, index_sha256)`.
 - Produces `TrustedOkMatcher.match(view_id: str, current_full_image: np.ndarray, current_roi: np.ndarray) -> TrustedOkMatch`.
-- Extends `EightViewInspection.trusted_ok_by_view: Mapping[str, TrustedOkMatch]` with an empty immutable default.
+- Extends `EightViewInspection.trusted_ok_by_comparison: Mapping[tuple[str, str], TrustedOkMatch]` with an empty immutable default. Keys are `(view_id, "full"|"roi")`, so `front_left` bright streak and ROI-based branches cannot overwrite one another.
 
 - [ ] **Step 1: Write matcher and decision-invariance tests**
 
@@ -163,7 +163,7 @@ Reuse the Template preparation contract: grayscale, aspect-preserving 512x512 fi
 
 - [ ] **Step 4: Integrate after all model decisions**
 
-After the existing 25 results have been constructed and fused, match each unique actionable view against the trusted bank using the part ROI while retaining the full current/reference images. Matcher errors attach no reference and do not turn PASS/NG into ERROR; record the diagnostic problem separately in inspection metadata. Bright-streak comparison uses the retained full `front_left` images; Template, YOLO, and EfficientAD comparison uses the aligned part ROIs.
+After the existing 25 results have been constructed and fused, match each unique actionable `(view, comparison_mode)` against the trusted bank while retaining the full current/reference images. Matcher errors attach no reference and do not turn PASS/NG into ERROR; record the diagnostic problem separately in inspection metadata. Bright-streak comparison uses the retained full `front_left` images; Template, YOLO, and EfficientAD comparison uses the aligned part ROIs. If both modes are actionable for `front_left`, retain both independently.
 
 - [ ] **Step 5: Verify and commit Task 3**
 

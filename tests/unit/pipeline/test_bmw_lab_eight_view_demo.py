@@ -38,11 +38,11 @@ def test_persist_result_adapts_offline_images_and_preserves_live_sources(monkeyp
 def test_o_shortcut_handler_toggles_only_when_inspection_exists() -> None:
     idle = EightViewUiState()
     assert entrypoint._handle_trusted_ok_shortcut(idle, ord("o")) is idle
-    legacy = SimpleNamespace(results=("unchanged",), trusted_ok_by_view={}, diagnostic_metadata={})
+    legacy = SimpleNamespace(results=("unchanged",), trusted_ok_by_comparison={}, diagnostic_metadata={})
     legacy_state = EightViewUiState(inspection=legacy)  # type: ignore[arg-type]
     assert entrypoint._handle_trusted_ok_shortcut(legacy_state, ord("o")) is legacy_state
     inspection = SimpleNamespace(
-        results=("unchanged",), trusted_ok_by_view={"front": object()}, diagnostic_metadata={}
+        results=("unchanged",), trusted_ok_by_comparison={("front", "roi"): object()}, diagnostic_metadata={}
     )
     state = EightViewUiState(inspection=inspection)  # type: ignore[arg-type]
 

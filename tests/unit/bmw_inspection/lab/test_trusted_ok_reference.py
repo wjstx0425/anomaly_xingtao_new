@@ -473,6 +473,7 @@ def test_matcher_selects_deterministic_aligned_correlation_winner(tmp_path: Path
     match = matcher.match("front", current, current, comparison_mode="roi")
 
     assert match.physical_part_id == "part-01"
+    assert match.comparison_mode == "roi"
     assert match.sample_id == "sample-01"
     assert match.similarity > 0.99
     assert abs(match.shift_x) <= 12

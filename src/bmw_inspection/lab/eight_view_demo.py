@@ -95,7 +95,8 @@ class EightViewInspection:
     results: tuple[DemoBranchResult, ...]
     final_status: DemoFinalStatus
     elapsed_ms: float
-    trusted_ok_by_view: Mapping[str, TrustedOkMatch] = MappingProxyType({})
+    roi_images: Mapping[str, np.ndarray] = MappingProxyType({})
+    trusted_ok_by_comparison: Mapping[tuple[str, str], TrustedOkMatch] = MappingProxyType({})
     diagnostic_metadata: Mapping[str, Any] = MappingProxyType({})
 
     def __post_init__(self) -> None:
@@ -108,14 +109,27 @@ class EightViewInspection:
             raise ValueError("final_status does not match branch results")
         if not math.isfinite(float(self.elapsed_ms)) or self.elapsed_ms < 0:
             raise ValueError("elapsed_ms must be finite and non-negative")
-        if not isinstance(self.trusted_ok_by_view, Mapping):
-            raise TypeError("trusted_ok_by_view must be a mapping")
-        trusted: dict[str, TrustedOkMatch] = {}
-        for view, match in self.trusted_ok_by_view.items():
-            if view not in VIEW_ORDER or not isinstance(match, TrustedOkMatch) or match.view_id != view:
-                raise ValueError("trusted_ok_by_view must contain matching canonical views")
-            trusted[view] = match
-        object.__setattr__(self, "trusted_ok_by_view", MappingProxyType(trusted))
+        if not isinstance(self.roi_images, Mapping):
+            raise TypeError("roi_images must be a mapping")
+        if self.roi_images:
+            object.__setattr__(self, "roi_images", _owned_images(self.roi_images))
+        else:
+            object.__setattr__(self, "roi_images", MappingProxyType({}))
+        if not isinstance(self.trusted_ok_by_comparison, Mapping):
+            raise TypeError("trusted_ok_by_comparison must be a mapping")
+        trusted: dict[tuple[str, str], TrustedOkMatch] = {}
+        for key, match in self.trusted_ok_by_comparison.items():
+            if (
+                not isinstance(key, tuple)
+                or len(key) != 2
+                or key[0] not in VIEW_ORDER
+                or key[1] not in {"roi", "full"}
+                or not isinstance(match, TrustedOkMatch)
+                or (match.view_id, match.comparison_mode) != key
+            ):
+                raise ValueError("trusted_ok_by_comparison must use matching (view, mode) keys")
+            trusted[key] = match
+        object.__setattr__(self, "trusted_ok_by_comparison", MappingProxyType(trusted))
         object.__setattr__(self, "diagnostic_metadata", _immutable_details(self.diagnostic_metadata))
 
     def actionable_results(self) -> tuple[DemoBranchResult, ...]:

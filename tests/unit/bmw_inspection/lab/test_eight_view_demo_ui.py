@@ -28,6 +28,7 @@ from bmw_inspection.lab.trusted_ok_reference import TrustedOkMatch
 
 def _inspection() -> EightViewInspection:
     images = {view: np.full((24, 32, 3), index, dtype=np.uint8) for index, view in enumerate(VIEW_ORDER)}
+    rois = {view: np.full((12, 16, 3), 100 + index, dtype=np.uint8) for index, view in enumerate(VIEW_ORDER)}
     rows = (
         DemoBranchResult(
             DemoBranch.TEMPLATE,
@@ -63,13 +64,20 @@ def _inspection() -> EightViewInspection:
             details={"evidence_type": "诊断热区"},
         ),
     )
-    return EightViewInspection("capture", images, rows, DemoFinalStatus.ERROR, 6.0)
+    return EightViewInspection("capture", images, rows, DemoFinalStatus.ERROR, 6.0, roi_images=rois)
 
 
-def _match(inspection: EightViewInspection, view: str) -> TrustedOkMatch:
+def _match(
+    inspection: EightViewInspection,
+    view: str,
+    comparison_mode: str = "roi",
+    current_value: int = 50,
+) -> TrustedOkMatch:
     current = inspection.images[view]
+    region_shape = current.shape if comparison_mode == "full" else (12, 16, 3)
     return TrustedOkMatch(
         view_id=view,
+        comparison_mode=comparison_mode,
         physical_part_id="normal-train-001",
         sample_id="normal-train-001_000001",
         similarity=0.9234,
@@ -77,7 +85,7 @@ def _match(inspection: EightViewInspection, view: str) -> TrustedOkMatch:
         shift_y=-2,
         current_full_image=current,
         reference_full_image=np.full_like(current, 40),
-        current_roi=np.full((12, 16, 3), 50, dtype=np.uint8),
+        current_roi=np.full(region_shape, current_value, dtype=np.uint8),
         reference_roi=np.full((12, 16, 3), 60, dtype=np.uint8),
         aligned_reference_roi=np.full((12, 16, 3), 70, dtype=np.uint8),
         difference_overlay=np.full((12, 16, 3), 80, dtype=np.uint8),
@@ -227,7 +235,8 @@ def test_o_toggle_requires_inspection_and_preserves_model_results() -> None:
         legacy_inspection.results,
         legacy_inspection.final_status,
         legacy_inspection.elapsed_ms,
-        trusted_ok_by_view={"front_right": match},
+        roi_images=legacy_inspection.roi_images,
+        trusted_ok_by_comparison={("front_right", "roi"): match},
     )
     state = EightViewUiState(phase=DemoUiPhase.RESULT, inspection=inspection)
     assert _trusted_ok_available(state) is True
@@ -246,7 +255,8 @@ def test_trusted_ok_mode_uses_four_comparison_panels_and_selected_model_evidence
     match = _match(base, "front_right")
     inspection = EightViewInspection(
         base.capture_id, base.images, base.results, base.final_status, base.elapsed_ms,
-        trusted_ok_by_view={"front_right": match},
+        roi_images=base.roi_images,
+        trusted_ok_by_comparison={("front_right", "roi"): match},
     )
     state = EightViewUiState(
         phase=DemoUiPhase.RESULT,
@@ -287,5 +297,75 @@ def test_trusted_ok_mode_explicitly_reports_missing_reference() -> None:
         "现场NG", "可信OK", "对齐差异", "真实检测框"
     )
     assert panels[1][1] is None and panels[2][1] is None
+    assert panels[0][1] is not None
+    assert panels[0][1].shape[:2] == (12, 16)
+    assert int(panels[0][1].mean()) == 102
     assert _trusted_reference_details(state) == (("可信参考", "无可信OK参考"),)
     assert dashboard.shape == (900, 1600, 3)
+
+
+def test_trusted_mode_does_not_present_reference_for_manually_selected_pass_row() -> None:
+    base = _inspection()
+    match = _match(base, "front_right")
+    inspection = EightViewInspection(
+        base.capture_id, base.images, base.results, base.final_status, base.elapsed_ms,
+        roi_images=base.roi_images,
+        trusted_ok_by_comparison={("front_right", "roi"): match},
+    )
+    state = EightViewUiState(
+        phase=DemoUiPhase.RESULT,
+        inspection=inspection,
+        selected_view="front",
+        selected_branch=DemoBranch.TEMPLATE,
+        trusted_ok_mode=True,
+    )
+
+    panels = evidence_comparison_images(state)
+
+    assert tuple(label for label, _image in panels) == (
+        "当前项目通过，无需NG对比", "无需可信OK参考", "无需对齐差异", "无需模型证据"
+    )
+    assert all(image is None for _label, image in panels)
+
+    missing_row_panels = evidence_comparison_images(EightViewUiState(
+        phase=DemoUiPhase.RESULT,
+        inspection=inspection,
+        selected_view="front",
+        selected_branch=DemoBranch.BRIGHT_STREAK,
+        trusted_ok_mode=True,
+    ))
+    assert missing_row_panels[0][0] == "当前项目无检测结果，无需NG对比"
+    assert all(image is None for _label, image in missing_row_panels)
+
+
+def test_trusted_mode_selects_front_left_full_or_roi_match_by_branch() -> None:
+    images = {view: np.zeros((24, 32, 3), dtype=np.uint8) for view in VIEW_ORDER}
+    rois = {view: np.full((12, 16, 3), 11, dtype=np.uint8) for view in VIEW_ORDER}
+    rows = (
+        DemoBranchResult(DemoBranch.TEMPLATE, "front_left", BranchStatus.NG, 0.3, 0.2, 1.0, "template ng", None),
+        DemoBranchResult(DemoBranch.BRIGHT_STREAK, "front_left", BranchStatus.NG, 0.0, 0.1, 1.0, "streak ng", None),
+    )
+    base = EightViewInspection("dual", images, rows, DemoFinalStatus.NG, 2.0, roi_images=rois)
+    roi_match = _match(base, "front_left", "roi", 21)
+    full_match = _match(base, "front_left", "full", 31)
+    inspection = EightViewInspection(
+        "dual", images, rows, DemoFinalStatus.NG, 2.0, roi_images=rois,
+        trusted_ok_by_comparison={
+            ("front_left", "roi"): roi_match,
+            ("front_left", "full"): full_match,
+        },
+    )
+
+    template_panels = evidence_comparison_images(EightViewUiState(
+        phase=DemoUiPhase.RESULT, inspection=inspection, selected_view="front_left",
+        selected_branch=DemoBranch.TEMPLATE, trusted_ok_mode=True,
+    ))
+    streak_panels = evidence_comparison_images(EightViewUiState(
+        phase=DemoUiPhase.RESULT, inspection=inspection, selected_view="front_left",
+        selected_branch=DemoBranch.BRIGHT_STREAK, trusted_ok_mode=True,
+    ))
+
+    assert int(template_panels[0][1].mean()) == 21
+    assert int(streak_panels[0][1].mean()) == 31
+    assert template_panels[0][1].shape[:2] == (12, 16)
+    assert streak_panels[0][1].shape[:2] == (24, 32)

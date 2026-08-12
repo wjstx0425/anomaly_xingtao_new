@@ -649,39 +649,33 @@ class EightViewModelSuite:
             results.append(self._call(DemoBranch.EFFICIENTAD, view, self._efficientad, view, crops[view]))
         rows = tuple(results)
         final_status = fuse_demo_status(rows)
-        actionable_views = tuple(
+        actionable_comparisons = tuple(
             dict.fromkeys(
-                row.view_id
+                (
+                    row.view_id,
+                    "full" if row.branch is DemoBranch.BRIGHT_STREAK else "roi",
+                )
                 for row in rows
                 if row.status in {BranchStatus.NG, BranchStatus.ERROR}
             )
         )
-        trusted_ok_by_view: dict[str, TrustedOkMatch] = {}
+        trusted_ok_by_comparison: dict[tuple[str, str], TrustedOkMatch] = {}
         match_errors: dict[str, str] = {}
-        bright_streak_actionable = any(
-            row.branch is DemoBranch.BRIGHT_STREAK
-            and row.status in {BranchStatus.NG, BranchStatus.ERROR}
-            for row in rows
-        )
-        for view in actionable_views:
+        for view, comparison_mode in actionable_comparisons:
+            comparison_id = f"{view}/{comparison_mode}"
             if self._trusted_ok_matcher is None:
                 if self._trusted_ok_matcher_error is not None:
-                    match_errors[view] = self._trusted_ok_matcher_error
+                    match_errors[comparison_id] = self._trusted_ok_matcher_error
                 continue
-            comparison_mode = (
-                "full"
-                if view == "front_left" and bright_streak_actionable
-                else "roi"
-            )
             try:
-                trusted_ok_by_view[view] = self._trusted_ok_matcher.match(
+                trusted_ok_by_comparison[(view, comparison_mode)] = self._trusted_ok_matcher.match(
                     view,
                     images[view],
                     crops[view],
                     comparison_mode=comparison_mode,
                 )
             except Exception as error:
-                match_errors[view] = str(error)
+                match_errors[comparison_id] = str(error)
         diagnostic_metadata = (
             {"trusted_ok_match_errors": match_errors} if match_errors else {}
         )
@@ -691,7 +685,8 @@ class EightViewModelSuite:
             results=rows,
             final_status=final_status,
             elapsed_ms=(perf_counter() - started) * 1000.0,
-            trusted_ok_by_view=trusted_ok_by_view,
+            roi_images=crops,
+            trusted_ok_by_comparison=trusted_ok_by_comparison,
             diagnostic_metadata=diagnostic_metadata,
         )
 

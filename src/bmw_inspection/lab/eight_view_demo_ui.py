@@ -157,7 +157,7 @@ def _trusted_ok_available(state: EightViewUiState) -> bool:
     """Report whether this inspection came from an enabled reference diagnostic."""
     if state.inspection is None:
         return False
-    return bool(state.inspection.trusted_ok_by_view) or bool(
+    return bool(state.inspection.trusted_ok_by_comparison) or bool(
         state.inspection.diagnostic_metadata.get("trusted_ok_match_errors")
     )
 
@@ -173,7 +173,17 @@ def _trusted_reference_details(state: EightViewUiState) -> tuple[tuple[str, str]
     """Return compact, always-visible reference identity rows for the right column."""
     if not state.trusted_ok_mode or state.inspection is None:
         return ()
-    match = state.inspection.trusted_ok_by_view.get(state.selected_view)
+    selected_row = next(
+        (
+            row for row in state.inspection.results
+            if row.view_id == state.selected_view and row.branch is state.selected_branch
+        ),
+        None,
+    )
+    if selected_row is None or selected_row.status not in {BranchStatus.NG, BranchStatus.ERROR}:
+        return ()
+    mode = "full" if state.selected_branch is DemoBranch.BRIGHT_STREAK else "roi"
+    match = state.inspection.trusted_ok_by_comparison.get((state.selected_view, mode))
     if match is None:
         return (("可信参考", "无可信OK参考"),)
     return (
@@ -240,8 +250,28 @@ def evidence_comparison_images(
     if evidence is not None and state.selected_branch is DemoBranch.BRIGHT_STREAK:
         evidence = cv2.rotate(evidence, cv2.ROTATE_90_CLOCKWISE)
     if state.trusted_ok_mode and inspection is not None:
-        match = inspection.trusted_ok_by_view.get(state.selected_view)
-        current = inspection.images[state.selected_view] if match is None else match.current_roi
+        if selected_row is None:
+            return (
+                ("当前项目无检测结果，无需NG对比", None),
+                ("无需可信OK参考", None),
+                ("无需对齐差异", None),
+                ("无需模型证据", None),
+            )
+        if selected_row.status not in {BranchStatus.NG, BranchStatus.ERROR}:
+            return (
+                ("当前项目通过，无需NG对比", None),
+                ("无需可信OK参考", None),
+                ("无需对齐差异", None),
+                ("无需模型证据", None),
+            )
+        mode = "full" if state.selected_branch is DemoBranch.BRIGHT_STREAK else "roi"
+        match = inspection.trusted_ok_by_comparison.get((state.selected_view, mode))
+        if match is not None:
+            current = match.current_roi
+        elif mode == "full":
+            current = inspection.images[state.selected_view]
+        else:
+            current = inspection.roi_images.get(state.selected_view)
         return (
             ("现场NG", current),
             ("可信OK", None if match is None else match.aligned_reference_roi),
