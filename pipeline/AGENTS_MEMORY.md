@@ -1,5 +1,12 @@
 # Pipeline Memory
 
+## BMW 光痕 tracked-profile V3 部署验收（2026-08-12）
+
+- 当前光痕后端提交为 `0213a890`，配置 `configs/bmw/experiments/bmw_eight_view_demo_v3_ng_evidence.json` 指向 `tracked_profile_v3` 的不可变 v8 报告（SHA256 `6b43690af67702333646fa7a88a2a5053a0afae6d19cb343bf6d3abb193c17d4`）。回退时只需恢复该配置的三个 `bright_streak` 字段到 `raw_profile_v2` 及 corrected v2 报告。
+- 最终干净快照验证：`179 passed`；真实保存记录 `bmw_demo_20260812_211302` 为 `PASS/OK`，并证明引擎切换前后 24 个非光痕结果完全一致。证据保存在忽略目录 `artifacts/bmw_bright_streak_tracked_v3_smoke/final_0213a890/`，不要提交截图、inspection 或客户图像。
+- V3 只在固定 `[1792,1180,1873,1793]` ROI 中追踪斜向光痕。证据中心线绿色=强响应、橙色=弱桥接、红色=有效范围内的内部断点、灰色=前后背景。
+- `real_broken_samples=0`：真实断续召回尚未验证；现阶段只能确认 8/8 完全无光痕样本保持 `NG_NO_STREAK`，不能把合成断续测试描述成真实数据效果。
+
 ## BMW trusted-OK comparison final offline gate (2026-08-12)
 
 - Runtime v2 reference identity is fixed at `dataset/bmw_trusted_ok_reference/bmw_right_20260810_21_train_normal_approved_v2`: 50 approved parts, 400 references, 802 files, index SHA-256 `ae7833ab35cbc76cbfef6cfa5163f77ef345d879a6e8e4834fa8cbfcf6023acc`, whitelist SHA-256 `15d9d86d8ffc7a28b55706b4cce2bd84e2ddd60ebdef7bd7b67d2725281745f5`. The root checkout and BMW worktree copies were checked independently and matched exactly.

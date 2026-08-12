@@ -1,5 +1,14 @@
 # AGENTS Memory
 
+## BMW 光痕 tracked-profile V3 最终验收（2026-08-12）
+
+- 光痕 V3 已完成到 `0213a890`：固定全图 ROI `[1792,1180,1873,1793]`，在 `81x613` 区域内追踪斜向中心线，并用强/弱阈值、覆盖率、最长连续段、内部最大断点和断点数判定；旧 `raw_profile_v2` 仍保留用于回退。
+- 正式 V3 产物是 `results/bmw_lab_one_click/bmw_right_batch_20260810_21_bright_v3_tracked_v8/report.json`，SHA256 为 `6b43690af67702333646fa7a88a2a5053a0afae6d19cb343bf6d3abb193c17d4`。Demo 配置只把光痕 engine/config/SHA 切到该产物；Template、YOLO、EfficientAD 与融合不属于 V3 变更。
+- 干净提交快照的最终聚焦回归是 `179 passed`。保存的真实正常记录 `bmw_demo_20260812_211302` 离线结果为光痕 `PASS/OK`；24 个非光痕结果逐字段完全一致，序列 SHA256 为 `03c50c877762f9bc1943ab7a0b4d23616bcbc858bd2f3886244cf2674d97e8e0`。忽略的证据位于 `artifacts/bmw_bright_streak_tracked_v3_smoke/final_0213a890/`。
+- V3 启动时失败关闭：重算算法、评估器、manifest、ROI 与全部评估产物哈希；强制固定 ROI、可容纳的 geometry、唯一确认现场样本 `211302=OK` 及其四个源文件哈希，并核对 calibration/no-streak/final-test 验收计数。
+- 证据色彩：绿色是强响应，橙色是弱阈值桥接，红色只表示有效光痕范围内的内部断点，灰色是前后背景。不要把灰色背景解释成断续。
+- 当前没有真实“有光痕但断续”的 NG 样本（`real_broken_samples=0`）；断续能力只有合成测试保障，不能声称真实断续召回率。补充真实断续样本后需要重新做独立验证。
+
 ## BMW trusted-OK reference comparison Task-5 handoff (2026-08-12)
 
 - The only runtime reference release is ignored local data at `dataset/bmw_trusted_ok_reference/bmw_right_20260810_21_train_normal_approved_v2`: 50 user-confirmed complete OK parts, 400 indexed images (50 per canonical view), and 802 regular files in the release. Root checkout and the isolated BMW worktree both verified the same `reference_index.json` SHA-256 `ae7833ab35cbc76cbfef6cfa5163f77ef345d879a6e8e4834fa8cbfcf6023acc` and whitelist SHA-256 `15d9d86d8ffc7a28b55706b4cce2bd84e2ddd60ebdef7bd7b67d2725281745f5`.
