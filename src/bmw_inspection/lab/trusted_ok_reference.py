@@ -466,11 +466,17 @@ class TrustedOkMatcher:
             raise ValueError("trusted-OK approved parts must each contain all eight views")
         self._index_sha256 = actual_index_sha256
         self._whitelist_sha256 = whitelist_sha256
+        self._roi_config_sha256 = roi_config_sha256
         self._candidate_manifest_sha256 = candidate_manifest_sha256
         self._max_shift = max_shift
         self._by_view = {view: tuple(rows) for view, rows in by_view.items()}
         self._prepared: dict[tuple[str, Literal["roi", "full"]], tuple[_PreparedReference, ...]] = {}
         self._lock = threading.RLock()
+
+    @property
+    def roi_config_sha256(self) -> str:
+        """Return the immutable ROI-config digest validated from index and whitelist."""
+        return self._roi_config_sha256
 
     @classmethod
     def _validate_whitelist(

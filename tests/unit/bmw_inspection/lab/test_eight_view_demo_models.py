@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import cv2
 import numpy as np
 import pytest
+import hashlib
 
 from bmw_inspection.lab import eight_view_demo_models as demo_models
 from bmw_inspection.lab.eight_view_dataset import VIEW_ORDER
@@ -326,6 +327,7 @@ def test_build_model_suite_preloads_configured_matcher_before_injection(
     class Matcher:
         def __init__(self, release_dir: Path, *, expected_index_sha256: str) -> None:
             events.append(f"init:{release_dir.name}:{expected_index_sha256}")
+            self.roi_config_sha256 = hashlib.sha256(b"roi-current").hexdigest()
 
         def preload(self) -> None:
             events.append("preload")
@@ -344,11 +346,13 @@ def test_build_model_suite_preloads_configured_matcher_before_injection(
         lambda _path: {view: (0, 0, 10, 10) for view in VIEW_ORDER},
     )
     index = Path("/trusted/bmw_right_20260810_21_train_normal_approved_v2/reference_index.json")
+    roi_path = Path("/tmp/trusted-ok-task4-current-roi.json")
+    roi_path.write_bytes(b"roi-current")
     config = SimpleNamespace(
         template_models={}, bright_streak_engine="calibrated_rule_v1", bright_streak_config=Path("bright.json"),
         yolo_checkpoint=Path("best.pt"), yolo_candidate_conf=0.1, yolo_final_threshold=0.2,
         yolo_imgsz=640, efficientad_checkpoints={}, efficientad_thresholds={},
-        efficientad_base_thresholds={}, efficientad_threshold_margin=0.0, roi_config=Path("roi.json"),
+        efficientad_base_thresholds={}, efficientad_threshold_margin=0.0, roi_config=roi_path,
         trusted_ok_reference_index=index, trusted_ok_reference_index_sha256="a" * 64,
         trusted_ok_reference_error=None,
     )
@@ -363,6 +367,64 @@ def test_build_model_suite_preloads_configured_matcher_before_injection(
     ]
     assert isinstance(suite._trusted_ok_matcher, Matcher)
     assert suite._trusted_ok_matcher_error is None
+
+
+def test_build_model_suite_disables_trusted_matcher_when_current_roi_sha_drifted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current_roi = tmp_path / "roi.json"
+    current_roi.write_bytes(b"current-roi-drifted")
+    validated_roi_sha = hashlib.sha256(b"published-roi").hexdigest()
+
+    class Matcher:
+        roi_config_sha256 = validated_roi_sha
+
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def preload(self) -> None:
+            pass
+
+    predictor = SimpleNamespace(
+        predict=lambda *_args: ModelOutput(BranchStatus.PASS, 0.1, 0.2, "pass", None)
+    )
+    for name in (
+        "EightViewTemplatePredictor", "EightViewBrightStreakPredictor",
+        "EightViewYoloPredictor", "EightViewEfficientAdPredictor",
+    ):
+        monkeypatch.setattr(demo_models, name, lambda *_args, **_kwargs: predictor)
+    monkeypatch.setattr(demo_models, "TrustedOkMatcher", Matcher)
+    monkeypatch.setattr(
+        demo_models,
+        "load_part_rois",
+        lambda _path: {view: (0, 0, 10, 10) for view in VIEW_ORDER},
+    )
+    config = SimpleNamespace(
+        template_models={}, bright_streak_engine="calibrated_rule_v1", bright_streak_config=Path("bright.json"),
+        yolo_checkpoint=Path("best.pt"), yolo_candidate_conf=0.1, yolo_final_threshold=0.2,
+        yolo_imgsz=640, efficientad_checkpoints={}, efficientad_thresholds={},
+        efficientad_base_thresholds={}, efficientad_threshold_margin=0.0, roi_config=current_roi,
+        trusted_ok_reference_index=Path(
+            "/trusted/bmw_right_20260810_21_train_normal_approved_v2/reference_index.json"
+        ),
+        trusted_ok_reference_index_sha256="a" * 64,
+        trusted_ok_reference_error=None,
+    )
+    messages: list[str] = []
+
+    suite = build_model_suite(config, status_callback=messages.append)
+    inspection = suite.inspect(
+        {view: np.zeros((10, 10, 3), dtype=np.uint8) for view in VIEW_ORDER},
+        capture_id="roi-drift",
+    )
+
+    assert suite._trusted_ok_matcher is None
+    assert suite._trusted_ok_matcher_error == "可信OK参考不可用：可信参考ROI配置与当前Demo ROI配置SHA256不匹配"
+    assert messages[-1] == "可信OK参考库不可用，已仅禁用参考诊断：可信参考ROI配置与当前Demo ROI配置SHA256不匹配"
+    assert len(inspection.results) == 25
+    assert inspection.final_status is DemoFinalStatus.OK
+    assert all(row.status is BranchStatus.PASS for row in inspection.results)
 
 
 def test_build_model_suite_disables_only_reference_diagnostics_when_preload_fails(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import tempfile
@@ -773,6 +774,9 @@ def build_model_suite(
                 expected_index_sha256=index_sha256,
             )
             candidate.preload()
+            current_roi_sha256 = _file_sha256(Path(config.roi_config).expanduser().resolve())
+            if candidate.roi_config_sha256 != current_roi_sha256:
+                raise ValueError("可信参考ROI配置与当前Demo ROI配置SHA256不匹配")
         except Exception as error:
             trusted_ok_matcher_error = f"可信OK参考不可用：{error}"
             announce(f"可信OK参考库不可用，已仅禁用参考诊断：{error}")
@@ -788,6 +792,15 @@ def build_model_suite(
         trusted_ok_matcher=trusted_ok_matcher,
         trusted_ok_matcher_error=trusted_ok_matcher_error,
     )
+
+
+def _file_sha256(path: Path) -> str:
+    """Hash one resolved runtime asset for cross-contract binding."""
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 __all__ = [
