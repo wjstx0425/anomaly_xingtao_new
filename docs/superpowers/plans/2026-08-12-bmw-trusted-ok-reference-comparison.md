@@ -35,7 +35,7 @@
 
 - [ ] **Step 1: Write filtering and immutability tests**
 
-Create fixtures containing one valid eight-view training normal, one `no_streak`, one calibration normal, one incomplete normal, and one source-hash mismatch. Assert that only the valid part produces eight manifest rows, one `PENDING` decision, and one contact sheet. Assert a pre-existing output directory raises `FileExistsError`.
+Create fixtures containing one valid eight-view training normal, one `no_streak`, one calibration normal, and one incomplete normal. Assert that only the valid part produces eight manifest rows, one `PENDING` decision, and one contact sheet. In a separate case assert a source-hash mismatch aborts with `ValueError` instead of silently publishing a partial review package. Assert a pre-existing output directory raises `FileExistsError`.
 
 ```python
 summary = prepare_review_package(manifest, output, session_id="20260810_210030_527506")
@@ -104,7 +104,7 @@ git commit -m "feat: prepare BMW trusted OK review package"
 
 **Interfaces:**
 - Consumes: Task 1 package plus human-edited `review_decisions.csv`.
-- Produces: `publish_trusted_reference_index(review_dir: Path, output_dir: Path, roi_config: Path) -> TrustedIndexSummary`, `trusted_ok_whitelist.json`, `reference_index.json`, and immutable copied ROI images under `references/<view>/`.
+- Produces: `publish_trusted_reference_index(review_dir: Path, output_dir: Path, roi_config: Path) -> TrustedIndexSummary`, `trusted_ok_whitelist.json`, `reference_index.json`, immutable copied full images under `references/<view>/full/`, and part ROI images under `references/<view>/roi/`.
 
 - [ ] **Step 1: Write rejection and publication tests**
 
@@ -122,7 +122,7 @@ Run the Task 2 test selection and expect failure because the publisher is absent
 
 - [ ] **Step 3: Implement explicit approval and SHA-bound publication**
 
-Require the exact decisions `APPROVED`, `REJECTED`, or `PENDING`. Crop each approved source using the current eight-view ROI asset, copy the ROI into the immutable release, and record copied-image SHA, source-image SHA, physical part, sample, view, split, session, whitelist SHA, ROI-config SHA, and preprocessing identity.
+Require the exact decisions `APPROVED`, `REJECTED`, or `PENDING`. Copy each approved full source image, crop its part ROI using the current eight-view ROI asset, and record both copied-image SHAs, source-image SHA, physical part, sample, view, split, session, whitelist SHA, ROI-config SHA, and preprocessing identity.
 
 - [ ] **Step 4: Add the publishing CLI**
 
@@ -145,8 +145,8 @@ Run all trusted-reference tests, compile the module and CLI, validate JSON, and 
 - Modify: `tests/unit/bmw_inspection/lab/test_trusted_ok_reference.py`
 
 **Interfaces:**
-- Produces core contract `TrustedOkMatch(view_id, physical_part_id, sample_id, similarity, shift_x, shift_y, current_roi, reference_roi, aligned_reference_roi, difference_overlay, source_sha256, reference_sha256, index_sha256)`.
-- Produces `TrustedOkMatcher.match(view_id: str, current_roi: np.ndarray) -> TrustedOkMatch`.
+- Produces core contract `TrustedOkMatch(view_id, physical_part_id, sample_id, similarity, shift_x, shift_y, current_full_image, reference_full_image, current_roi, reference_roi, aligned_reference_roi, difference_overlay, source_sha256, reference_full_sha256, reference_roi_sha256, index_sha256)`.
+- Produces `TrustedOkMatcher.match(view_id: str, current_full_image: np.ndarray, current_roi: np.ndarray) -> TrustedOkMatch`.
 - Extends `EightViewInspection.trusted_ok_by_view: Mapping[str, TrustedOkMatch]` with an empty immutable default.
 
 - [ ] **Step 1: Write matcher and decision-invariance tests**
@@ -163,7 +163,7 @@ Reuse the Template preparation contract: grayscale, aspect-preserving 512x512 fi
 
 - [ ] **Step 4: Integrate after all model decisions**
 
-After the existing 25 results have been constructed and fused, match each unique actionable view against the trusted bank. Matcher errors attach no reference and do not turn PASS/NG into ERROR; record the diagnostic problem separately in inspection metadata.
+After the existing 25 results have been constructed and fused, match each unique actionable view against the trusted bank using the part ROI while retaining the full current/reference images. Matcher errors attach no reference and do not turn PASS/NG into ERROR; record the diagnostic problem separately in inspection metadata. Bright-streak comparison uses the retained full `front_left` images; Template, YOLO, and EfficientAD comparison uses the aligned part ROIs.
 
 - [ ] **Step 5: Verify and commit Task 3**
 
@@ -208,7 +208,7 @@ In trusted mode display four equal panels: current NG ROI, aligned trusted OK RO
 
 - [ ] **Step 5: Persist exact chosen reference evidence**
 
-Copy the matched reference ROI and difference overlay into the capture record. Add `reference_is_diagnostic_only=true`, index/whitelist/reference/source hashes, IDs, similarity, and shift to `inspection.json`; keep the existing no-overwrite capture publication.
+Copy the matched reference full image, ROI, and difference overlay into the capture record. Add `reference_is_diagnostic_only=true`, index/whitelist/reference/source hashes, IDs, similarity, and shift to `inspection.json`; keep the existing no-overwrite capture publication.
 
 - [ ] **Step 6: Verify and commit Task 4**
 
@@ -254,4 +254,3 @@ uv run --no-sync python \
 ```
 
 Verify the GUI remains running and four cameras open successfully before claiming live readiness.
-
