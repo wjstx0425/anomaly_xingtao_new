@@ -1,5 +1,13 @@
 # Pipeline Memory
 
+## BMW trusted-OK comparison final offline gate (2026-08-12)
+
+- Runtime v2 reference identity is fixed at `dataset/bmw_trusted_ok_reference/bmw_right_20260810_21_train_normal_approved_v2`: 50 approved parts, 400 references, 802 files, index SHA-256 `ae7833ab35cbc76cbfef6cfa5163f77ef345d879a6e8e4834fa8cbfcf6023acc`, whitelist SHA-256 `15d9d86d8ffc7a28b55706b4cce2bd84e2ddd60ebdef7bd7b67d2725281745f5`. The root checkout and BMW worktree copies were checked independently and matched exactly.
+- `build_model_suite()` performs the one-time trusted-bank SHA validation/preload and tells the operator to allow about 27 seconds. Runtime shortcuts are `O` trusted comparison on/off, `N` next actionable row, and `P` previous actionable row. Bright streak alone matches `front_left/full`; Template, YOLO, and EfficientAD match their fixed part `roi`. Missing or invalid references stay diagnostic and render `无可信OK参考`; they never alter the 25 detector results or fusion.
+- Offline command used the existing local Ultralytics 8.4.89 checkout: `PYTHONPATH=/home/yunjing/ultralytics-c789 UV_CACHE_DIR=/tmp/bmw_task5_uv uv run --no-sync python artifacts/bmw_trusted_ok_reference_smoke/task5_verify.py`. Saved HDR-pair sample `bmw_demo_20260812_170451` produced 25 checks, final NG, with `template/front_right` and `efficientad/front_right` NG. `front_right/roi` selected approved `bmw_right_normal_group077` at similarity `0.9715221524`, shift `(0, 0)`; no actionable comparison was missing. Feature-off and feature-on serialized detector tuples were exactly equal.
+- The ignored output contains the visually checked 1600x900 trusted-mode screenshot and immutable inspection record under `artifacts/bmw_trusted_ok_reference_smoke/`; all persisted reference-file SHA values were recomputed successfully. Do not commit the local verification script, screenshots, copied HDR sources, reference images, or inspection records.
+- Focused regression covered v3 config, trusted reference, UI, capture, persistence, Template, bright-streak, YOLO runtime/evidence, and EfficientAD: 212 tests passed when the three unrelated optional Ultralytics training-package pin/install assertions were omitted; direct YOLO runtime selection was 15 passed. A broader attempt reported 212 passed and those 3 known environment/repository-baseline failures. NVML/GPU was unavailable, and Task 5 intentionally did not open the GUI or four cameras; live hardware readiness remains for the parent launch step.
+
 ## BMW v3 NG-evidence Demo entrypoints (2026-08-12)
 
 - `bmw_lab_prepare_v3_ng_evidence_demo.py` creates a no-overwrite composite from 21:00 Template, 21:00 EfficientAD-v2,
