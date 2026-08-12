@@ -24,6 +24,7 @@ from bmw_inspection.lab.eight_view_demo_ui import (
     _trusted_reference_details,
     apply_dashboard_click,
     dashboard_hit_test,
+    detail_controls_layout,
     detail_reason_lines,
     detail_reference_footer,
     evidence_detail_images,
@@ -626,3 +627,12 @@ def test_long_detail_reason_wraps_without_losing_chinese_semantics() -> None:
     assert 2 <= len(lines) <= 3
     assert "".join(lines) == long_reason
     assert render_eight_view_screen(replace(state, page=DemoUiPage.DETAIL)).shape == (900, 1600, 3)
+
+
+def test_detail_controls_use_a_safe_top_right_baseline() -> None:
+    text, x, y, anchor = detail_controls_layout()
+
+    assert text == "Esc：返回主页面　Q：退出　R：重置"
+    assert anchor == "ra"
+    assert 0 < x < 1600
+    assert 0 < y <= 900 - 13

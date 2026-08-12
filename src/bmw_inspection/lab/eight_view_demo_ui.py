@@ -521,6 +521,11 @@ def detail_reference_footer(state: EightViewUiState) -> str:
     return f"参考零件：{match.physical_part_id}　参考样本：{match.sample_id}"
 
 
+def detail_controls_layout() -> tuple[str, int, int, str]:
+    """Return a visible top-right control label within the fixed 1600x900 canvas."""
+    return ("Esc：返回主页面　Q：退出　R：重置", 1576, 30, "ra")
+
+
 def render_eight_view_dashboard(state: EightViewUiState) -> np.ndarray:
     """Render a deterministic 1600x900 presentation/experiment dashboard."""
     canvas = np.full((900, 1600, 3), _rgb_to_bgr(_SURFACE), dtype=np.uint8)
@@ -712,6 +717,14 @@ def render_eight_view_detail(state: EightViewUiState) -> np.ndarray:
     image = Image.fromarray(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB))
     draw = ImageDraw.Draw(image)
     draw.text((24, 18), "BMW 检测证据详情", font=_demo_font(31, "bold"), fill=_INK)
+    controls_text, controls_x, controls_y, controls_anchor = detail_controls_layout()
+    draw.text(
+        (controls_x, controls_y),
+        controls_text,
+        font=_demo_font(13),
+        fill=_MUTED,
+        anchor=controls_anchor,
+    )
     draw.text((24, 72), f"{branch_label} · {view_label}", font=_demo_font(23, "bold"), fill=_INK)
     draw.text((560, 76), status_label, font=_demo_font(22, "bold"), fill=status_color)
     for x, label, panel_image in panels:
@@ -732,7 +745,6 @@ def render_eight_view_detail(state: EightViewUiState) -> np.ndarray:
     for index, line in enumerate(reason_lines):
         draw.text((24, 829 + index * 15), line, font=reason_font, fill=_INK)
     draw.text((24, 875), detail_reference_footer(state), font=_demo_font(13), fill=_MUTED)
-    draw.text((24, 890), "Esc：返回主页面　Q：退出　R：重置", font=_demo_font(13), fill=_MUTED)
     return cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR)
 
 
@@ -751,6 +763,7 @@ __all__ = [
     "EightViewUiState",
     "apply_dashboard_click",
     "dashboard_hit_test",
+    "detail_controls_layout",
     "detail_reason_lines",
     "detail_reference_footer",
     "evidence_detail_images",
