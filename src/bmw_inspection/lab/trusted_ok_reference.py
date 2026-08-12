@@ -16,6 +16,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 from bmw_inspection.lab.eight_view_dataset import VIEW_ORDER, _atomic_publish_noreplace
+from bmw_inspection.lab.eight_view_roi import load_roi_config
 
 
 DATASET_FIELDS = (
@@ -97,6 +98,18 @@ class ReviewPackageSummary:
     contact_sheet_count: int
 
 
+@dataclass(frozen=True, slots=True)
+class TrustedIndexSummary:
+    """Counts and identity of one immutable approved trusted-OK reference release."""
+
+    review_dir: Path
+    output_dir: Path
+    approved_part_count: int
+    reference_count_by_view: dict[str, int]
+    whitelist_sha256: str
+    roi_config_sha256: str
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -125,7 +138,9 @@ def _read_manifest(path: Path) -> tuple[dict[str, str], ...]:
     return tuple(rows)
 
 
-def _candidate_rows(rows: Iterable[Mapping[str, str]], session_id: str) -> tuple[CandidateImage, ...]:
+def _candidate_rows(
+    rows: Iterable[Mapping[str, str]], session_id: str, *, include_incomplete: bool = False
+) -> tuple[CandidateImage, ...]:
     grouped: dict[str, list[CandidateImage]] = defaultdict(list)
     for row_number, raw in enumerate(rows, start=2):
         context = f"dataset manifest row {row_number}"
@@ -170,7 +185,7 @@ def _candidate_rows(rows: Iterable[Mapping[str, str]], session_id: str) -> tuple
             raise ValueError(f"candidate physical part has unsupported view: {part_id}")
         if len(view_ids) != len(set(view_ids)):
             raise ValueError(f"candidate physical part has duplicate views: {part_id}")
-        if set(view_ids) != set(VIEW_ORDER):
+        if set(view_ids) != set(VIEW_ORDER) and not include_incomplete:
             continue
         candidates.extend(sorted(part_rows, key=lambda row: view_index[row.view_id]))
     if not candidates:
@@ -295,3 +310,211 @@ def _group_by_part(rows: Iterable[CandidateImage]) -> dict[str, list[CandidateIm
     for row in rows:
         grouped[row.physical_part_id].append(row)
     return {part_id: grouped[part_id] for part_id in sorted(grouped)}
+
+
+def _read_review_decisions(path: Path) -> dict[str, dict[str, str]]:
+    """Read exact human decisions without silently normalizing their meaning."""
+    if not path.is_file() or path.is_symlink():
+        raise ValueError(f"review decisions are not a regular file: {path}")
+    with path.open(newline="", encoding="utf-8") as stream:
+        reader = csv.DictReader(stream)
+        if tuple(reader.fieldnames or ()) != DECISION_FIELDS:
+            raise ValueError(f"review decisions header differs from the frozen schema: {path}")
+        rows = list(reader)
+    if not rows or any(None in row for row in rows):
+        raise ValueError("review decisions are empty or malformed")
+
+    decisions: dict[str, dict[str, str]] = {}
+    for row_number, raw in enumerate(rows, start=2):
+        context = f"review decision row {row_number}"
+        part_id = _required(raw, "physical_part_id", context=context)
+        sample_id = _required(raw, "sample_id", context=context)
+        decision = _required(raw, "decision", context=context)
+        if decision not in {"APPROVED", "REJECTED", "PENDING"}:
+            raise ValueError(f"{context} has unsupported decision {decision!r}")
+        if part_id in decisions:
+            raise ValueError(f"review decisions contain duplicate physical_part_id: {part_id}")
+        if decision == "APPROVED":
+            _required(raw, "reviewer", context=context)
+            _required(raw, "review_note", context=context)
+        decisions[part_id] = {
+            "physical_part_id": part_id,
+            "sample_id": sample_id,
+            "decision": decision,
+            "reviewer": raw.get("reviewer", "").strip(),
+            "review_note": raw.get("review_note", "").strip(),
+        }
+    return decisions
+
+
+def _validate_review_package(review_dir: Path) -> tuple[dict[str, list[CandidateImage]], dict[str, dict[str, str]]]:
+    """Bind decision rows to the frozen candidate manifest, without evaluating excluded rows."""
+    if not review_dir.is_dir() or review_dir.is_symlink():
+        raise ValueError(f"review package is not a regular directory: {review_dir}")
+    package_path = review_dir / "review_package.json"
+    candidate_path = review_dir / "candidate_manifest.csv"
+    if not package_path.is_file() or package_path.is_symlink():
+        raise ValueError(f"review package metadata is not a regular file: {package_path}")
+    try:
+        package = json.loads(package_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise ValueError(f"review package metadata is invalid JSON: {package_path}") from error
+    if package.get("schema_version") != 1 or package.get("status") != "awaiting_human_review":
+        raise ValueError("review package metadata has unsupported schema or status")
+    if not candidate_path.is_file() or candidate_path.is_symlink():
+        raise ValueError(f"candidate manifest is not a regular file: {candidate_path}")
+
+    candidates = _group_by_part(
+        _candidate_rows(_read_manifest(candidate_path), TRUSTED_OK_SESSION_ID, include_incomplete=True)
+    )
+    decisions = _read_review_decisions(review_dir / "review_decisions.csv")
+    if set(decisions) != set(candidates):
+        raise ValueError("review decisions must cover every and only candidate physical part")
+    for part_id, decision in decisions.items():
+        candidate_sample_ids = {row.sample_id for row in candidates[part_id]}
+        if decision["sample_id"] not in candidate_sample_ids:
+            raise ValueError(f"review decision sample_id differs from candidate manifest: {part_id}")
+    return candidates, decisions
+
+
+def _copy_approved_reference(
+    row: CandidateImage,
+    *,
+    staging: Path,
+    roi: tuple[int, int, int, int],
+    image_width: int,
+    image_height: int,
+    roi_config_sha256: str,
+    whitelist_sha256: str,
+) -> dict[str, object]:
+    """Copy one source frame and derive its deterministic RGB part crop."""
+    if not row.source_path.is_file() or row.source_path.is_symlink():
+        raise ValueError(f"approved source image is not a regular file: {row.source_path}")
+    suffix = row.source_path.suffix.lower() or ".img"
+    full_relative = Path("references") / row.view_id / "full" / f"{row.physical_part_id}{suffix}"
+    roi_relative = Path("references") / row.view_id / "roi" / f"{row.physical_part_id}.png"
+    full_path = staging / full_relative
+    roi_path = staging / roi_relative
+    full_path.parent.mkdir(parents=True, exist_ok=True)
+    roi_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(row.source_path, full_path)
+    full_sha256 = _sha256(full_path)
+    if full_sha256 != row.source_sha256:
+        raise ValueError(f"copied full reference SHA-256 mismatch: {row.source_path}")
+    with Image.open(row.source_path) as source:
+        rgb = source.convert("RGB")
+        if rgb.size != (image_width, image_height):
+            raise ValueError(f"approved source dimensions differ from ROI config: {row.source_path}")
+        x1, y1, x2, y2 = roi
+        cropped = rgb.crop((x1, y1, x2, y2))
+        cropped.save(roi_path, format="PNG")
+    roi_sha256 = _sha256(roi_path)
+    return {
+        "physical_part_id": row.physical_part_id,
+        "sample_id": row.sample_id,
+        "session_id": row.session_id,
+        "group_id": row.group_id,
+        "view_id": row.view_id,
+        "camera_serial": row.camera_serial,
+        "source_path": str(row.source_path),
+        "source_sha256": row.source_sha256,
+        "source_class": row.source_class,
+        "business_label": row.business_label,
+        "split": row.split,
+        "full_image_path": str(full_relative),
+        "full_image_sha256": full_sha256,
+        "roi_image_path": str(roi_relative),
+        "roi_image_sha256": roi_sha256,
+        "roi_xyxy": list(roi),
+        "roi_config_sha256": roi_config_sha256,
+        "whitelist_sha256": whitelist_sha256,
+        "preprocessing_identity": "pil_rgb_crop_png_v1",
+    }
+
+
+def publish_trusted_reference_index(review_dir: Path, output_dir: Path, roi_config: Path) -> TrustedIndexSummary:
+    """Publish an immutable reference index for complete, explicitly approved BMW parts."""
+    review = Path(review_dir).expanduser().resolve()
+    output = Path(output_dir).expanduser().absolute()
+    roi_path = Path(roi_config).expanduser().resolve()
+    if output.exists() or output.is_symlink():
+        raise FileExistsError(f"trusted-OK reference release already exists: {output}")
+    candidates, decisions = _validate_review_package(review)
+    approved_part_ids = [part_id for part_id, decision in decisions.items() if decision["decision"] == "APPROVED"]
+    if not approved_part_ids:
+        raise ValueError("no APPROVED physical parts are available for trusted reference publication")
+    approved_part_ids.sort()
+    for part_id in approved_part_ids:
+        rows = candidates[part_id]
+        if len(rows) != len(VIEW_ORDER) or {row.view_id for row in rows} != set(VIEW_ORDER):
+            raise ValueError(f"approved physical part must contain exactly eight views: {part_id}")
+        _verify_sources(rows)
+
+    roi = load_roi_config(roi_path)
+    roi_config_sha256 = _sha256(roi_path)
+    candidate_manifest_sha256 = _sha256(review / "candidate_manifest.csv")
+    decision_sha256 = _sha256(review / "review_decisions.csv")
+    whitelist = {
+        "schema_version": 1,
+        "status": "published",
+        "review_dir": str(review),
+        "candidate_manifest_sha256": candidate_manifest_sha256,
+        "review_decisions_sha256": decision_sha256,
+        "roi_config_path": str(roi_path),
+        "roi_config_sha256": roi_config_sha256,
+        "preprocessing_identity": "pil_rgb_crop_png_v1",
+        "approved_part_ids": approved_part_ids,
+        "approved_decisions": [decisions[part_id] for part_id in approved_part_ids],
+    }
+    output.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=f".{output.name}.", dir=output.parent))
+    try:
+        whitelist_path = staging / "trusted_ok_whitelist.json"
+        whitelist_path.write_text(
+            json.dumps(whitelist, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False) + "\n",
+            encoding="utf-8",
+        )
+        whitelist_sha256 = _sha256(whitelist_path)
+        references: list[dict[str, object]] = []
+        for part_id in approved_part_ids:
+            by_view = {row.view_id: row for row in candidates[part_id]}
+            for view in VIEW_ORDER:
+                references.append(
+                    _copy_approved_reference(
+                        by_view[view],
+                        staging=staging,
+                        roi=roi.part_rois[view],
+                        image_width=roi.image_width,
+                        image_height=roi.image_height,
+                        roi_config_sha256=roi_config_sha256,
+                        whitelist_sha256=whitelist_sha256,
+                    )
+                )
+        view_counts = {view: sum(row["view_id"] == view for row in references) for view in VIEW_ORDER}
+        index = {
+            "schema_version": 1,
+            "status": "published",
+            "whitelist_sha256": whitelist_sha256,
+            "roi_config_path": str(roi_path),
+            "roi_config_sha256": roi_config_sha256,
+            "preprocessing_identity": "pil_rgb_crop_png_v1",
+            "approved_part_count": len(approved_part_ids),
+            "reference_count_by_view": view_counts,
+            "references": references,
+        }
+        (staging / "reference_index.json").write_text(
+            json.dumps(index, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False) + "\n",
+            encoding="utf-8",
+        )
+        _atomic_publish_noreplace(staging, output)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    return TrustedIndexSummary(
+        review_dir=review,
+        output_dir=output,
+        approved_part_count=len(approved_part_ids),
+        reference_count_by_view=view_counts,
+        whitelist_sha256=whitelist_sha256,
+        roi_config_sha256=roi_config_sha256,
+    )

@@ -15,6 +15,12 @@
 - `bmw_lab_prepare_trusted_ok_review.py` is a PENDING-only, atomic no-overwrite CLI for a human review queue. Its defaults bind the 21:00 prepared manifest and the ignored `dataset/bmw_trusted_ok_review/bmw_right_20260810_21_train_normal_v1` output; `--session-id` is mandatory.
 - It delegates strict schema/filter/hash validation to `bmw_inspection.lab.trusted_ok_reference`. The current actual package has 50 complete training-normal physical parts (400 images), 50 Chinese-labelled contact sheets, and no automatic approvals; reviewers must update decisions in a later explicit workflow.
 
+## BMW trusted-OK approved reference publisher (2026-08-12)
+
+- `bmw_lab_publish_trusted_ok_reference.py` publishes only exact `APPROVED` decisions from the immutable review package. It validates the decision schema, decision-to-candidate binding, all approved source SHA-256 values, fixed eight-view ROI contract, and complete views before atomically creating a no-overwrite release.
+- The fixed first release is `dataset/bmw_trusted_ok_reference/bmw_right_20260810_21_train_normal_approved_v1`. Its `trusted_ok_whitelist.json` binds the candidate and decision CSV hashes; `reference_index.json` binds the whitelist/ROI SHA and one copied full image plus RGB PNG ROI crop per part/view.
+- User confirmation on 2026-08-12 changed the ignored review decisions for all 50 candidates to `APPROVED`, reviewer `user-confirmed-20260812`, note `用户确认50个全部OK`. Publication independently verified 50 parts, 400 index rows, 50 references per view, and SHA matches for 400 sources, 400 full copies, and 400 ROI files. This is curated normal-reference provenance, not model or production acceptance.
+
 ## BMW 21-point Template-only diagnostic candidate (2026-08-11)
 
 - `bmw_lab_train_template_fixed_thresholds.py` is the isolated offline entrypoint. It accepts only the five

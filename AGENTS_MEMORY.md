@@ -1,5 +1,10 @@
 # AGENTS Memory
 
+## BMW trusted-OK approved reference release (2026-08-12)
+
+- `pipeline/bmw_lab_publish_trusted_ok_reference.py` atomically publishes a no-overwrite reference release only from exact human `APPROVED` decisions. It binds the whitelist and every reference entry to the review decision, source, copied full-image, ROI-crop, and fixed ROI-config SHA-256 values.
+- The user-confirmed 50-part release is `dataset/bmw_trusted_ok_reference/bmw_right_20260810_21_train_normal_approved_v1`: 400 full frames, 400 ROI PNGs, eight views with 50 references each. It is trusted-OK provenance only, not model-quality or production acceptance.
+
 ## BMW v3 NG evidence laboratory Demo (2026-08-12)
 
 - The independent v3 profile is `configs/bmw/experiments/bmw_eight_view_demo_v3_ng_evidence.json`; it does not replace

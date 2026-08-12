@@ -5,13 +5,17 @@ from __future__ import annotations
 import csv
 import hashlib
 import importlib.util
+import json
 from pathlib import Path
 
 import pytest
 from PIL import Image
 
 from bmw_inspection.lab.eight_view_dataset import VIEW_ORDER
-from bmw_inspection.lab.trusted_ok_reference import prepare_review_package
+from bmw_inspection.lab.trusted_ok_reference import (
+    prepare_review_package,
+    publish_trusted_reference_index,
+)
 
 
 DATASET_FIELDS = (
@@ -78,6 +82,115 @@ def _decisions(package: Path) -> list[tuple[str, str]]:
             (row["physical_part_id"], row["decision"])
             for row in csv.DictReader(stream)
         ]
+
+
+def _roi_config(root: Path) -> Path:
+    """Write a fixed-setup ROI asset matching the small test images."""
+    reference_manifest = root / "roi-reference.csv"
+    reference_manifest.write_text("fixed setup reference\n", encoding="utf-8")
+    payload = {
+        "schema_version": 2,
+        "coordinate_system": "pixel_xyxy_half_open",
+        "representative_sample_id": "representative_000001",
+        "image_width": 12,
+        "image_height": 10,
+        "part_rois": {view: [1, 1, 11, 9] for view in VIEW_ORDER},
+        "binding_mode": "fixed_setup",
+        "profile_id": "test-fixed-setup",
+        "capture_scope": "right",
+        "reference_manifest": str(reference_manifest),
+        "reference_manifest_sha256": hashlib.sha256(reference_manifest.read_bytes()).hexdigest(),
+    }
+    path = root / "roi.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+def _review_package(root: Path, *, part_count: int = 2) -> Path:
+    rows: list[dict[str, str]] = []
+    for index in range(part_count):
+        _write_part(root, rows, part_id=f"normal-train-{index + 1:03d}")
+    review = root / "review-package"
+    prepare_review_package(_manifest(root, rows), review, session_id="20260810_210030_527506")
+    return review
+
+
+def _set_decision(review: Path, part_id: str, decision: str) -> None:
+    path = review / "review_decisions.csv"
+    with path.open(newline="", encoding="utf-8") as stream:
+        rows = list(csv.DictReader(stream))
+    for row in rows:
+        if row["physical_part_id"] == part_id:
+            row.update({"decision": decision, "reviewer": "test-reviewer", "review_note": "reviewed"})
+    with path.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=("physical_part_id", "sample_id", "decision", "reviewer", "review_note"))
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def test_publish_trusted_reference_index_copies_only_complete_approved_parts(tmp_path: Path) -> None:
+    review = _review_package(tmp_path, part_count=3)
+    _set_decision(review, "normal-train-001", "APPROVED")
+    _set_decision(review, "normal-train-002", "REJECTED")
+    release = tmp_path / "trusted-release"
+
+    summary = publish_trusted_reference_index(review, release, _roi_config(tmp_path))
+
+    assert summary.approved_part_count == 1
+    assert summary.reference_count_by_view == {view: 1 for view in VIEW_ORDER}
+    whitelist = json.loads((release / "trusted_ok_whitelist.json").read_text(encoding="utf-8"))
+    index = json.loads((release / "reference_index.json").read_text(encoding="utf-8"))
+    assert whitelist["approved_part_ids"] == ["normal-train-001"]
+    assert len(index["references"]) == len(VIEW_ORDER)
+    for view in VIEW_ORDER:
+        assert len(list((release / "references" / view / "full").iterdir())) == 1
+        assert len(list((release / "references" / view / "roi").iterdir())) == 1
+    with pytest.raises(FileExistsError, match="already exists"):
+        publish_trusted_reference_index(review, release, _roi_config(tmp_path))
+
+
+@pytest.mark.parametrize("decision", ["", "UNKNOWN"])
+def test_publish_trusted_reference_index_rejects_blank_or_unknown_selected_decisions(
+    tmp_path: Path, decision: str
+) -> None:
+    review = _review_package(tmp_path, part_count=1)
+    _set_decision(review, "normal-train-001", decision)
+
+    with pytest.raises(ValueError, match="decision"):
+        publish_trusted_reference_index(review, tmp_path / "trusted-release", _roi_config(tmp_path))
+
+
+def test_publish_trusted_reference_index_rejects_approved_source_sha_drift(tmp_path: Path) -> None:
+    review = _review_package(tmp_path, part_count=1)
+    _set_decision(review, "normal-train-001", "APPROVED")
+    with (review / "candidate_manifest.csv").open(newline="", encoding="utf-8") as stream:
+        source_path = Path(next(csv.DictReader(stream))["source_path"])
+    source_path.write_bytes(b"changed after review")
+
+    with pytest.raises(ValueError, match="source_sha256 mismatch"):
+        publish_trusted_reference_index(review, tmp_path / "trusted-release", _roi_config(tmp_path))
+
+
+def test_publish_trusted_reference_index_rejects_approved_part_missing_a_view(tmp_path: Path) -> None:
+    review = _review_package(tmp_path, part_count=1)
+    _set_decision(review, "normal-train-001", "APPROVED")
+    candidate_path = review / "candidate_manifest.csv"
+    with candidate_path.open(newline="", encoding="utf-8") as stream:
+        rows = list(csv.DictReader(stream))[:-1]
+    with candidate_path.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=DATASET_FIELDS)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    with pytest.raises(ValueError, match="exactly eight views"):
+        publish_trusted_reference_index(review, tmp_path / "trusted-release", _roi_config(tmp_path))
+
+
+def test_publish_trusted_reference_index_rejects_when_no_part_is_approved(tmp_path: Path) -> None:
+    review = _review_package(tmp_path, part_count=1)
+
+    with pytest.raises(ValueError, match="no APPROVED"):
+        publish_trusted_reference_index(review, tmp_path / "trusted-release", _roi_config(tmp_path))
 
 
 def test_review_package_contains_only_complete_training_normals_and_pending_decisions(tmp_path: Path) -> None:
