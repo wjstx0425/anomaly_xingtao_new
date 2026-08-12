@@ -54,6 +54,8 @@ from bmw_inspection.lab.eight_view_demo_ui import (  # noqa: E402
 
 _LOGICAL_CANVAS_WIDTH = 1600
 _LOGICAL_CANVAS_HEIGHT = 900
+_WINDOW_HANDLE = "BMW_EIGHT_VIEW_DEMO"
+_WINDOW_TITLE = "BMW 零件八视图检测"
 
 
 class _GuiAction(str, Enum):
@@ -174,16 +176,18 @@ def _consume_mouse_releases(
 
 
 def _initialize_gui_window(
-    title: str,
+    window_handle: str,
+    visible_title: str,
     state: EightViewUiState,
     mouse_releases: list[tuple[int, int]],
 ) -> None:
-    """Realize the Qt window before registering its mouse callback."""
-    cv2.namedWindow(title, cv2.WINDOW_NORMAL)
-    cv2.resizeWindow(title, 1440, 810)
-    cv2.imshow(title, render_eight_view_screen(state))
+    """Realize an ASCII-addressable Qt window, then apply its Chinese caption."""
+    cv2.namedWindow(window_handle, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(window_handle, 1440, 810)
+    cv2.imshow(window_handle, render_eight_view_screen(state))
     cv2.waitKey(1)
-    cv2.setMouseCallback(title, _queue_left_button_release, mouse_releases)
+    cv2.setMouseCallback(window_handle, _queue_left_button_release, mouse_releases)
+    cv2.setWindowTitle(window_handle, visible_title)
 
 
 def _handle_gui_key(state: EightViewUiState, key: int) -> tuple[EightViewUiState, _GuiAction]:
@@ -293,10 +297,10 @@ def _run_gui(
     models: EightViewModelSuite,
     offline: tuple[str, Mapping[str, np.ndarray]] | None,
 ) -> int:
-    title = "BMW 零件八视图检测"
+    title = _WINDOW_HANDLE
     mouse_releases: list[tuple[int, int]] = []
     state = EightViewUiState(experiment_mode=args.experiment_mode)
-    _initialize_gui_window(title, state, mouse_releases)
+    _initialize_gui_window(title, _WINDOW_TITLE, state, mouse_releases)
     front: Mapping[str, np.ndarray] | None = None
     camera_context = nullcontext(None) if offline is not None else FourCameraHdrSession(config.capture_config)
     try:

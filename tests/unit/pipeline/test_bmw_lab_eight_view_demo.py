@@ -115,14 +115,21 @@ def test_gui_window_is_realized_before_mouse_callback_registration(monkeypatch) 
         "setMouseCallback",
         lambda title, callback, userdata: calls.append(("mouse", title, callback, userdata)),
     )
+    monkeypatch.setattr(
+        entrypoint.cv2,
+        "setWindowTitle",
+        lambda title, visible_title: calls.append(("caption", title, visible_title)),
+    )
 
-    entrypoint._initialize_gui_window("BMW", state, releases)
+    entrypoint._initialize_gui_window("BMW_EIGHT_VIEW_DEMO", "BMW 零件八视图检测", state, releases)
 
-    assert [call[0] for call in calls] == ["named", "resize", "show", "wait", "mouse"]
+    assert [call[0] for call in calls] == ["named", "resize", "show", "wait", "mouse", "caption"]
+    assert {calls[index][1] for index in (0, 1, 2, 4, 5)} == {"BMW_EIGHT_VIEW_DEMO"}
     assert calls[2][2] is dashboard
     assert calls[3] == ("wait", 1)
     assert calls[4][2] is entrypoint._queue_left_button_release
     assert calls[4][3] is releases
+    assert calls[5] == ("caption", "BMW_EIGHT_VIEW_DEMO", "BMW 零件八视图检测")
 
 
 def test_page_key_handling_returns_detail_to_dashboard_and_preserves_dashboard_escape() -> None:
