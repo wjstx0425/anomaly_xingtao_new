@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 
 from bmw_inspection.lab.eight_view_dataset import VIEW_ORDER
@@ -22,6 +24,8 @@ from bmw_inspection.lab.eight_view_demo_ui import (
     _trusted_reference_details,
     apply_dashboard_click,
     dashboard_hit_test,
+    detail_reason_lines,
+    detail_reference_footer,
     evidence_detail_images,
     evidence_comparison_images,
     render_eight_view_dashboard,
@@ -505,14 +509,20 @@ def test_evidence_detail_pairs_keep_algorithm_coordinate_domains() -> None:
         phase=DemoUiPhase.RESULT, inspection=inspection, selected_view="front_right", selected_branch=DemoBranch.YOLO,
     ))
     efficientad = evidence_detail_images(EightViewUiState(
-        phase=DemoUiPhase.RESULT, inspection=inspection, selected_view="back_left", selected_branch=DemoBranch.EFFICIENTAD,
+        phase=DemoUiPhase.RESULT,
+        inspection=inspection,
+        selected_view="back_left",
+        selected_branch=DemoBranch.EFFICIENTAD,
     ))
     streak = evidence_detail_images(EightViewUiState(
-        phase=DemoUiPhase.RESULT, inspection=inspection, selected_view="front_left", selected_branch=DemoBranch.BRIGHT_STREAK,
+        phase=DemoUiPhase.RESULT,
+        inspection=inspection,
+        selected_view="front_left",
+        selected_branch=DemoBranch.BRIGHT_STREAK,
     ))
 
     assert int(template.left_image.mean()) == 70
-    assert int(template.right_image.mean()) == 80
+    assert int(template.right_image.mean()) == 10
     assert int(yolo.left_image.mean()) == 60
     assert int(yolo.right_image.mean()) == 20
     assert int(efficientad.left_image.mean()) == 60
@@ -547,3 +557,72 @@ def test_detail_page_is_opened_only_for_valid_evidence_and_reports_pass_or_missi
     assert missing.left_image is None
     assert "无可信OK参考" in missing.left_label
     assert render_eight_view_screen(opened).shape == (900, 1600, 3)
+
+
+def test_pass_detail_footer_hides_reference_identity_shared_by_another_ng_branch() -> None:
+    base = _inspection()
+    yolo_ng = DemoBranchResult(
+        DemoBranch.YOLO,
+        "front",
+        BranchStatus.NG,
+        0.8,
+        0.2,
+        1.0,
+        "同一视角的YOLO不通过",
+        np.full((10, 10, 3), 20, dtype=np.uint8),
+    )
+    inspection = EightViewInspection(
+        base.capture_id,
+        base.images,
+        base.results + (yolo_ng,),
+        base.final_status,
+        base.elapsed_ms,
+        roi_images=base.roi_images,
+        trusted_ok_by_comparison={("front", "roi"): _match(base, "front")},
+    )
+    pass_state = EightViewUiState(
+        phase=DemoUiPhase.RESULT,
+        inspection=inspection,
+        selected_view="front",
+        selected_branch=DemoBranch.TEMPLATE,
+    )
+
+    footer = detail_reference_footer(pass_state)
+
+    assert footer == "当前项目通过，无需NG参考"
+    assert "normal-train-001" not in footer
+
+
+def test_long_detail_reason_wraps_without_losing_chinese_semantics() -> None:
+    long_reason = "模板差异超过阈值，需核对定位、边缘、纹理和夹具状态。" * 5
+    base = _inspection()
+    long_template = DemoBranchResult(
+        DemoBranch.TEMPLATE,
+        "front",
+        BranchStatus.NG,
+        0.3,
+        0.2,
+        1.0,
+        long_reason,
+        np.full((10, 10, 3), 10, dtype=np.uint8),
+    )
+    inspection = EightViewInspection(
+        base.capture_id,
+        base.images,
+        (long_template, *base.results[1:]),
+        base.final_status,
+        base.elapsed_ms,
+        roi_images=base.roi_images,
+    )
+    state = EightViewUiState(
+        phase=DemoUiPhase.RESULT,
+        inspection=inspection,
+        selected_view="front",
+        selected_branch=DemoBranch.TEMPLATE,
+    )
+
+    lines = detail_reason_lines(state)
+
+    assert 2 <= len(lines) <= 3
+    assert "".join(lines) == long_reason
+    assert render_eight_view_screen(replace(state, page=DemoUiPage.DETAIL)).shape == (900, 1600, 3)

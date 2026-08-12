@@ -430,18 +430,32 @@ def evidence_detail_images(state: EightViewUiState) -> EvidenceDetailImages:
             current = cv2.rotate(current, cv2.ROTATE_90_CLOCKWISE)
         return EvidenceDetailImages("当前项目通过，无需NG参考", None, "当前检测证据", current)
     mode = "full" if state.selected_branch is DemoBranch.BRIGHT_STREAK else "roi"
-    match = None if state.inspection is None else state.inspection.trusted_ok_by_comparison.get((state.selected_view, mode))
+    match = (
+        None
+        if state.inspection is None
+        else state.inspection.trusted_ok_by_comparison.get((state.selected_view, mode))
+    )
     if match is None:
         if state.selected_branch is DemoBranch.BRIGHT_STREAK and current is not None:
             current = cv2.rotate(current, cv2.ROTATE_90_CLOCKWISE)
         return EvidenceDetailImages("无可信OK参考", None, "当前检测证据", current)
     if state.selected_branch is DemoBranch.TEMPLATE:
-        return EvidenceDetailImages("可信OK对齐参考", match.aligned_reference_roi, "当前差异证据", match.difference_overlay)
+        return EvidenceDetailImages(
+            "可信OK对齐参考",
+            match.aligned_reference_roi,
+            "当前模板差异证据",
+            current,
+        )
     if state.selected_branch in {DemoBranch.YOLO, DemoBranch.EFFICIENTAD}:
         return EvidenceDetailImages("可信OK参考ROI", match.reference_roi, "当前ROI覆盖图", current)
     reference_roi = _bright_streak_reference_roi(match, row)
     if reference_roi is None:
-        return EvidenceDetailImages("可信OK参考ROI不可用", None, "当前光痕ROI证据", None if current is None else cv2.rotate(current, cv2.ROTATE_90_CLOCKWISE))
+        return EvidenceDetailImages(
+            "可信OK参考ROI不可用",
+            None,
+            "当前光痕ROI证据",
+            None if current is None else cv2.rotate(current, cv2.ROTATE_90_CLOCKWISE),
+        )
     return EvidenceDetailImages(
         "可信OK光痕ROI",
         cv2.rotate(reference_roi, cv2.ROTATE_90_CLOCKWISE),
@@ -470,6 +484,41 @@ def _wrapped_lines(
     if current or not lines:
         lines.append(current)
     return lines
+
+
+def _detail_reason_layout(
+    state: EightViewUiState,
+) -> tuple[ImageFont.FreeTypeFont, tuple[str, ...]]:
+    """Fit the complete selected reason into the fixed detail footer without clipping."""
+    row = _selected_row(state)
+    if row is None:
+        return _demo_font(12), ()
+    draw = ImageDraw.Draw(Image.new("RGB", (1600, 1)))
+    for size in range(13, 0, -1):
+        font = _demo_font(size)
+        lines = tuple(_wrapped_lines(draw, row.reason, font=font, width=1515))
+        if len(lines) <= 3:
+            return font, lines
+    raise AssertionError("字体大小搜索必须能容纳详情原因")
+
+
+def detail_reason_lines(state: EightViewUiState) -> tuple[str, ...]:
+    """Return every wrapped detail-reason line in the same layout used by the renderer."""
+    return _detail_reason_layout(state)[1]
+
+
+def detail_reference_footer(state: EightViewUiState) -> str:
+    """Return only the reference identity that is valid for the selected result row."""
+    row = _selected_row(state)
+    if row is not None and row.status is BranchStatus.PASS:
+        return "当前项目通过，无需NG参考"
+    if state.inspection is None:
+        return "参考样本：无可信OK参考"
+    mode = "full" if state.selected_branch is DemoBranch.BRIGHT_STREAK else "roi"
+    match = state.inspection.trusted_ok_by_comparison.get((state.selected_view, mode))
+    if match is None:
+        return "参考样本：无可信OK参考"
+    return f"参考零件：{match.physical_part_id}　参考样本：{match.sample_id}"
 
 
 def render_eight_view_dashboard(state: EightViewUiState) -> np.ndarray:
@@ -597,7 +646,11 @@ def render_eight_view_dashboard(state: EightViewUiState) -> np.ndarray:
             ),
             None,
         )
-        queue_text = "当前为手动选择" if current_index is None else f"NG/异常 {current_index + 1}/{len(actionable)}"
+        queue_text = (
+            "当前为手动选择"
+            if current_index is None
+            else f"NG/异常 {current_index + 1}/{len(actionable)}"
+        )
         draw.text((1084, 602), queue_text, font=_demo_font(17, "bold"), fill=_RED if actionable else _GREEN)
     detail_y = 630
     detail_rows = [
@@ -666,16 +719,20 @@ def render_eight_view_detail(state: EightViewUiState) -> np.ndarray:
         if panel_image is None:
             draw.text((x + 378, 482), label, font=_demo_font(21), fill=_MUTED, anchor="mm")
     row = _selected_row(state)
+    reason_font, reason_lines = _detail_reason_layout(state)
     if row is not None:
         score = "不可用" if row.score is None else f"{row.score:.6g}"
         threshold = "不可用" if row.threshold is None else f"{row.threshold:.6g}"
-        draw.text((24, 830), f"分数：{score}　阈值：{threshold}　原因：{row.reason}", font=_demo_font(16), fill=_INK)
-    match = None
-    if state.inspection is not None:
-        mode = "full" if state.selected_branch is DemoBranch.BRIGHT_STREAK else "roi"
-        match = state.inspection.trusted_ok_by_comparison.get((state.selected_view, mode))
-    reference_text = "参考样本：无可信OK参考" if match is None else f"参考零件：{match.physical_part_id}　参考样本：{match.sample_id}"
-    draw.text((24, 862), f"{reference_text}　Esc：返回主页面　Q：退出　R：重置", font=_demo_font(15), fill=_MUTED)
+        draw.text(
+            (24, 810),
+            f"分数：{score}　阈值：{threshold}　完整原因：",
+            font=_demo_font(13, "bold"),
+            fill=_INK,
+        )
+    for index, line in enumerate(reason_lines):
+        draw.text((24, 829 + index * 15), line, font=reason_font, fill=_INK)
+    draw.text((24, 875), detail_reference_footer(state), font=_demo_font(13), fill=_MUTED)
+    draw.text((24, 890), "Esc：返回主页面　Q：退出　R：重置", font=_demo_font(13), fill=_MUTED)
     return cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR)
 
 
@@ -694,6 +751,8 @@ __all__ = [
     "EightViewUiState",
     "apply_dashboard_click",
     "dashboard_hit_test",
+    "detail_reason_lines",
+    "detail_reference_footer",
     "evidence_detail_images",
     "evidence_comparison_images",
     "preferred_selection",
