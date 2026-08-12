@@ -2,8 +2,8 @@
 
 ## BMW 光痕 tracked-profile V3 部署验收（2026-08-12）
 
-- 当前光痕后端提交为 `0213a890`，配置 `configs/bmw/experiments/bmw_eight_view_demo_v3_ng_evidence.json` 指向 `tracked_profile_v3` 的不可变 v8 报告（SHA256 `6b43690af67702333646fa7a88a2a5053a0afae6d19cb343bf6d3abb193c17d4`）。回退时只需恢复该配置的三个 `bright_streak` 字段到 `raw_profile_v2` 及 corrected v2 报告。
-- 最终干净快照验证：`179 passed`；真实保存记录 `bmw_demo_20260812_211302` 为 `PASS/OK`，并证明引擎切换前后 24 个非光痕结果完全一致。证据保存在忽略目录 `artifacts/bmw_bright_streak_tracked_v3_smoke/final_0213a890/`，不要提交截图、inspection 或客户图像。
+- 当前光痕后端提交为 `1ca4f471`，配置 `configs/bmw/experiments/bmw_eight_view_demo_v3_ng_evidence.json` 指向 `tracked_profile_v3` 的不可变 v8 报告（SHA256 `6b43690af67702333646fa7a88a2a5053a0afae6d19cb343bf6d3abb193c17d4`）。回退时只需恢复该配置的三个 `bright_streak` 字段到 `raw_profile_v2` 及 corrected v2 报告。
+- 最终干净快照验证：`181 passed`；真实保存记录 `bmw_demo_20260812_211302` 为 `PASS/OK`，并证明引擎切换前后 24 个非光痕结果完全一致。证据保存在忽略目录 `artifacts/bmw_bright_streak_tracked_v3_smoke/final_1ca4f471/`，不要提交截图、inspection 或客户图像。
 - V3 只在固定 `[1792,1180,1873,1793]` ROI 中追踪斜向光痕。证据中心线绿色=强响应、橙色=弱桥接、红色=有效范围内的内部断点、灰色=前后背景。
 - `real_broken_samples=0`：真实断续召回尚未验证；现阶段只能确认 8/8 完全无光痕样本保持 `NG_NO_STREAK`，不能把合成断续测试描述成真实数据效果。
 
