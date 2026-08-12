@@ -13,7 +13,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from bmw_inspection.lab.trusted_ok_reference import prepare_review_package  # noqa: E402
+from bmw_inspection.lab.trusted_ok_reference import (  # noqa: E402
+    TRUSTED_OK_SESSION_ID,
+    prepare_review_package,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -27,7 +30,7 @@ def build_parser() -> argparse.ArgumentParser:
             / "dataset/bmw_lab_prepared/bmw_right_batch_20260810_21_v1/manifests/dataset_manifest.csv"
         ),
     )
-    parser.add_argument("--session-id", required=True)
+    parser.add_argument("--session-id", required=True, choices=(TRUSTED_OK_SESSION_ID,))
     parser.add_argument(
         "--output",
         type=Path,

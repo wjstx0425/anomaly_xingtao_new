@@ -117,6 +117,19 @@ def test_review_package_aborts_before_publication_when_a_candidate_hash_mismatch
     assert not output.exists()
 
 
+def test_review_package_rejects_any_session_other_than_the_fixed_trusted_ok_source(tmp_path: Path) -> None:
+    rows: list[dict[str, str]] = []
+    _write_part(tmp_path, rows, part_id="normal-train-001")
+    output = tmp_path / "review-package"
+
+    with pytest.raises(ValueError, match="only supports session_id"):
+        prepare_review_package(
+            _manifest(tmp_path, rows), output, session_id="20260810_999999_000000"
+        )
+
+    assert not output.exists()
+
+
 def test_review_package_rejects_a_symlinked_candidate_source_before_publication(tmp_path: Path) -> None:
     rows: list[dict[str, str]] = []
     _write_part(tmp_path, rows, part_id="normal-train-001")

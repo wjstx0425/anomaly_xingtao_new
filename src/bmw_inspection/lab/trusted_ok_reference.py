@@ -32,6 +32,7 @@ DATASET_FIELDS = (
     "split",
 )
 DECISION_FIELDS = ("physical_part_id", "sample_id", "decision", "reviewer", "review_note")
+TRUSTED_OK_SESSION_ID = "20260810_210030_527506"
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _SAFE_PART_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 _VIEW_LABELS = {
@@ -223,6 +224,9 @@ def prepare_review_package(manifest: Path, output_dir: Path, *, session_id: str)
     """Publish PENDING-only human-review candidates from one BMW capture session."""
     if not isinstance(session_id, str) or not session_id.strip():
         raise ValueError("session_id must be a non-empty string")
+    normalized_session_id = session_id.strip()
+    if normalized_session_id != TRUSTED_OK_SESSION_ID:
+        raise ValueError(f"trusted-OK review package only supports session_id {TRUSTED_OK_SESSION_ID}")
     manifest_path = Path(manifest).expanduser().resolve()
     if not manifest_path.is_file() or manifest_path.is_symlink():
         raise ValueError(f"dataset manifest is not a regular file: {manifest_path}")
@@ -230,7 +234,7 @@ def prepare_review_package(manifest: Path, output_dir: Path, *, session_id: str)
     if output.exists() or output.is_symlink():
         raise FileExistsError(f"review package already exists: {output}")
 
-    candidates = _candidate_rows(_read_manifest(manifest_path), session_id.strip())
+    candidates = _candidate_rows(_read_manifest(manifest_path), normalized_session_id)
     _verify_sources(candidates)
     part_rows = {
         part_id: tuple(rows)
@@ -259,7 +263,7 @@ def prepare_review_package(manifest: Path, output_dir: Path, *, session_id: str)
             "schema_version": 1,
             "status": "awaiting_human_review",
             "automatic_approvals": 0,
-            "session_id": session_id.strip(),
+            "session_id": normalized_session_id,
             "manifest_path": str(manifest_path),
             "manifest_sha256": _sha256(manifest_path),
             "candidate_part_count": len(part_rows),
@@ -278,7 +282,7 @@ def prepare_review_package(manifest: Path, output_dir: Path, *, session_id: str)
     return ReviewPackageSummary(
         manifest_path=manifest_path,
         output_dir=output,
-        session_id=session_id.strip(),
+        session_id=normalized_session_id,
         candidate_part_count=len(part_rows),
         candidate_image_count=len(candidates),
         pending_decision_count=len(part_rows),
