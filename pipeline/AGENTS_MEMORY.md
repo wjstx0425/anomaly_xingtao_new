@@ -12,8 +12,8 @@
 
 ## BMW trusted-OK review package (2026-08-12)
 
-- `bmw_lab_prepare_trusted_ok_review.py` is a PENDING-only, atomic no-overwrite CLI for a human review queue. Its defaults bind the 21:00 prepared manifest and the ignored `dataset/bmw_trusted_ok_review/bmw_right_20260810_21_train_normal_v1` output; `--session-id` is mandatory.
-- It delegates strict schema/filter/hash validation to `bmw_inspection.lab.trusted_ok_reference`. The current actual package has 50 complete training-normal physical parts (400 images), 50 Chinese-labelled contact sheets, and no automatic approvals; reviewers must update decisions in a later explicit workflow.
+- `bmw_lab_prepare_trusted_ok_review.py` is a PENDING-only, atomic no-overwrite CLI for a human review queue. Its defaults bind the 21:00 prepared manifest and the ignored frozen v2 output `dataset/bmw_trusted_ok_review/bmw_right_20260810_21_train_normal_v2`; `--session-id` is mandatory.
+- It delegates strict schema/filter/hash validation to `bmw_inspection.lab.trusted_ok_reference`. The current v2 package has 50 complete training-normal physical parts (400 images) and 50 Chinese-labelled contact sheets; it is the only future candidate package. Historical v1 is retained solely as an immutable audit artifact and must not be regenerated or published.
 
 ## BMW trusted-OK approved reference publisher (2026-08-12)
 

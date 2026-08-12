@@ -339,7 +339,7 @@ def test_review_cli_requires_a_session_and_defaults_to_the_immutable_review_loca
     parser = module.build_parser()
     defaults = parser.parse_args(["--session-id", "20260810_210030_527506"])
 
-    assert defaults.output.name == "bmw_right_20260810_21_train_normal_v1"
+    assert defaults.output.name == "bmw_right_20260810_21_train_normal_v2"
     assert defaults.manifest.name == "dataset_manifest.csv"
     with pytest.raises(SystemExit):
         parser.parse_args([])
