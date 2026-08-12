@@ -173,6 +173,19 @@ def _consume_mouse_releases(
     return state
 
 
+def _initialize_gui_window(
+    title: str,
+    state: EightViewUiState,
+    mouse_releases: list[tuple[int, int]],
+) -> None:
+    """Realize the Qt window before registering its mouse callback."""
+    cv2.namedWindow(title, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(title, 1440, 810)
+    cv2.imshow(title, render_eight_view_screen(state))
+    cv2.waitKey(1)
+    cv2.setMouseCallback(title, _queue_left_button_release, mouse_releases)
+
+
 def _handle_gui_key(state: EightViewUiState, key: int) -> tuple[EightViewUiState, _GuiAction]:
     """Apply page-aware shortcuts without capturing or rerunning inspection work."""
     if key in {ord("q"), ord("Q")}:
@@ -281,11 +294,9 @@ def _run_gui(
     offline: tuple[str, Mapping[str, np.ndarray]] | None,
 ) -> int:
     title = "BMW 零件八视图检测"
-    cv2.namedWindow(title, cv2.WINDOW_NORMAL)
-    cv2.resizeWindow(title, 1440, 810)
     mouse_releases: list[tuple[int, int]] = []
-    cv2.setMouseCallback(title, _queue_left_button_release, mouse_releases)
     state = EightViewUiState(experiment_mode=args.experiment_mode)
+    _initialize_gui_window(title, state, mouse_releases)
     front: Mapping[str, np.ndarray] | None = None
     camera_context = nullcontext(None) if offline is not None else FourCameraHdrSession(config.capture_config)
     try:

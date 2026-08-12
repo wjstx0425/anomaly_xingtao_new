@@ -92,6 +92,39 @@ def test_mouse_callback_only_queues_left_button_releases_and_consumption_applies
     assert releases == []
 
 
+def test_gui_window_is_realized_before_mouse_callback_registration(monkeypatch) -> None:
+    calls: list[tuple[object, ...]] = []
+    dashboard = np.zeros((900, 1600, 3), dtype=np.uint8)
+    releases: list[tuple[int, int]] = []
+    state = EightViewUiState(experiment_mode=True)
+    monkeypatch.setattr(
+        entrypoint.cv2,
+        "namedWindow",
+        lambda title, mode: calls.append(("named", title, mode)),
+    )
+    monkeypatch.setattr(
+        entrypoint.cv2,
+        "resizeWindow",
+        lambda title, width, height: calls.append(("resize", title, width, height)),
+    )
+    monkeypatch.setattr(entrypoint, "render_eight_view_screen", lambda used_state: dashboard)
+    monkeypatch.setattr(entrypoint.cv2, "imshow", lambda title, image: calls.append(("show", title, image)))
+    monkeypatch.setattr(entrypoint.cv2, "waitKey", lambda delay: calls.append(("wait", delay)) or -1)
+    monkeypatch.setattr(
+        entrypoint.cv2,
+        "setMouseCallback",
+        lambda title, callback, userdata: calls.append(("mouse", title, callback, userdata)),
+    )
+
+    entrypoint._initialize_gui_window("BMW", state, releases)
+
+    assert [call[0] for call in calls] == ["named", "resize", "show", "wait", "mouse"]
+    assert calls[2][2] is dashboard
+    assert calls[3] == ("wait", 1)
+    assert calls[4][2] is entrypoint._queue_left_button_release
+    assert calls[4][3] is releases
+
+
 def test_page_key_handling_returns_detail_to_dashboard_and_preserves_dashboard_escape() -> None:
     detail = EightViewUiState(page=DemoUiPage.DETAIL, experiment_mode=True)
 
