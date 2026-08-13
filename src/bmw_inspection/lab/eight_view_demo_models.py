@@ -408,7 +408,13 @@ class EightViewTrackedProfileBrightStreakPredictor:
         "profile_npz_sha256",
     }
 
-    def __init__(self, report_path: Path) -> None:
+    def __init__(
+        self,
+        report_path: Path,
+        *,
+        rotated_roi_path: Path | None = None,
+        rotated_roi_sha256: str | None = None,
+    ) -> None:
         from bmw_inspection.lab.bright_streak_tracked_profile import (
             TrackedProfileGeometry,
             TrackedProfileThresholds,
@@ -494,6 +500,23 @@ class EightViewTrackedProfileBrightStreakPredictor:
         self._roi = (x1, y1, x2, y2)
         self._geometry = geometry
         self._thresholds = thresholds
+        if (rotated_roi_path is None) != (rotated_roi_sha256 is None):
+            raise ValueError("倾斜光痕ROI路径和SHA256必须同时提供")
+        self._rotated_roi = None
+        self._rotated_roi_sha256 = None
+        if rotated_roi_path is not None and rotated_roi_sha256 is not None:
+            from bmw_inspection.lab.bright_streak_rotated_roi import (
+                load_rotated_bright_streak_roi,
+            )
+
+            try:
+                self._rotated_roi = load_rotated_bright_streak_roi(
+                    rotated_roi_path,
+                    expected_sha256=rotated_roi_sha256,
+                )
+            except ValueError as error:
+                raise ValueError(f"倾斜光痕ROI SHA256或资产校验失败：{error}") from error
+            self._rotated_roi_sha256 = rotated_roi_sha256
 
     @staticmethod
     def _is_sha256(value: object) -> bool:
@@ -749,11 +772,16 @@ class EightViewTrackedProfileBrightStreakPredictor:
 
         if not isinstance(image, np.ndarray) or image.dtype != np.uint8 or image.ndim not in {2, 3}:
             raise ValueError("追踪光痕v3输入必须是uint8灰度或BGR图像")
-        x1, y1, x2, y2 = self._roi
-        height, width = image.shape[:2]
-        if x2 > width or y2 > height:
-            raise ValueError(f"追踪光痕v3 ROI超出输入图像{width}x{height}")
-        roi_gray = _gray(image)[y1:y2, x1:x2]
+        if self._rotated_roi is None:
+            x1, y1, x2, y2 = self._roi
+            height, width = image.shape[:2]
+            if x2 > width or y2 > height:
+                raise ValueError(f"追踪光痕v3 ROI超出输入图像{width}x{height}")
+            roi_gray = _gray(image)[y1:y2, x1:x2]
+        else:
+            from bmw_inspection.lab.bright_streak_rotated_roi import rectify_bright_streak_roi
+
+            roi_gray = _gray(rectify_bright_streak_roi(image, self._rotated_roi))
         metrics = analyze_tracked_profile(roi_gray, self._geometry, self._thresholds)
         decision = classify_tracked_profile(metrics, self._thresholds)
         status = BranchStatus.PASS if decision == "OK" else BranchStatus.NG
@@ -785,6 +813,17 @@ class EightViewTrackedProfileBrightStreakPredictor:
             f"弱阈值 {self._thresholds.weak_row_score:.3f}，"
             f"桥接行 {int(np.count_nonzero(metrics.bridged_mask))}"
         )
+        roi_details: dict[str, object] = {"roi_xyxy": self._roi}
+        if self._rotated_roi is not None:
+            reason = f"手动倾斜ROI，沿用V3阈值（未重标定）；{reason}"
+            roi_details.update(
+                {
+                    "roi_points_xy": self._rotated_roi.points_xy,
+                    "roi_mode": "manual_rotated_perspective",
+                    "threshold_calibration": "existing_v3_not_recalibrated",
+                    "rotated_roi_sha256": self._rotated_roi_sha256,
+                }
+            )
         return ModelOutput(
             status,
             metrics.coverage_ratio,
@@ -794,7 +833,7 @@ class EightViewTrackedProfileBrightStreakPredictor:
             details={
                 "evidence_type": "追踪中心线诊断证据",
                 "decision": decision,
-                "roi_xyxy": self._roi,
+                **roi_details,
                 "presence": present,
                 "coverage_ratio": metrics.coverage_ratio,
                 "longest_run_px": metrics.longest_run_px,
@@ -1216,6 +1255,12 @@ def build_model_suite(
         bright_streak = EightViewRawProfileBrightStreakPredictor(config.bright_streak_config)
     elif config.bright_streak_engine == "tracked_profile_v3":
         bright_streak = EightViewTrackedProfileBrightStreakPredictor(config.bright_streak_config)
+    elif config.bright_streak_engine == "tracked_profile_v3_manual_rotated_roi":
+        bright_streak = EightViewTrackedProfileBrightStreakPredictor(
+            config.bright_streak_config,
+            rotated_roi_path=getattr(config, "bright_streak_rotated_roi", None),
+            rotated_roi_sha256=getattr(config, "bright_streak_rotated_roi_sha256", None),
+        )
     else:
         bright_streak = EightViewBrightStreakPredictor(config.bright_streak_config)
     yolo = EightViewYoloPredictor(
