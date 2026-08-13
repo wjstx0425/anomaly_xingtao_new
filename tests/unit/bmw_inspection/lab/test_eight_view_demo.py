@@ -421,6 +421,30 @@ def test_demo_config_loads_sha_bound_manual_rotated_roi_v5_asset(tmp_path: Path)
     assert config.bright_streak_rotated_roi_sha256 == hashlib.sha256(rotated_roi.read_bytes()).hexdigest()
 
 
+def test_real_v5_profile_binds_manual_rotated_tracked_v3_asset() -> None:
+    repo_root = Path(__file__).resolve().parents[4]
+    profile = json.loads(
+        (
+            repo_root
+            / "configs/bmw/experiments/bmw_eight_view_demo_v5_template_manual_ignore_mask_v1.json"
+        ).read_text(encoding="utf-8")
+    )
+
+    assert profile["bright_streak"] == {
+        "engine": "tracked_profile_v3_manual_rotated_roi",
+        "config": (
+            "../../../results/bmw_lab_one_click/"
+            "bmw_right_batch_20260810_21_bright_v3_tracked_v8/report.json"
+        ),
+        "config_sha256": "6b43690af67702333646fa7a88a2a5053a0afae6d19cb343bf6d3abb193c17d4",
+        "rotated_roi": (
+            "../../../results/bmw_bright_streak_rotated_roi/"
+            "bmw_demo_20260813_164043_v3/roi.json"
+        ),
+        "rotated_roi_sha256": "6ea49dacfae8d7d090bded6f8d67187d13fe00246c502a35813b77ce28aba4c8",
+    }
+
+
 @pytest.mark.parametrize("missing_field", ["rotated_roi", "rotated_roi_sha256"])
 def test_demo_config_rejects_partial_manual_rotated_roi_fields(
     tmp_path: Path,
