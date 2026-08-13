@@ -634,12 +634,13 @@ class EightViewTrackedProfileBrightStreakPredictor:
                 isinstance(weak_row_score_override, bool)
                 or not isinstance(weak_row_score_override, Real)
                 or not math.isfinite(float(weak_row_score_override))
-                or float(weak_row_score_override) < 0
-                or float(weak_row_score_override) > thresholds.strong_row_score
+                or float(weak_row_score_override) != 95.0
             ):
-                raise ValueError("弱响应覆盖阈值必须是有限非负数且不高于强响应阈值")
+                raise ValueError("光痕弱响应覆盖阈值只允许精确值95.0")
+            if 95.0 > thresholds.strong_row_score:
+                raise ValueError("弱响应覆盖阈值不能高于报告强响应阈值")
             threshold_values = dict(threshold_values)
-            threshold_values["weak_row_score"] = float(weak_row_score_override)
+            threshold_values["weak_row_score"] = 95.0
             thresholds = TrackedProfileThresholds(**threshold_values)
         self._thresholds = thresholds
         self._weak_row_score_overridden = weak_row_score_override is not None

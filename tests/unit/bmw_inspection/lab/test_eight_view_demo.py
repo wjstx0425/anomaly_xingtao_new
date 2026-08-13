@@ -534,6 +534,32 @@ def test_demo_config_loads_manual_rotated_roi_weak_score_override(tmp_path: Path
     assert config.bright_streak_weak_row_score_override == 95.0
 
 
+@pytest.mark.parametrize("override", [None, 94.0, 96.0])
+def test_demo_config_rejects_unapproved_rotated_roi_weak_score_override(
+    tmp_path: Path,
+    override: float | None,
+) -> None:
+    _roi, _capture, _run, threshold_artifact = _write_demo_assets(tmp_path)
+    report = tmp_path / "tracked_profile_report.json"
+    report.write_text('{"algorithm":"tracked_profile_v3"}', encoding="utf-8")
+    rotated_roi = tmp_path / "bright_streak_rotated_roi.json"
+    rotated_roi.write_text('{"schema":"bmw.bright_streak_rotated_roi/1.0"}', encoding="utf-8")
+    payload = _demo_payload(tmp_path, threshold_artifact=threshold_artifact)
+    payload["bright_streak"] = {
+        "engine": "tracked_profile_v3_manual_rotated_roi",
+        "config": str(report),
+        "config_sha256": hashlib.sha256(report.read_bytes()).hexdigest(),
+        "rotated_roi": str(rotated_roi),
+        "rotated_roi_sha256": hashlib.sha256(rotated_roi.read_bytes()).hexdigest(),
+        "weak_row_score_override": override,
+    }
+    config_path = tmp_path / "demo.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="只允许精确值95.0"):
+        load_demo_config(config_path)
+
+
 def test_real_v5_profile_binds_manual_rotated_tracked_v3_asset() -> None:
     repo_root = Path(__file__).resolve().parents[4]
     profile_path = (

@@ -1015,19 +1015,40 @@ def test_rotated_v3_reuses_report_thresholds(tmp_path: Path) -> None:
 
 def test_rotated_v3_weak_score_override_preserves_report_provenance(tmp_path: Path) -> None:
     roi_asset, roi_sha256 = _rotated_roi_asset(tmp_path)
+    report = _tracked_report(tmp_path)
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    payload["thresholds"]["strong_row_score"] = 136.85
+    payload["thresholds"]["weak_row_score"] = 128.2
+    report.write_text(json.dumps(payload), encoding="utf-8")
     predictor = EightViewTrackedProfileBrightStreakPredictor(
-        _tracked_report(tmp_path),
+        report,
         rotated_roi_path=roi_asset,
         rotated_roi_sha256=roi_sha256,
-        weak_row_score_override=25.0,
+        weak_row_score_override=95.0,
     )
 
     result = predictor.predict(_tracked_full_image("diagonal"))
 
-    assert result.details["report_weak_row_score"] == pytest.approx(30.0)
-    assert result.details["weak_row_score"] == pytest.approx(25.0)
+    assert result.details["report_weak_row_score"] == pytest.approx(128.2)
+    assert result.details["weak_row_score"] == pytest.approx(95.0)
     assert result.details["threshold_calibration"] == "rotated_hdr_field_recalibration_v1"
     assert "倾斜HDR现场重标定" in result.reason
+
+
+@pytest.mark.parametrize("override", [94.0, 96.0])
+def test_rotated_v3_predictor_rejects_unapproved_weak_score_override(
+    tmp_path: Path,
+    override: float,
+) -> None:
+    roi_asset, roi_sha256 = _rotated_roi_asset(tmp_path)
+
+    with pytest.raises(ValueError, match="只允许精确值95.0"):
+        EightViewTrackedProfileBrightStreakPredictor(
+            _tracked_report(tmp_path),
+            rotated_roi_path=roi_asset,
+            rotated_roi_sha256=roi_sha256,
+            weak_row_score_override=override,
+        )
 
 
 def test_rotated_v3_rejects_roi_sha_mismatch(tmp_path: Path) -> None:

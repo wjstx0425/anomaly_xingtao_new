@@ -519,16 +519,16 @@ def load_demo_config(path: Path) -> EightViewDemoConfig:
         bright_streak_sha256 = bright_streak_config["config_sha256"]
         bright_streak_rotated_roi_raw = bright_streak_config["rotated_roi"]
         bright_streak_rotated_roi_sha256 = bright_streak_config["rotated_roi_sha256"]
-        override = bright_streak_config.get("weak_row_score_override")
-        if override is not None:
+        if "weak_row_score_override" in bright_streak_config:
+            override = bright_streak_config["weak_row_score_override"]
             if (
                 isinstance(override, bool)
                 or not isinstance(override, Real)
                 or not math.isfinite(float(override))
-                or float(override) < 0
+                or float(override) != 95.0
             ):
-                raise ValueError("光痕弱响应覆盖阈值必须是有限非负数值")
-            bright_streak_weak_row_score_override = float(override)
+                raise ValueError("光痕弱响应覆盖阈值只允许精确值95.0")
+            bright_streak_weak_row_score_override = 95.0
         for label, digest in (
             ("光痕配置资产", bright_streak_sha256),
             ("倾斜光痕ROI", bright_streak_rotated_roi_sha256),
