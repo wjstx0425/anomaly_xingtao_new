@@ -74,6 +74,17 @@ class RotatedBrightStreakRoi:
         )
         if signed_area_twice <= 0:
             raise ValueError("points_xy must be clockwise")
+        top_midpoint_y = (points[0][1] + points[1][1]) / 2
+        bottom_midpoint_y = (points[2][1] + points[3][1]) / 2
+        if (
+            top_midpoint_y >= bottom_midpoint_y
+            or points[0][0] >= points[1][0]
+            or points[3][0] >= points[2][0]
+            or max(points[0][1], points[1][1]) >= min(points[2][1], points[3][1])
+        ):
+            raise ValueError(
+                "points_xy point order (点序) must be left-top, right-top, right-bottom, left-bottom"
+            )
 
 
 _ASSET_FIELDS = frozenset({"schema", *RotatedBrightStreakRoi.__dataclass_fields__})
@@ -110,18 +121,18 @@ def rectify_bright_streak_roi(image: np.ndarray, asset: RotatedBrightStreakRoi) 
 
 def load_rotated_bright_streak_roi(
     path: Path,
-    expected_sha256: str | None = None,
+    *,
+    expected_sha256: str,
 ) -> RotatedBrightStreakRoi:
     """Load a verified ROI asset and verify its referenced source image."""
     asset_path = Path(path)
     if not asset_path.is_file() or asset_path.is_symlink():
         raise ValueError("ROI asset must be a regular file")
     actual_sha256 = _sha256(asset_path)
-    if expected_sha256 is not None:
-        if not isinstance(expected_sha256, str) or not _SHA256_RE.fullmatch(expected_sha256):
-            raise ValueError("expected_sha256 must be a lowercase 64-character SHA-256")
-        if actual_sha256 != expected_sha256:
-            raise ValueError("ROI asset SHA-256 does not match expected_sha256")
+    if not isinstance(expected_sha256, str) or not _SHA256_RE.fullmatch(expected_sha256):
+        raise ValueError("expected_sha256 must be a lowercase 64-character SHA-256")
+    if actual_sha256 != expected_sha256:
+        raise ValueError("ROI asset SHA-256 does not match expected_sha256")
     try:
         payload = json.loads(asset_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:

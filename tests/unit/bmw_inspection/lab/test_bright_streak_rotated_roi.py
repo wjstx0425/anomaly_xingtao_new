@@ -50,6 +50,19 @@ def test_rejects_non_convex_or_out_of_bounds_points() -> None:
         )
 
 
+def test_rejects_cyclically_shifted_quadrilateral_point_order() -> None:
+    with pytest.raises(ValueError, match="点序"):
+        RotatedBrightStreakRoi(
+            points_xy=((35, 85), (40, 10), (70, 15), (65, 90)),
+            source_width=120,
+            source_height=100,
+            output_width=81,
+            output_height=613,
+            source_image="sample.png",
+            source_image_sha256="a" * 64,
+        )
+
+
 def test_writer_publishes_exact_asset_and_loader_verifies_source(tmp_path: Path) -> None:
     source = tmp_path / "sample.png"
     image = np.zeros((100, 120), dtype=np.uint8)
@@ -68,6 +81,10 @@ def test_writer_publishes_exact_asset_and_loader_verifies_source(tmp_path: Path)
     assert write_rotated_bright_streak_roi(destination, asset) == destination
     expected_sha256 = hashlib.sha256(destination.read_bytes()).hexdigest()
     assert load_rotated_bright_streak_roi(destination, expected_sha256=expected_sha256) == asset
+    with pytest.raises(TypeError):
+        load_rotated_bright_streak_roi(destination)  # type: ignore[call-arg]
+    with pytest.raises(ValueError, match="does not match"):
+        load_rotated_bright_streak_roi(destination, expected_sha256="b" * 64)
     with pytest.raises(FileExistsError):
         write_rotated_bright_streak_roi(destination, asset)
 
@@ -90,4 +107,4 @@ def test_loader_rejects_non_exact_schema_fields(tmp_path: Path) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
 
     with pytest.raises(ValueError, match="exactly"):
-        load_rotated_bright_streak_roi(path)
+        load_rotated_bright_streak_roi(path, expected_sha256=hashlib.sha256(path.read_bytes()).hexdigest())
