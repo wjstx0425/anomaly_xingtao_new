@@ -1,5 +1,10 @@
 # Pipeline Memory
 
+## BMW 四算法卡片点击坐标修复（2026-08-13）
+
+- `c8f56ab0` 移除 `bmw_lab_eight_view_demo.py` 对 Qt 鼠标回调坐标的二次缩放。OpenCV Qt `DefaultViewPort::icvmouseProcessing` 已通过反变换和 `ratioX/ratioY` 返回原图像素坐标，所以点击应直接交给 `dashboard_hit_test()`。
+- 四算法卡片中心点的失败回归已验证 red/green；干净快照 UI/V3 回归 `183 passed`。实时相机启动被 `DA9805574` 独占占用 `0x80000203` 阻止，不得把此次修复说成新的四相机拍摄验收；离线交互会话为 `16688`。
+
 ## BMW 光痕 V3 与点击 UI 运行整合（2026-08-12）
 
 - `pipeline/bmw_lab_eight_view_demo.py` 于 `37172148` 接入现有点击 UI，`642a37c6` 修复 OpenCV 4.13 Qt 的中文窗口句柄问题。内部必须始终用 `BMW_EIGHT_VIEW_DEMO` 调用 `namedWindow` / `imshow` / `getWindowImageRect` / `setMouseCallback`，可见标题单独用 `setWindowTitle` 设为中文。
