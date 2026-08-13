@@ -7,6 +7,10 @@ from dataclasses import replace
 import numpy as np
 
 from bmw_inspection.lab.eight_view_dataset import VIEW_ORDER
+from bmw_inspection.lab.bright_streak_rotated_roi import (
+    RotatedBrightStreakRoi,
+    rectify_bright_streak_roi,
+)
 from bmw_inspection.lab.eight_view_demo import (
     BranchStatus,
     DemoBranch,
@@ -532,6 +536,64 @@ def test_evidence_detail_pairs_keep_algorithm_coordinate_domains() -> None:
     assert np.all(streak.left_image == 90)
     assert streak.right_image.shape == (8, 6, 3)
     assert int(streak.right_image.mean()) == 120
+
+
+def test_bright_streak_reference_uses_same_rotated_perspective() -> None:
+    images = {view: np.zeros((100, 120, 3), dtype=np.uint8) for view in VIEW_ORDER}
+    reference_full = np.indices((100, 120)).sum(axis=0).astype(np.uint8)
+    reference_full = np.repeat(reference_full[:, :, None], 3, axis=2)
+    points = ((40, 10), (70, 15), (65, 90), (35, 85))
+    asset = RotatedBrightStreakRoi(
+        points_xy=points,
+        source_width=120,
+        source_height=100,
+        output_width=81,
+        output_height=613,
+        source_image="trusted.png",
+        source_image_sha256="a" * 64,
+    )
+    row = DemoBranchResult(
+        DemoBranch.BRIGHT_STREAK,
+        "front_left",
+        BranchStatus.NG,
+        0.0,
+        0.1,
+        1.0,
+        "光痕断续",
+        np.zeros((613, 81, 3), dtype=np.uint8),
+        details={"roi_points_xy": points},
+    )
+    inspection = EightViewInspection(
+        "rotated",
+        images,
+        (row,),
+        DemoFinalStatus.NG,
+        1.0,
+        trusted_ok_by_comparison={
+            ("front_left", "full"): replace(
+                _match(
+                    EightViewInspection("base", images, (row,), DemoFinalStatus.NG, 1.0),
+                    "front_left",
+                    "full",
+                ),
+                reference_full_image=reference_full,
+            )
+        },
+    )
+
+    detail = evidence_detail_images(
+        EightViewUiState(
+            phase=DemoUiPhase.RESULT,
+            inspection=inspection,
+            selected_view="front_left",
+            selected_branch=DemoBranch.BRIGHT_STREAK,
+        )
+    )
+
+    expected = np.rot90(rectify_bright_streak_roi(reference_full, asset), k=3)
+    assert detail.left_image is not None
+    assert detail.left_image.shape == (81, 613, 3)
+    assert np.array_equal(detail.left_image, expected)
 
 
 def test_detail_page_is_opened_only_for_valid_evidence_and_reports_pass_or_missing_reference() -> None:

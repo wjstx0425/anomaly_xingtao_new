@@ -392,6 +392,82 @@ def test_demo_config_loads_sha_bound_tracked_profile_v3_asset(tmp_path: Path) ->
 
     assert config.bright_streak_engine == "tracked_profile_v3"
     assert config.bright_streak_config == report.resolve()
+    assert config.bright_streak_rotated_roi is None
+    assert config.bright_streak_rotated_roi_sha256 is None
+
+
+def test_demo_config_loads_sha_bound_manual_rotated_roi_v5_asset(tmp_path: Path) -> None:
+    _roi, _capture, _run, threshold_artifact = _write_demo_assets(tmp_path)
+    report = tmp_path / "tracked_profile_report.json"
+    report.write_text('{"algorithm":"tracked_profile_v3"}', encoding="utf-8")
+    rotated_roi = tmp_path / "bright_streak_rotated_roi.json"
+    rotated_roi.write_text('{"schema":"bmw.bright_streak_rotated_roi/1.0"}', encoding="utf-8")
+    payload = _demo_payload(tmp_path, threshold_artifact=threshold_artifact)
+    payload["bright_streak"] = {
+        "engine": "tracked_profile_v3_manual_rotated_roi",
+        "config": str(report),
+        "config_sha256": hashlib.sha256(report.read_bytes()).hexdigest(),
+        "rotated_roi": str(rotated_roi),
+        "rotated_roi_sha256": hashlib.sha256(rotated_roi.read_bytes()).hexdigest(),
+    }
+    config_path = tmp_path / "demo.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    config = load_demo_config(config_path)
+
+    assert config.bright_streak_engine == "tracked_profile_v3_manual_rotated_roi"
+    assert config.bright_streak_config == report.resolve()
+    assert config.bright_streak_rotated_roi == rotated_roi.resolve()
+    assert config.bright_streak_rotated_roi_sha256 == hashlib.sha256(rotated_roi.read_bytes()).hexdigest()
+
+
+@pytest.mark.parametrize("missing_field", ["rotated_roi", "rotated_roi_sha256"])
+def test_demo_config_rejects_partial_manual_rotated_roi_fields(
+    tmp_path: Path,
+    missing_field: str,
+) -> None:
+    _roi, _capture, _run, threshold_artifact = _write_demo_assets(tmp_path)
+    report = tmp_path / "tracked_profile_report.json"
+    report.write_text('{"algorithm":"tracked_profile_v3"}', encoding="utf-8")
+    rotated_roi = tmp_path / "bright_streak_rotated_roi.json"
+    rotated_roi.write_text("{}", encoding="utf-8")
+    bright_streak = {
+        "engine": "tracked_profile_v3_manual_rotated_roi",
+        "config": str(report),
+        "config_sha256": hashlib.sha256(report.read_bytes()).hexdigest(),
+        "rotated_roi": str(rotated_roi),
+        "rotated_roi_sha256": hashlib.sha256(rotated_roi.read_bytes()).hexdigest(),
+    }
+    del bright_streak[missing_field]
+    payload = _demo_payload(tmp_path, threshold_artifact=threshold_artifact)
+    payload["bright_streak"] = bright_streak
+    config_path = tmp_path / "demo.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="bright_streak配置字段"):
+        load_demo_config(config_path)
+
+
+def test_demo_config_rejects_changed_manual_rotated_roi_asset(tmp_path: Path) -> None:
+    _roi, _capture, _run, threshold_artifact = _write_demo_assets(tmp_path)
+    report = tmp_path / "tracked_profile_report.json"
+    report.write_text('{"algorithm":"tracked_profile_v3"}', encoding="utf-8")
+    rotated_roi = tmp_path / "bright_streak_rotated_roi.json"
+    rotated_roi.write_text("{}", encoding="utf-8")
+    payload = _demo_payload(tmp_path, threshold_artifact=threshold_artifact)
+    payload["bright_streak"] = {
+        "engine": "tracked_profile_v3_manual_rotated_roi",
+        "config": str(report),
+        "config_sha256": hashlib.sha256(report.read_bytes()).hexdigest(),
+        "rotated_roi": str(rotated_roi),
+        "rotated_roi_sha256": hashlib.sha256(rotated_roi.read_bytes()).hexdigest(),
+    }
+    config_path = tmp_path / "demo.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+    rotated_roi.write_text('{"changed":true}', encoding="utf-8")
+
+    with pytest.raises(ValueError, match="倾斜光痕ROI SHA256不匹配"):
+        load_demo_config(config_path)
 
 
 def test_demo_config_rejects_changed_tracked_profile_v3_asset(tmp_path: Path) -> None:

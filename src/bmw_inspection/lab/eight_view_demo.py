@@ -163,6 +163,8 @@ class EightViewDemoConfig:
     yolo_candidate_conf: float
     yolo_final_threshold: float
     yolo_imgsz: int
+    bright_streak_rotated_roi: Path | None = None
+    bright_streak_rotated_roi_sha256: str | None = None
     trusted_ok_reference_index: Path | None = None
     trusted_ok_reference_index_sha256: str | None = None
     trusted_ok_reference_error: str | None = None
@@ -415,16 +417,39 @@ def load_demo_config(path: Path) -> EightViewDemoConfig:
     bright_streak_config = payload["bright_streak"]
     if not isinstance(bright_streak_config, dict):
         raise ValueError("bright_streak配置字段不正确")
+    bright_streak_rotated_roi_raw: object | None = None
+    bright_streak_rotated_roi_sha256: str | None = None
     if set(bright_streak_config) == {"config"}:
         bright_streak_engine = "calibrated_rule_v1"
         bright_streak_sha256 = None
     elif set(bright_streak_config) == {"engine", "config", "config_sha256"}:
         bright_streak_engine = bright_streak_config["engine"]
         bright_streak_sha256 = bright_streak_config["config_sha256"]
+        if bright_streak_engine == "tracked_profile_v3_manual_rotated_roi":
+            raise ValueError("bright_streak配置字段不正确")
         if bright_streak_engine not in {"raw_profile_v2", "tracked_profile_v3"}:
             raise ValueError("bright_streak.engine只支持raw_profile_v2或tracked_profile_v3")
         if not isinstance(bright_streak_sha256, str) or re.fullmatch(r"[0-9a-f]{64}", bright_streak_sha256) is None:
             raise ValueError("光痕配置资产 SHA256格式不正确")
+    elif set(bright_streak_config) == {
+        "engine",
+        "config",
+        "config_sha256",
+        "rotated_roi",
+        "rotated_roi_sha256",
+    }:
+        bright_streak_engine = bright_streak_config["engine"]
+        if bright_streak_engine != "tracked_profile_v3_manual_rotated_roi":
+            raise ValueError("bright_streak.engine与倾斜光痕ROI配置不匹配")
+        bright_streak_sha256 = bright_streak_config["config_sha256"]
+        bright_streak_rotated_roi_raw = bright_streak_config["rotated_roi"]
+        bright_streak_rotated_roi_sha256 = bright_streak_config["rotated_roi_sha256"]
+        for label, digest in (
+            ("光痕配置资产", bright_streak_sha256),
+            ("倾斜光痕ROI", bright_streak_rotated_roi_sha256),
+        ):
+            if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+                raise ValueError(f"{label} SHA256格式不正确")
     else:
         raise ValueError("bright_streak配置字段不正确")
     efficientad_config = payload["efficientad"]
@@ -457,6 +482,14 @@ def load_demo_config(path: Path) -> EightViewDemoConfig:
         not bright.is_file() or _sha256(bright) != bright_streak_sha256
     ):
         raise ValueError("光痕配置资产 SHA256不匹配")
+    bright_streak_rotated_roi: Path | None = None
+    if bright_streak_rotated_roi_raw is not None:
+        bright_streak_rotated_roi = resolve(bright_streak_rotated_roi_raw)
+        if (
+            not bright_streak_rotated_roi.is_file()
+            or _sha256(bright_streak_rotated_roi) != bright_streak_rotated_roi_sha256
+        ):
+            raise ValueError("倾斜光痕ROI SHA256不匹配")
     threshold_artifact = resolve(efficientad_config["threshold_artifact"])
     expected_threshold_sha256 = efficientad_config["threshold_artifact_sha256"]
     if not isinstance(expected_threshold_sha256, str) or re.fullmatch(r"[0-9a-f]{64}", expected_threshold_sha256) is None:
@@ -524,6 +557,8 @@ def load_demo_config(path: Path) -> EightViewDemoConfig:
         yolo_candidate_conf=candidate,
         yolo_final_threshold=final,
         yolo_imgsz=imgsz,
+        bright_streak_rotated_roi=bright_streak_rotated_roi,
+        bright_streak_rotated_roi_sha256=bright_streak_rotated_roi_sha256,
         trusted_ok_reference_index=trusted_ok_index,
         trusted_ok_reference_index_sha256=trusted_ok_index_sha256,
         trusted_ok_reference_error=trusted_ok_reference_error,

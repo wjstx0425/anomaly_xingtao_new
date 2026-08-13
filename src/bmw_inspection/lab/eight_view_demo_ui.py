@@ -14,6 +14,10 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
+from bmw_inspection.lab.bright_streak_rotated_roi import (
+    RotatedBrightStreakRoi,
+    rectify_bright_streak_roi,
+)
 from bmw_inspection.lab.eight_view_dataset import VIEW_ORDER
 from bmw_inspection.lab.eight_view_demo import (
     BranchStatus,
@@ -405,6 +409,22 @@ def evidence_comparison_images(
 
 
 def _bright_streak_reference_roi(match: Any, row: DemoBranchResult) -> np.ndarray | None:
+    reference = match.reference_full_image
+    points = row.details.get("roi_points_xy")
+    if points is not None:
+        try:
+            asset = RotatedBrightStreakRoi(
+                points_xy=tuple(tuple(point) for point in points),
+                source_width=reference.shape[1],
+                source_height=reference.shape[0],
+                output_width=81,
+                output_height=613,
+                source_image="trusted_ok_reference",
+                source_image_sha256="0" * 64,
+            )
+            return rectify_bright_streak_roi(reference, asset)
+        except (TypeError, ValueError):
+            return None
     roi = row.details.get("roi_xyxy")
     if (
         not isinstance(roi, tuple)
@@ -413,7 +433,6 @@ def _bright_streak_reference_roi(match: Any, row: DemoBranchResult) -> np.ndarra
     ):
         return None
     x1, y1, x2, y2 = roi
-    reference = match.reference_full_image
     if not (0 <= x1 < x2 <= reference.shape[1] and 0 <= y1 < y2 <= reference.shape[0]):
         return None
     return reference[y1:y2, x1:x2]
