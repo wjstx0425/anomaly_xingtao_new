@@ -165,6 +165,7 @@ class EightViewDemoConfig:
     yolo_imgsz: int
     bright_streak_rotated_roi: Path | None = None
     bright_streak_rotated_roi_sha256: str | None = None
+    bright_streak_weak_row_score_override: float | None = None
     efficientad_ignore_mask_index: Path | None = None
     efficientad_ignore_mask_index_sha256: str | None = None
     template_ignore_mask_index: Path | None = None
@@ -478,6 +479,7 @@ def load_demo_config(path: Path) -> EightViewDemoConfig:
         raise ValueError("bright_streak配置字段不正确")
     bright_streak_rotated_roi_raw: object | None = None
     bright_streak_rotated_roi_sha256: str | None = None
+    bright_streak_weak_row_score_override: float | None = None
     if set(bright_streak_config) == {"config"}:
         bright_streak_engine = "calibrated_rule_v1"
         bright_streak_sha256 = None
@@ -490,12 +492,26 @@ def load_demo_config(path: Path) -> EightViewDemoConfig:
             raise ValueError("bright_streak.engine只支持raw_profile_v2或tracked_profile_v3")
         if not isinstance(bright_streak_sha256, str) or re.fullmatch(r"[0-9a-f]{64}", bright_streak_sha256) is None:
             raise ValueError("光痕配置资产 SHA256格式不正确")
-    elif set(bright_streak_config) == {
-        "engine",
-        "config",
-        "config_sha256",
-        "rotated_roi",
-        "rotated_roi_sha256",
+    elif set(bright_streak_config) in {
+        frozenset(
+            {
+                "engine",
+                "config",
+                "config_sha256",
+                "rotated_roi",
+                "rotated_roi_sha256",
+            }
+        ),
+        frozenset(
+            {
+                "engine",
+                "config",
+                "config_sha256",
+                "rotated_roi",
+                "rotated_roi_sha256",
+                "weak_row_score_override",
+            }
+        ),
     }:
         bright_streak_engine = bright_streak_config["engine"]
         if bright_streak_engine != "tracked_profile_v3_manual_rotated_roi":
@@ -503,6 +519,16 @@ def load_demo_config(path: Path) -> EightViewDemoConfig:
         bright_streak_sha256 = bright_streak_config["config_sha256"]
         bright_streak_rotated_roi_raw = bright_streak_config["rotated_roi"]
         bright_streak_rotated_roi_sha256 = bright_streak_config["rotated_roi_sha256"]
+        override = bright_streak_config.get("weak_row_score_override")
+        if override is not None:
+            if (
+                isinstance(override, bool)
+                or not isinstance(override, Real)
+                or not math.isfinite(float(override))
+                or float(override) < 0
+            ):
+                raise ValueError("光痕弱响应覆盖阈值必须是有限非负数值")
+            bright_streak_weak_row_score_override = float(override)
         for label, digest in (
             ("光痕配置资产", bright_streak_sha256),
             ("倾斜光痕ROI", bright_streak_rotated_roi_sha256),
@@ -688,6 +714,7 @@ def load_demo_config(path: Path) -> EightViewDemoConfig:
         yolo_imgsz=imgsz,
         bright_streak_rotated_roi=bright_streak_rotated_roi,
         bright_streak_rotated_roi_sha256=bright_streak_rotated_roi_sha256,
+        bright_streak_weak_row_score_override=bright_streak_weak_row_score_override,
         efficientad_ignore_mask_index=efficientad_ignore_mask_index,
         efficientad_ignore_mask_index_sha256=efficientad_ignore_mask_index_sha256,
         template_ignore_mask_index=template_ignore_mask_index,

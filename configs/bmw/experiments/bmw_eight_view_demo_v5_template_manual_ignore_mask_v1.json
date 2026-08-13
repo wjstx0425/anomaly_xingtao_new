@@ -11,7 +11,8 @@
     "config": "../../../results/bmw_lab_one_click/bmw_right_batch_20260810_21_bright_v3_tracked_v8/report.json",
     "config_sha256": "6b43690af67702333646fa7a88a2a5053a0afae6d19cb343bf6d3abb193c17d4",
     "rotated_roi": "../../../results/bmw_bright_streak_rotated_roi/bmw_demo_20260813_164043_v3/roi.json",
-    "rotated_roi_sha256": "6ea49dacfae8d7d090bded6f8d67187d13fe00246c502a35813b77ce28aba4c8"
+    "rotated_roi_sha256": "6ea49dacfae8d7d090bded6f8d67187d13fe00246c502a35813b77ce28aba4c8",
+    "weak_row_score_override": 95.0
   },
   "template": {
     "ignore_mask_index": "../../../results/bmw_efficientad_manual_ignore_masks/bmw_right_manual_ignore_v3/index.json",

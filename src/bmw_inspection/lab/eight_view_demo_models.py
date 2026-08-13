@@ -540,6 +540,7 @@ class EightViewTrackedProfileBrightStreakPredictor:
         *,
         rotated_roi_path: Path | None = None,
         rotated_roi_sha256: str | None = None,
+        weak_row_score_override: float | None = None,
     ) -> None:
         from bmw_inspection.lab.bright_streak_tracked_profile import (
             TrackedProfileGeometry,
@@ -625,7 +626,23 @@ class EightViewTrackedProfileBrightStreakPredictor:
         self._validate_semantic_inventory(path.parent, payload)
         self._roi = (x1, y1, x2, y2)
         self._geometry = geometry
+        self._report_weak_row_score = thresholds.weak_row_score
+        if weak_row_score_override is not None:
+            if rotated_roi_path is None:
+                raise ValueError("弱响应覆盖阈值只允许用于手动倾斜光痕ROI")
+            if (
+                isinstance(weak_row_score_override, bool)
+                or not isinstance(weak_row_score_override, Real)
+                or not math.isfinite(float(weak_row_score_override))
+                or float(weak_row_score_override) < 0
+                or float(weak_row_score_override) > thresholds.strong_row_score
+            ):
+                raise ValueError("弱响应覆盖阈值必须是有限非负数且不高于强响应阈值")
+            threshold_values = dict(threshold_values)
+            threshold_values["weak_row_score"] = float(weak_row_score_override)
+            thresholds = TrackedProfileThresholds(**threshold_values)
         self._thresholds = thresholds
+        self._weak_row_score_overridden = weak_row_score_override is not None
         if (rotated_roi_path is None) != (rotated_roi_sha256 is None):
             raise ValueError("倾斜光痕ROI路径和SHA256必须同时提供")
         self._rotated_roi = None
@@ -941,13 +958,22 @@ class EightViewTrackedProfileBrightStreakPredictor:
         )
         roi_details: dict[str, object] = {"roi_xyxy": self._roi}
         if self._rotated_roi is not None:
-            reason = f"手动倾斜ROI，沿用V3阈值（未重标定）；{reason}"
+            if self._weak_row_score_overridden:
+                reason = (
+                    "手动倾斜ROI，倾斜HDR现场重标定弱阈值 "
+                    f"{self._report_weak_row_score:.3f}→{self._thresholds.weak_row_score:.3f}；{reason}"
+                )
+                threshold_calibration = "rotated_hdr_field_recalibration_v1"
+            else:
+                reason = f"手动倾斜ROI，沿用V3阈值（未重标定）；{reason}"
+                threshold_calibration = "existing_v3_not_recalibrated"
             roi_details.update(
                 {
                     "roi_points_xy": self._rotated_roi.points_xy,
                     "roi_mode": "manual_rotated_perspective",
-                    "threshold_calibration": "existing_v3_not_recalibrated",
+                    "threshold_calibration": threshold_calibration,
                     "rotated_roi_sha256": self._rotated_roi_sha256,
+                    "report_weak_row_score": self._report_weak_row_score,
                 }
             )
         return ModelOutput(
@@ -1436,6 +1462,11 @@ def build_model_suite(
             config.bright_streak_config,
             rotated_roi_path=getattr(config, "bright_streak_rotated_roi", None),
             rotated_roi_sha256=getattr(config, "bright_streak_rotated_roi_sha256", None),
+            weak_row_score_override=getattr(
+                config,
+                "bright_streak_weak_row_score_override",
+                None,
+            ),
         )
     else:
         bright_streak = EightViewBrightStreakPredictor(config.bright_streak_config)

@@ -511,6 +511,29 @@ def test_demo_config_loads_sha_bound_manual_rotated_roi_v5_asset(tmp_path: Path)
     assert config.bright_streak_rotated_roi_sha256 == hashlib.sha256(rotated_roi.read_bytes()).hexdigest()
 
 
+def test_demo_config_loads_manual_rotated_roi_weak_score_override(tmp_path: Path) -> None:
+    _roi, _capture, _run, threshold_artifact = _write_demo_assets(tmp_path)
+    report = tmp_path / "tracked_profile_report.json"
+    report.write_text('{"algorithm":"tracked_profile_v3"}', encoding="utf-8")
+    rotated_roi = tmp_path / "bright_streak_rotated_roi.json"
+    rotated_roi.write_text('{"schema":"bmw.bright_streak_rotated_roi/1.0"}', encoding="utf-8")
+    payload = _demo_payload(tmp_path, threshold_artifact=threshold_artifact)
+    payload["bright_streak"] = {
+        "engine": "tracked_profile_v3_manual_rotated_roi",
+        "config": str(report),
+        "config_sha256": hashlib.sha256(report.read_bytes()).hexdigest(),
+        "rotated_roi": str(rotated_roi),
+        "rotated_roi_sha256": hashlib.sha256(rotated_roi.read_bytes()).hexdigest(),
+        "weak_row_score_override": 95.0,
+    }
+    config_path = tmp_path / "demo.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    config = load_demo_config(config_path)
+
+    assert config.bright_streak_weak_row_score_override == 95.0
+
+
 def test_real_v5_profile_binds_manual_rotated_tracked_v3_asset() -> None:
     repo_root = Path(__file__).resolve().parents[4]
     profile_path = (
@@ -532,6 +555,7 @@ def test_real_v5_profile_binds_manual_rotated_tracked_v3_asset() -> None:
             "bmw_demo_20260813_164043_v3/roi.json"
         ),
         "rotated_roi_sha256": "6ea49dacfae8d7d090bded6f8d67187d13fe00246c502a35813b77ce28aba4c8",
+        "weak_row_score_override": 95.0,
     }
     assert config.bright_streak_engine == "tracked_profile_v3_manual_rotated_roi"
     assert config.bright_streak_rotated_roi == (
@@ -540,6 +564,7 @@ def test_real_v5_profile_binds_manual_rotated_tracked_v3_asset() -> None:
     ).resolve()
     assert config.template_ignore_mask_index is not None
     assert config.efficientad_ignore_mask_index == config.template_ignore_mask_index
+    assert config.bright_streak_weak_row_score_override == 95.0
 
 
 @pytest.mark.parametrize("missing_field", ["rotated_roi", "rotated_roi_sha256"])

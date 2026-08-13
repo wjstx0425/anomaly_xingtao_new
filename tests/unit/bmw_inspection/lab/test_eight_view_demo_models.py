@@ -312,6 +312,7 @@ def test_build_model_suite_wires_manual_rotated_roi_into_tracked_v3(
         bright_streak_config=Path("tracked-v3.json"),
         bright_streak_rotated_roi=Path("rotated-roi.json"),
         bright_streak_rotated_roi_sha256="a" * 64,
+        bright_streak_weak_row_score_override=95.0,
         yolo_checkpoint=Path("best.pt"),
         yolo_candidate_conf=0.1,
         yolo_final_threshold=0.2,
@@ -331,6 +332,7 @@ def test_build_model_suite_wires_manual_rotated_roi_into_tracked_v3(
         "report": Path("tracked-v3.json"),
         "rotated_roi_path": Path("rotated-roi.json"),
         "rotated_roi_sha256": "a" * 64,
+        "weak_row_score_override": 95.0,
     }
 
 
@@ -1009,6 +1011,23 @@ def test_rotated_v3_reuses_report_thresholds(tmp_path: Path) -> None:
     assert result.overlay is not None
     assert result.overlay.shape[:2] == (613, 81)
     assert result.reason.startswith("手动倾斜ROI，沿用V3阈值（未重标定）")
+
+
+def test_rotated_v3_weak_score_override_preserves_report_provenance(tmp_path: Path) -> None:
+    roi_asset, roi_sha256 = _rotated_roi_asset(tmp_path)
+    predictor = EightViewTrackedProfileBrightStreakPredictor(
+        _tracked_report(tmp_path),
+        rotated_roi_path=roi_asset,
+        rotated_roi_sha256=roi_sha256,
+        weak_row_score_override=25.0,
+    )
+
+    result = predictor.predict(_tracked_full_image("diagonal"))
+
+    assert result.details["report_weak_row_score"] == pytest.approx(30.0)
+    assert result.details["weak_row_score"] == pytest.approx(25.0)
+    assert result.details["threshold_calibration"] == "rotated_hdr_field_recalibration_v1"
+    assert "倾斜HDR现场重标定" in result.reason
 
 
 def test_rotated_v3_rejects_roi_sha_mismatch(tmp_path: Path) -> None:
