@@ -62,13 +62,12 @@ def test_o_shortcut_handler_toggles_only_when_inspection_exists() -> None:
     assert entrypoint._handle_trusted_ok_shortcut(toggled, ord("x")) is toggled
 
 
-def test_logical_canvas_coordinates_scale_default_and_resized_viewports() -> None:
-    assert entrypoint._logical_canvas_coordinates(720, 405, 1440, 810) == (800, 450)
-    assert entrypoint._logical_canvas_coordinates(1000, 500, 2000, 1000) == (800, 450)
-    assert entrypoint._logical_canvas_coordinates(-1, 0, 1440, 810) is None
-    assert entrypoint._logical_canvas_coordinates(1440, 0, 1440, 810) is None
-    assert entrypoint._logical_canvas_coordinates(0, 810, 1440, 810) is None
-    assert entrypoint._logical_canvas_coordinates(0, 0, 0, 810) is None
+def test_qt_mouse_coordinates_are_already_in_logical_canvas_pixels() -> None:
+    assert entrypoint._logical_canvas_coordinates(720, 405) == (720, 405)
+    assert entrypoint._logical_canvas_coordinates(1599, 899) == (1599, 899)
+    assert entrypoint._logical_canvas_coordinates(-1, 0) is None
+    assert entrypoint._logical_canvas_coordinates(1600, 0) is None
+    assert entrypoint._logical_canvas_coordinates(0, 900) is None
 
 
 def test_mouse_callback_only_queues_left_button_releases_and_consumption_applies_hit(monkeypatch) -> None:
@@ -87,9 +86,24 @@ def test_mouse_callback_only_queues_left_button_releases_and_consumption_applies
     )
     state = EightViewUiState()
 
-    assert entrypoint._consume_mouse_releases(state, releases, 1440, 810) is state
-    assert selected == [(800, 450)]
+    assert entrypoint._consume_mouse_releases(state, releases) is state
+    assert selected == [(720, 405)]
     assert releases == []
+
+
+def test_qt_mouse_coordinates_select_all_algorithm_cards_without_rescaling() -> None:
+    card_centres = {
+        DemoBranch.TEMPLATE: (1200, 312),
+        DemoBranch.BRIGHT_STREAK: (1450, 312),
+        DemoBranch.YOLO: (1200, 444),
+        DemoBranch.EFFICIENTAD: (1450, 444),
+    }
+
+    for branch, point in card_centres.items():
+        state = EightViewUiState(selected_branch=DemoBranch.BRIGHT_STREAK)
+        selected = entrypoint._consume_mouse_releases(state, [point])
+
+        assert selected.selected_branch is branch
 
 
 def test_gui_window_is_realized_before_mouse_callback_registration(monkeypatch) -> None:

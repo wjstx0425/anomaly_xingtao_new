@@ -129,23 +129,16 @@ def _handle_trusted_ok_shortcut(state: EightViewUiState, key: int) -> EightViewU
 def _logical_canvas_coordinates(
     x: int,
     y: int,
-    display_width: int,
-    display_height: int,
 ) -> tuple[int, int] | None:
-    """Convert one displayed-window click into the fixed 1600x900 canvas domain."""
+    """Validate coordinates already mapped to image pixels by OpenCV's Qt backend."""
     if (
-        display_width <= 0
-        or display_height <= 0
-        or x < 0
+        x < 0
         or y < 0
-        or x >= display_width
-        or y >= display_height
+        or x >= _LOGICAL_CANVAS_WIDTH
+        or y >= _LOGICAL_CANVAS_HEIGHT
     ):
         return None
-    return (
-        x * _LOGICAL_CANVAS_WIDTH // display_width,
-        y * _LOGICAL_CANVAS_HEIGHT // display_height,
-    )
+    return x, y
 
 
 def _queue_left_button_release(
@@ -163,13 +156,11 @@ def _queue_left_button_release(
 def _consume_mouse_releases(
     state: EightViewUiState,
     releases: list[tuple[int, int]],
-    display_width: int,
-    display_height: int,
 ) -> EightViewUiState:
-    """Apply queued dashboard clicks using the current displayed image dimensions."""
+    """Apply queued Qt image-coordinate clicks to the logical dashboard."""
     while releases:
         x, y = releases.pop(0)
-        logical = _logical_canvas_coordinates(x, y, display_width, display_height)
+        logical = _logical_canvas_coordinates(x, y)
         if logical is not None:
             state = apply_dashboard_click(state, dashboard_hit_test(*logical))
     return state
@@ -306,8 +297,7 @@ def _run_gui(
     try:
         with camera_context as camera:
             while True:
-                _, _, display_width, display_height = cv2.getWindowImageRect(title)
-                state = _consume_mouse_releases(state, mouse_releases, display_width, display_height)
+                state = _consume_mouse_releases(state, mouse_releases)
                 cv2.imshow(title, render_eight_view_screen(state))
                 key = cv2.waitKey(30) & 0xFF
                 state, action = _handle_gui_key(state, key)
