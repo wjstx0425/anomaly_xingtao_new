@@ -179,6 +179,8 @@ def test_demo_config_resolves_current_model_assets(tmp_path: Path) -> None:
     assert tuple(config.efficientad_thresholds.values()) == pytest.approx(
         tuple((index + 1) / 10 for index in range(len(VIEW_ORDER)))
     )
+    assert config.efficientad_ignore_mask_index is None
+    assert config.efficientad_ignore_mask_index_sha256 is None
     assert config.efficientad_threshold_source_csv == "/retired-calibration-host/efficientad_scores.csv"
     assert config.efficientad_threshold_source_csv_sha256 == "a" * 64
     assert config.efficientad_base_thresholds == config.efficientad_thresholds
@@ -186,6 +188,94 @@ def test_demo_config_resolves_current_model_assets(tmp_path: Path) -> None:
     assert config.trusted_ok_reference_index is None
     assert config.trusted_ok_reference_index_sha256 is None
     assert config.trusted_ok_reference_error is None
+
+
+def test_demo_config_accepts_sha_bound_efficientad_ignore_mask_index(tmp_path: Path) -> None:
+    _roi, _capture, _run, threshold_artifact = _write_demo_assets(tmp_path)
+    ignore_index = tmp_path / "ignore_masks/index.json"
+    ignore_index.parent.mkdir()
+    ignore_index.write_text('{"schema_version":"bmw.efficientad_manual_ignore_masks/1.0"}', encoding="utf-8")
+    payload = _demo_payload(tmp_path, threshold_artifact=threshold_artifact)
+    payload["efficientad"] = {
+        **payload["efficientad"],
+        "ignore_mask_index": str(ignore_index),
+        "ignore_mask_index_sha256": hashlib.sha256(ignore_index.read_bytes()).hexdigest(),
+    }
+    config_path = tmp_path / "demo.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    config = load_demo_config(config_path)
+
+    assert config.efficientad_ignore_mask_index == ignore_index.resolve()
+    assert config.efficientad_ignore_mask_index_sha256 == hashlib.sha256(ignore_index.read_bytes()).hexdigest()
+
+
+def test_demo_config_accepts_sha_bound_template_mask_and_calibration_thresholds(tmp_path: Path) -> None:
+    _roi, _capture, run, efficientad_thresholds = _write_demo_assets(tmp_path)
+    mask_index = tmp_path / "mask_index.json"
+    mask_index.write_text("{}", encoding="utf-8")
+    mask_sha = hashlib.sha256(mask_index.read_bytes()).hexdigest()
+    artifact = tmp_path / "template_masked_thresholds.json"
+    artifact.write_text(
+        json.dumps(
+            {
+                "schema_version": "bmw.template_manual_ignore_thresholds/1.0",
+                "selection_split": "calibration",
+                "final_test_used_for_selection": False,
+                "manual_ignore_mask_index_sha256": mask_sha,
+                "thresholds": {view: 0.01 for view in VIEW_ORDER},
+                "views": {
+                    view: {
+                        "model_json_sha256": hashlib.sha256(
+                            (run / "template" / view / "model.json").read_bytes()
+                        ).hexdigest()
+                    }
+                    for view in VIEW_ORDER
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    payload = _demo_payload(tmp_path, threshold_artifact=efficientad_thresholds)
+    payload["efficientad"] = {
+        **payload["efficientad"],
+        "ignore_mask_index": str(mask_index),
+        "ignore_mask_index_sha256": mask_sha,
+    }
+    payload["template"] = {
+        "ignore_mask_index": str(mask_index),
+        "ignore_mask_index_sha256": mask_sha,
+        "threshold_artifact": str(artifact),
+        "threshold_artifact_sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
+    }
+    config_path = tmp_path / "demo.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    config = load_demo_config(config_path)
+
+    assert config.template_ignore_mask_index == mask_index.resolve()
+    assert config.template_ignore_mask_index_sha256 == mask_sha
+    assert config.template_masked_threshold_artifact == artifact.resolve()
+    assert config.template_masked_threshold_artifact_sha256 == hashlib.sha256(artifact.read_bytes()).hexdigest()
+    assert config.template_masked_thresholds == pytest.approx({view: 0.01 for view in VIEW_ORDER})
+
+
+def test_demo_config_rejects_tampered_efficientad_ignore_mask_index(tmp_path: Path) -> None:
+    _roi, _capture, _run, threshold_artifact = _write_demo_assets(tmp_path)
+    ignore_index = tmp_path / "ignore_masks/index.json"
+    ignore_index.parent.mkdir()
+    ignore_index.write_text("{}", encoding="utf-8")
+    payload = _demo_payload(tmp_path, threshold_artifact=threshold_artifact)
+    payload["efficientad"] = {
+        **payload["efficientad"],
+        "ignore_mask_index": str(ignore_index),
+        "ignore_mask_index_sha256": "0" * 64,
+    }
+    config_path = tmp_path / "demo.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="ignore mask index SHA256不匹配"):
+        load_demo_config(config_path)
 
 
 def test_demo_config_loads_explicit_sha_bound_trusted_ok_index(tmp_path: Path) -> None:
@@ -423,12 +513,12 @@ def test_demo_config_loads_sha_bound_manual_rotated_roi_v5_asset(tmp_path: Path)
 
 def test_real_v5_profile_binds_manual_rotated_tracked_v3_asset() -> None:
     repo_root = Path(__file__).resolve().parents[4]
-    profile = json.loads(
-        (
-            repo_root
-            / "configs/bmw/experiments/bmw_eight_view_demo_v5_template_manual_ignore_mask_v1.json"
-        ).read_text(encoding="utf-8")
+    profile_path = (
+        repo_root
+        / "configs/bmw/experiments/bmw_eight_view_demo_v5_template_manual_ignore_mask_v1.json"
     )
+    profile = json.loads(profile_path.read_text(encoding="utf-8"))
+    config = load_demo_config(profile_path)
 
     assert profile["bright_streak"] == {
         "engine": "tracked_profile_v3_manual_rotated_roi",
@@ -443,6 +533,13 @@ def test_real_v5_profile_binds_manual_rotated_tracked_v3_asset() -> None:
         ),
         "rotated_roi_sha256": "6ea49dacfae8d7d090bded6f8d67187d13fe00246c502a35813b77ce28aba4c8",
     }
+    assert config.bright_streak_engine == "tracked_profile_v3_manual_rotated_roi"
+    assert config.bright_streak_rotated_roi == (
+        repo_root
+        / "results/bmw_bright_streak_rotated_roi/bmw_demo_20260813_164043_v3/roi.json"
+    ).resolve()
+    assert config.template_ignore_mask_index is not None
+    assert config.efficientad_ignore_mask_index == config.template_ignore_mask_index
 
 
 @pytest.mark.parametrize("missing_field", ["rotated_roi", "rotated_roi_sha256"])

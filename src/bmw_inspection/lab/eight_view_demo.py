@@ -165,6 +165,13 @@ class EightViewDemoConfig:
     yolo_imgsz: int
     bright_streak_rotated_roi: Path | None = None
     bright_streak_rotated_roi_sha256: str | None = None
+    efficientad_ignore_mask_index: Path | None = None
+    efficientad_ignore_mask_index_sha256: str | None = None
+    template_ignore_mask_index: Path | None = None
+    template_ignore_mask_index_sha256: str | None = None
+    template_masked_threshold_artifact: Path | None = None
+    template_masked_threshold_artifact_sha256: str | None = None
+    template_masked_thresholds: Mapping[str, float] | None = None
     trusted_ok_reference_index: Path | None = None
     trusted_ok_reference_index_sha256: str | None = None
     trusted_ok_reference_error: str | None = None
@@ -179,6 +186,12 @@ class EightViewDemoConfig:
             "efficientad_base_thresholds",
             MappingProxyType(dict(self.efficientad_base_thresholds)),
         )
+        if self.template_masked_thresholds is not None:
+            object.__setattr__(
+                self,
+                "template_masked_thresholds",
+                MappingProxyType(dict(self.template_masked_thresholds)),
+            )
 
 
 def _immutable_value(value: Any) -> Any:
@@ -385,6 +398,52 @@ def _load_efficientad_thresholds(
     )
 
 
+def _load_template_masked_thresholds(
+    path: Path,
+    *,
+    expected_mask_sha256: str,
+) -> tuple[Mapping[str, float], Mapping[str, str]]:
+    """Load calibration-only masked Template thresholds and bound model hashes."""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"无法读取Template masked threshold artifact：{path}: {error}") from error
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema_version") != "bmw.template_manual_ignore_thresholds/1.0"
+        or payload.get("selection_split") != "calibration"
+        or payload.get("final_test_used_for_selection") is not False
+    ):
+        raise ValueError("Template masked threshold artifact必须声明calibration-only选择")
+    if payload.get("manual_ignore_mask_index_sha256") != expected_mask_sha256:
+        raise ValueError("Template masked threshold artifact的mask SHA256不匹配")
+    thresholds = payload.get("thresholds")
+    if not isinstance(thresholds, dict) or set(thresholds) != set(VIEW_ORDER):
+        raise ValueError("Template masked thresholds必须覆盖八个标准视角")
+    parsed: dict[str, float] = {}
+    for view in VIEW_ORDER:
+        value = thresholds[view]
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, Real)
+            or not math.isfinite(float(value))
+            or float(value) < 0
+        ):
+            raise ValueError("Template masked thresholds必须是有限非负数值")
+        parsed[view] = float(value)
+    views = payload.get("views")
+    if not isinstance(views, dict) or set(views) != set(VIEW_ORDER):
+        raise ValueError("Template masked threshold artifact缺少八视角模型SHA256")
+    model_sha256: dict[str, str] = {}
+    for view in VIEW_ORDER:
+        item = views[view]
+        value = item.get("model_json_sha256") if isinstance(item, dict) else None
+        if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+            raise ValueError("Template masked threshold artifact模型SHA256格式不正确")
+        model_sha256[view] = value
+    return MappingProxyType(parsed), MappingProxyType(model_sha256)
+
+
 def load_demo_config(path: Path) -> EightViewDemoConfig:
     """Load the small profile and resolve the exact trained model assets."""
     resolved = Path(path).expanduser().resolve()
@@ -401,7 +460,7 @@ def load_demo_config(path: Path) -> EightViewDemoConfig:
         "efficientad",
         "yolo",
     }
-    allowed = required | {"trusted_ok_reference"}
+    allowed = required | {"template", "trusted_ok_reference"}
     if not required.issubset(payload) or not set(payload).issubset(allowed) or payload["schema_version"] != 1:
         raise ValueError("BMW八视图Demo配置字段或schema_version不正确")
     yolo = payload["yolo"]
@@ -453,10 +512,18 @@ def load_demo_config(path: Path) -> EightViewDemoConfig:
     else:
         raise ValueError("bright_streak配置字段不正确")
     efficientad_config = payload["efficientad"]
-    if not isinstance(efficientad_config, dict) or set(efficientad_config) != {
+    efficientad_base_fields = {
         "threshold_artifact",
         "threshold_artifact_sha256",
-    }:
+    }
+    efficientad_mask_fields = efficientad_base_fields | {
+        "ignore_mask_index",
+        "ignore_mask_index_sha256",
+    }
+    if (
+        not isinstance(efficientad_config, dict)
+        or set(efficientad_config) not in {frozenset(efficientad_base_fields), frozenset(efficientad_mask_fields)}
+    ):
         raise ValueError("efficientad配置字段不正确")
     trusted_ok_config = payload.get("trusted_ok_reference")
     if "trusted_ok_reference" in payload and (
@@ -473,6 +540,43 @@ def load_demo_config(path: Path) -> EightViewDemoConfig:
             raise ValueError("配置路径必须是非空字符串")
         candidate_path = Path(raw).expanduser()
         return (candidate_path if candidate_path.is_absolute() else base / candidate_path).resolve()
+
+    template_config = payload.get("template")
+    template_ignore_mask_index: Path | None = None
+    template_ignore_mask_index_sha256: str | None = None
+    template_masked_threshold_artifact: Path | None = None
+    template_masked_threshold_artifact_sha256: str | None = None
+    template_masked_thresholds: Mapping[str, float] | None = None
+    expected_template_model_sha256: Mapping[str, str] | None = None
+    if template_config is not None:
+        expected_fields = {
+            "ignore_mask_index",
+            "ignore_mask_index_sha256",
+            "threshold_artifact",
+            "threshold_artifact_sha256",
+        }
+        if not isinstance(template_config, dict) or set(template_config) != expected_fields:
+            raise ValueError("template配置字段不正确")
+        template_ignore_mask_index = resolve(template_config["ignore_mask_index"])
+        template_ignore_mask_index_sha256 = template_config["ignore_mask_index_sha256"]
+        template_masked_threshold_artifact = resolve(template_config["threshold_artifact"])
+        template_masked_threshold_artifact_sha256 = template_config["threshold_artifact_sha256"]
+        for label, candidate_path, expected_sha in (
+            ("ignore mask index", template_ignore_mask_index, template_ignore_mask_index_sha256),
+            (
+                "masked threshold artifact",
+                template_masked_threshold_artifact,
+                template_masked_threshold_artifact_sha256,
+            ),
+        ):
+            if not isinstance(expected_sha, str) or re.fullmatch(r"[0-9a-f]{64}", expected_sha) is None:
+                raise ValueError(f"Template {label} SHA256格式不正确")
+            if not candidate_path.is_file() or _sha256(candidate_path) != expected_sha:
+                raise ValueError(f"Template {label} SHA256不匹配")
+        template_masked_thresholds, expected_template_model_sha256 = _load_template_masked_thresholds(
+            template_masked_threshold_artifact,
+            expected_mask_sha256=template_ignore_mask_index_sha256,
+        )
 
     capture_config = resolve(payload["capture_config"])
     roi_config = resolve(payload["roi_config"])
@@ -496,6 +600,27 @@ def load_demo_config(path: Path) -> EightViewDemoConfig:
         raise ValueError("EfficientAD threshold artifact SHA256格式不正确")
     if not threshold_artifact.is_file() or _sha256(threshold_artifact) != expected_threshold_sha256:
         raise ValueError("EfficientAD threshold artifact SHA256不匹配")
+    efficientad_ignore_mask_index: Path | None = None
+    efficientad_ignore_mask_index_sha256: str | None = None
+    if "ignore_mask_index" in efficientad_config:
+        efficientad_ignore_mask_index = resolve(efficientad_config["ignore_mask_index"])
+        efficientad_ignore_mask_index_sha256 = efficientad_config["ignore_mask_index_sha256"]
+        if (
+            not isinstance(efficientad_ignore_mask_index_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", efficientad_ignore_mask_index_sha256) is None
+        ):
+            raise ValueError("EfficientAD ignore mask index SHA256格式不正确")
+        if (
+            not efficientad_ignore_mask_index.is_file()
+            or _sha256(efficientad_ignore_mask_index) != efficientad_ignore_mask_index_sha256
+        ):
+            raise ValueError("EfficientAD ignore mask index SHA256不匹配")
+    if template_ignore_mask_index is not None and (
+        efficientad_ignore_mask_index is None
+        or template_ignore_mask_index != efficientad_ignore_mask_index
+        or template_ignore_mask_index_sha256 != efficientad_ignore_mask_index_sha256
+    ):
+        raise ValueError("Template必须复用当前EfficientAD的同一手动ignore mask资产")
     trusted_ok_index: Path | None = None
     trusted_ok_index_sha256: str | None = None
     trusted_ok_reference_error: str | None = None
@@ -533,6 +658,10 @@ def load_demo_config(path: Path) -> EightViewDemoConfig:
     for view, checkpoint in efficientad.items():
         if _sha256(checkpoint) != expected_checkpoint_sha256[view]:
             raise ValueError(f"EfficientAD {view} checkpoint SHA256不匹配")
+    if expected_template_model_sha256 is not None:
+        for view, model in template_models.items():
+            if _sha256(model) != expected_template_model_sha256[view]:
+                raise ValueError(f"Template {view} model.json SHA256不匹配")
     demo_id = payload["demo_id"]
     if not isinstance(demo_id, str) or not demo_id.strip():
         raise ValueError("demo_id不能为空")
@@ -559,6 +688,13 @@ def load_demo_config(path: Path) -> EightViewDemoConfig:
         yolo_imgsz=imgsz,
         bright_streak_rotated_roi=bright_streak_rotated_roi,
         bright_streak_rotated_roi_sha256=bright_streak_rotated_roi_sha256,
+        efficientad_ignore_mask_index=efficientad_ignore_mask_index,
+        efficientad_ignore_mask_index_sha256=efficientad_ignore_mask_index_sha256,
+        template_ignore_mask_index=template_ignore_mask_index,
+        template_ignore_mask_index_sha256=template_ignore_mask_index_sha256,
+        template_masked_threshold_artifact=template_masked_threshold_artifact,
+        template_masked_threshold_artifact_sha256=template_masked_threshold_artifact_sha256,
+        template_masked_thresholds=template_masked_thresholds,
         trusted_ok_reference_index=trusted_ok_index,
         trusted_ok_reference_index_sha256=trusted_ok_index_sha256,
         trusted_ok_reference_error=trusted_ok_reference_error,

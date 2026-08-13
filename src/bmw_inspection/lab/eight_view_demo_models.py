@@ -121,12 +121,66 @@ def _prepare_template_image(image: np.ndarray, size: tuple[int, int]) -> np.ndar
 class EightViewTemplatePredictor:
     """Load and score all eight independently trained Template models."""
 
-    def __init__(self, model_paths: Mapping[str, Path]) -> None:
+    def __init__(
+        self,
+        model_paths: Mapping[str, Path],
+        *,
+        ignore_masks: Mapping[str, np.ndarray] | None = None,
+        ignore_mask_index_sha256: str | None = None,
+        masked_thresholds: Mapping[str, float] | None = None,
+        masked_threshold_artifact_sha256: str | None = None,
+    ) -> None:
         if tuple(model_paths) != VIEW_ORDER:
             raise ValueError("Template模型必须按标准顺序覆盖八个视角")
         self._models = MappingProxyType(
             {view: self._load(view, Path(model_paths[view]).expanduser().resolve()) for view in VIEW_ORDER}
         )
+        optional_values = (
+            ignore_mask_index_sha256,
+            masked_thresholds,
+            masked_threshold_artifact_sha256,
+        )
+        if ignore_masks is None:
+            if any(value is not None for value in optional_values):
+                raise ValueError("Template手动忽略区配置必须同时提供mask、SHA和独立阈值")
+            self._ignore_masks: Mapping[str, np.ndarray] | None = None
+            self._ignore_mask_index_sha256 = None
+            self._masked_thresholds: Mapping[str, float] | None = None
+            self._masked_threshold_artifact_sha256 = None
+            return
+        if tuple(ignore_masks) != VIEW_ORDER or masked_thresholds is None or tuple(masked_thresholds) != VIEW_ORDER:
+            raise ValueError("Template手动忽略区和独立阈值必须按标准顺序覆盖八个视角")
+        for label, value in (
+            ("ignore mask index", ignore_mask_index_sha256),
+            ("masked threshold artifact", masked_threshold_artifact_sha256),
+        ):
+            if (
+                not isinstance(value, str)
+                or len(value) != 64
+                or any(character not in "0123456789abcdef" for character in value)
+            ):
+                raise ValueError(f"Template {label} SHA256格式不正确")
+        owned_masks: dict[str, np.ndarray] = {}
+        parsed_thresholds: dict[str, float] = {}
+        for view in VIEW_ORDER:
+            mask = np.asarray(ignore_masks[view])
+            model = self._models[view]
+            expected_shape = (model.input_height, model.input_width)
+            if mask.dtype != np.uint8 or mask.ndim != 2 or mask.shape != expected_shape:
+                raise ValueError(f"{view} Template ignore mask必须是{expected_shape}的uint8二维图")
+            if not set(np.unique(mask).tolist()).issubset({0, 255}):
+                raise ValueError(f"{view} Template ignore mask只能包含0和255")
+            owned = mask.copy()
+            owned.flags.writeable = False
+            owned_masks[view] = owned
+            threshold = masked_thresholds[view]
+            if isinstance(threshold, bool) or not isinstance(threshold, Real) or not math.isfinite(float(threshold)):
+                raise ValueError(f"{view} Template masked threshold必须是有限数值")
+            parsed_thresholds[view] = float(threshold)
+        self._ignore_masks = MappingProxyType(owned_masks)
+        self._ignore_mask_index_sha256 = ignore_mask_index_sha256
+        self._masked_thresholds = MappingProxyType(parsed_thresholds)
+        self._masked_threshold_artifact_sha256 = masked_threshold_artifact_sha256
 
     @staticmethod
     def _load(view: str, path: Path) -> _TemplateModel:
@@ -177,37 +231,109 @@ class EightViewTemplatePredictor:
             response = cv2.matchTemplate(padded, template, cv2.TM_CCOEFF_NORMED)
             _minimum, maximum, _minimum_location, maximum_location = cv2.minMaxLoc(response)
             matches.append((float(maximum), template, maximum_location))
-        similarity, best, best_location = max(matches, key=lambda item: item[0])
-        risk = max(0.0, 1.0 - similarity)
+        raw_similarity, raw_best, raw_best_location = max(matches, key=lambda item: item[0])
+        raw_risk = max(0.0, 1.0 - raw_similarity)
+        similarity, best, best_location = raw_similarity, raw_best, raw_best_location
+        risk = raw_risk
+        threshold = model.threshold
+        score_source = "unmasked_ccoeff_normed"
+        aligned_inspect_mask: np.ndarray | None = None
+        if self._ignore_masks is not None and np.any(self._ignore_masks[view]):
+            from bmw_inspection.lab.template_ignore_mask import (
+                prepare_template_inspect_mask,
+                select_masked_template_match,
+            )
+
+            inspect_mask = prepare_template_inspect_mask(
+                self._ignore_masks[view],
+                (model.target_width, model.target_height),
+            )
+            padded_inspect_mask = cv2.copyMakeBorder(
+                inspect_mask,
+                model.max_shift,
+                model.max_shift,
+                model.max_shift,
+                model.max_shift,
+                cv2.BORDER_REFLECT_101,
+            )
+            minimum_valid_pixels = max(
+                256,
+                math.ceil(0.10 * model.target_width * model.target_height),
+            )
+            masked_match = select_masked_template_match(
+                padded,
+                model.templates,
+                padded_inspect_mask,
+                minimum_valid_pixels=minimum_valid_pixels,
+            )
+            similarity = masked_match.similarity
+            best = masked_match.template
+            best_location = masked_match.location
+            aligned_inspect_mask = masked_match.aligned_inspect_mask
+            risk = max(0.0, 1.0 - similarity)
+            assert self._masked_thresholds is not None
+            threshold = self._masked_thresholds[view]
+            score_source = "manual_ignore_masked_ccoeff_normed"
         best_x, best_y = best_location
         aligned_query = padded[
             best_y : best_y + model.target_height,
             best_x : best_x + model.target_width,
         ]
         difference = cv2.absdiff(aligned_query, best)
+        if aligned_inspect_mask is None:
+            mean_absolute_difference = float(difference.mean())
+            valid_target_pixel_count = int(difference.size)
+        else:
+            valid = aligned_inspect_mask.astype(bool)
+            if not np.any(valid):
+                raise ValueError(f"{view} Template ignore mask排除了全部对齐像素")
+            mean_absolute_difference = float(difference[valid].mean())
+            valid_target_pixel_count = int(np.count_nonzero(valid))
+            difference = difference.copy()
+            difference[~valid] = 0
         heatmap = cv2.applyColorMap(difference, cv2.COLORMAP_TURBO)
         base = cv2.cvtColor(aligned_query, cv2.COLOR_GRAY2BGR)
         overlay = cv2.addWeighted(base, 0.65, heatmap, 0.35, 0.0)
-        passed = risk <= model.threshold
+        if aligned_inspect_mask is not None:
+            overlay[~aligned_inspect_mask.astype(bool)] = base[~aligned_inspect_mask.astype(bool)]
+        passed = risk <= threshold
+        masked = score_source == "manual_ignore_masked_ccoeff_normed"
+        reason_prefix = "手动忽略区外 Template 诊断热区" if masked else "Template 诊断热区"
         return ModelOutput(
             BranchStatus.PASS if passed else BranchStatus.NG,
             risk,
-            model.threshold,
+            threshold,
             (
-                f"Template 诊断热区：模板风险 {risk:.4f}，部署阈值 {model.threshold:.4f}；"
+                f"{reason_prefix}：模板风险 {risk:.4f}，部署阈值 {threshold:.4f}；"
                 f"最佳平移 ({best_x - model.max_shift}, {best_y - model.max_shift})，"
-                f"对齐后平均绝对差 {float(difference.mean()):.3f}"
+                f"对齐后平均绝对差 {mean_absolute_difference:.3f}"
             ),
             overlay,
             details={
                 "evidence_type": "诊断热区",
+                "score_source": score_source,
                 "similarity": similarity,
                 "risk": risk,
-                "deployment_threshold": model.threshold,
-                "threshold_exceedance": risk - model.threshold,
+                "deployment_threshold": threshold,
+                "threshold_exceedance": risk - threshold,
                 "best_shift_x": best_x - model.max_shift,
                 "best_shift_y": best_y - model.max_shift,
-                "aligned_mean_absolute_difference": float(difference.mean()),
+                "aligned_mean_absolute_difference": mean_absolute_difference,
+                "raw_unmasked_similarity": raw_similarity,
+                "raw_unmasked_risk": raw_risk,
+                "raw_unmasked_best_shift_x": raw_best_location[0] - model.max_shift,
+                "raw_unmasked_best_shift_y": raw_best_location[1] - model.max_shift,
+                "masked_similarity": similarity if masked else None,
+                "masked_risk": risk if masked else None,
+                "ignored_input_pixel_count": (
+                    int(np.count_nonzero(self._ignore_masks[view])) if masked and self._ignore_masks is not None else 0
+                ),
+                "valid_target_pixel_count": valid_target_pixel_count,
+                "valid_target_pixel_fraction": valid_target_pixel_count / difference.size,
+                "ignore_mask_index_sha256": self._ignore_mask_index_sha256 if masked else None,
+                "masked_threshold_artifact_sha256": (
+                    self._masked_threshold_artifact_sha256 if masked else None
+                ),
             },
         )
 
@@ -1024,6 +1150,8 @@ class EightViewEfficientAdPredictor:
         base_thresholds: Mapping[str, float] | None = None,
         threshold_margin: float = 0.0,
         predictor_factory: EfficientPredictorFactory = _AnomalibEfficientPredictor,
+        ignore_masks: Mapping[str, np.ndarray] | None = None,
+        ignore_mask_index_sha256: str | None = None,
     ) -> None:
         if tuple(checkpoints) != VIEW_ORDER:
             raise ValueError("EfficientAD模型必须按标准顺序覆盖八个视角")
@@ -1057,6 +1185,28 @@ class EightViewEfficientAdPredictor:
             raise ValueError("EfficientAD基础阈值加余量必须等于部署阈值")
         self._base_thresholds = MappingProxyType(base_values)
         self._threshold_margin = margin
+        if ignore_masks is None:
+            if ignore_mask_index_sha256 is not None:
+                raise ValueError("EfficientAD ignore-mask SHA requires ignore masks")
+            self._ignore_masks: Mapping[str, np.ndarray] | None = None
+            self._ignore_mask_index_sha256 = None
+        else:
+            if tuple(ignore_masks) != VIEW_ORDER:
+                raise ValueError("EfficientAD ignore masks must use the canonical eight-view order")
+            if not isinstance(ignore_mask_index_sha256, str) or len(ignore_mask_index_sha256) != 64:
+                raise ValueError("EfficientAD ignore-mask index SHA must contain 64 characters")
+            owned_masks: dict[str, np.ndarray] = {}
+            for view, mask in ignore_masks.items():
+                array = np.asarray(mask)
+                if array.dtype != np.uint8 or array.ndim != 2 or array.size == 0:
+                    raise ValueError(f"EfficientAD ignore mask is invalid: {view}")
+                if not set(np.unique(array).tolist()).issubset({0, 255}):
+                    raise ValueError(f"EfficientAD ignore mask is not binary: {view}")
+                copied = array.copy()
+                copied.flags.writeable = False
+                owned_masks[view] = copied
+            self._ignore_masks = MappingProxyType(owned_masks)
+            self._ignore_mask_index_sha256 = ignore_mask_index_sha256
         predictors: dict[str, Callable[[np.ndarray], EfficientPrediction]] = {}
         for view in VIEW_ORDER:
             checkpoint = Path(checkpoints[view]).expanduser().resolve()
@@ -1071,22 +1221,43 @@ class EightViewEfficientAdPredictor:
             score, raw_pred_label, anomaly_map = self._predictors[view](image)
         if not math.isfinite(score) or not np.isfinite(anomaly_map).all():
             raise ValueError("EfficientAD输出包含非有限数值")
+        raw_pred_score = score
+        scoring_map = anomaly_map
+        score_source = "pred_score"
+        ignored_roi_pixel_count = 0
+        ignored_map_pixel_count = 0
+        raw_map_max = float(np.max(anomaly_map))
+        if self._ignore_masks is not None and np.any(self._ignore_masks[view]):
+            from bmw_inspection.lab.efficientad_ignore_mask import mask_anomaly_map
+
+            masked = mask_anomaly_map(anomaly_map, self._ignore_masks[view])
+            score = masked.score
+            scoring_map = masked.masked_map
+            score_source = "manual_ignore_masked_anomaly_map_max"
+            ignored_roi_pixel_count = int(np.count_nonzero(self._ignore_masks[view]))
+            ignored_map_pixel_count = masked.ignored_map_pixel_count
+            raw_map_max = masked.raw_max
         threshold = self._thresholds[view]
         base_threshold = self._base_thresholds[view]
-        heatmap = fixed_scale_heatmap(anomaly_map)
+        heatmap = fixed_scale_heatmap(scoring_map)
         base = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR) if image.ndim == 2 else image.copy()
         heatmap = cv2.resize(heatmap, (base.shape[1], base.shape[0]), interpolation=cv2.INTER_LINEAR)
         overlay = cv2.addWeighted(base, 0.6, heatmap, 0.4, 0.0)
-        hotspot_y, hotspot_x = np.unravel_index(int(np.argmax(anomaly_map)), anomaly_map.shape)
+        hotspot_y, hotspot_x = np.unravel_index(int(np.argmax(scoring_map)), scoring_map.shape)
         display_x = int(round(hotspot_x * max(0, base.shape[1] - 1) / max(1, anomaly_map.shape[1] - 1)))
         display_y = int(round(hotspot_y * max(0, base.shape[0] - 1) / max(1, anomaly_map.shape[0] - 1)))
         cv2.drawMarker(overlay, (display_x, display_y), (0, 0, 255), cv2.MARKER_CROSS, 13, 2)
+        score_label = (
+            "手动忽略区外异常图最大值"
+            if score_source == "manual_ignore_masked_anomaly_map_max"
+            else "异常分数"
+        )
         return ModelOutput(
             BranchStatus.NG if score >= threshold else BranchStatus.PASS,
             score,
             threshold,
             (
-                f"EfficientAD异常分数 {score:.4f}，基础阈值 {base_threshold:.4f}，"
+                f"EfficientAD{score_label} {score:.4f}，基础阈值 {base_threshold:.4f}，"
                 f"部署阈值 {threshold:.4f}，余量 {self._threshold_margin:.4f}"
             ),
             overlay,
@@ -1094,13 +1265,19 @@ class EightViewEfficientAdPredictor:
             details={
                 "evidence_type": "诊断热区",
                 "score": score,
+                "raw_pred_score": raw_pred_score,
+                "raw_anomaly_map_max": raw_map_max,
+                "score_source": score_source,
                 "base_threshold": base_threshold,
                 "deployment_threshold": threshold,
                 "threshold_margin": self._threshold_margin,
                 "threshold_exceedance": score - threshold,
                 "hotspot_x": int(hotspot_x),
                 "hotspot_y": int(hotspot_y),
-                "hotspot_value": float(anomaly_map[hotspot_y, hotspot_x]),
+                "hotspot_value": float(scoring_map[hotspot_y, hotspot_x]),
+                "ignore_mask_index_sha256": self._ignore_mask_index_sha256,
+                "ignored_roi_pixel_count": ignored_roi_pixel_count,
+                "ignored_map_pixel_count": ignored_map_pixel_count,
                 "raw_pred_label": raw_pred_label,
             },
         )
@@ -1250,7 +1427,6 @@ def build_model_suite(
     status_callback: Callable[[str], None] | None = None,
 ) -> EightViewModelSuite:
     """Build the four resident model branches from one resolved Demo profile."""
-    template = EightViewTemplatePredictor(config.template_models)
     if config.bright_streak_engine == "raw_profile_v2":
         bright_streak = EightViewRawProfileBrightStreakPredictor(config.bright_streak_config)
     elif config.bright_streak_engine == "tracked_profile_v3":
@@ -1269,11 +1445,56 @@ def build_model_suite(
         final_threshold=config.yolo_final_threshold,
         imgsz=config.yolo_imgsz,
     )
+    rois = load_part_rois(config.roi_config)
+    ignore_masks: Mapping[str, np.ndarray] | None = None
+    ignore_mask_index_sha256: str | None = None
+    configured_ignore_mask_index = getattr(config, "efficientad_ignore_mask_index", None)
+    configured_ignore_mask_sha256 = getattr(config, "efficientad_ignore_mask_index_sha256", None)
+    if configured_ignore_mask_index is not None:
+        from bmw_inspection.lab.efficientad_ignore_mask import load_ignore_mask_asset
+
+        asset = load_ignore_mask_asset(
+            configured_ignore_mask_index,
+            expected_views=VIEW_ORDER,
+            expected_roi_config_sha256=_file_sha256(config.roi_config),
+            expected_shapes={
+                view: (rois[view][3] - rois[view][1], rois[view][2] - rois[view][0])
+                for view in VIEW_ORDER
+            },
+        )
+        if asset.index_sha256 != configured_ignore_mask_sha256:
+            raise ValueError("EfficientAD ignore mask index SHA256不匹配")
+        ignore_masks = asset.masks
+        ignore_mask_index_sha256 = asset.index_sha256
+    configured_template_mask_index = getattr(config, "template_ignore_mask_index", None)
+    if configured_template_mask_index is None:
+        template = EightViewTemplatePredictor(config.template_models)
+    else:
+        configured_template_mask_sha256 = getattr(config, "template_ignore_mask_index_sha256", None)
+        if (
+            ignore_masks is None
+            or ignore_mask_index_sha256 is None
+            or configured_template_mask_sha256 != ignore_mask_index_sha256
+        ):
+            raise ValueError("Template与EfficientAD没有加载同一手动ignore mask资产")
+        template = EightViewTemplatePredictor(
+            config.template_models,
+            ignore_masks=ignore_masks,
+            ignore_mask_index_sha256=ignore_mask_index_sha256,
+            masked_thresholds=getattr(config, "template_masked_thresholds", None),
+            masked_threshold_artifact_sha256=getattr(
+                config,
+                "template_masked_threshold_artifact_sha256",
+                None,
+            ),
+        )
     efficientad = EightViewEfficientAdPredictor(
         config.efficientad_checkpoints,
         thresholds=config.efficientad_thresholds,
         base_thresholds=config.efficientad_base_thresholds,
         threshold_margin=config.efficientad_threshold_margin,
+        ignore_masks=ignore_masks,
+        ignore_mask_index_sha256=ignore_mask_index_sha256,
     )
     trusted_ok_matcher: TrustedOkMatcher | None = None
     trusted_ok_matcher_error: str | None = None
@@ -1303,7 +1524,7 @@ def build_model_suite(
             trusted_ok_matcher = candidate
             announce("可信OK参考库预热完成。")
     return EightViewModelSuite(
-        rois=load_part_rois(config.roi_config),
+        rois=rois,
         template_predictor=template.predict,
         bright_streak_predictor=bright_streak.predict,
         yolo_predictor=yolo.predict,

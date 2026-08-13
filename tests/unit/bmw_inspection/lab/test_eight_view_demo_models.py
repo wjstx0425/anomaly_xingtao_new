@@ -334,6 +334,72 @@ def test_build_model_suite_wires_manual_rotated_roi_into_tracked_v3(
     }
 
 
+def test_build_model_suite_injects_same_manual_masks_into_template_and_efficientad(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    roi = tmp_path / "roi.json"
+    roi.write_text("{}", encoding="utf-8")
+    masks = {view: np.zeros((10, 10), dtype=np.uint8) for view in VIEW_ORDER}
+    masks["front"][1:3, 1:3] = 255
+    asset = SimpleNamespace(masks=masks, index_sha256="a" * 64)
+    predictor = SimpleNamespace(
+        predict=lambda *_args: ModelOutput(BranchStatus.PASS, 0.1, 0.2, "pass", None)
+    )
+    calls: dict[str, dict[str, object]] = {}
+
+    def template_factory(*_args: object, **kwargs: object) -> SimpleNamespace:
+        calls["template"] = kwargs
+        return predictor
+
+    def efficientad_factory(*_args: object, **kwargs: object) -> SimpleNamespace:
+        calls["efficientad"] = kwargs
+        return predictor
+
+    monkeypatch.setattr(demo_models, "EightViewTemplatePredictor", template_factory)
+    monkeypatch.setattr(demo_models, "EightViewEfficientAdPredictor", efficientad_factory)
+    monkeypatch.setattr(demo_models, "EightViewBrightStreakPredictor", lambda *_args, **_kwargs: predictor)
+    monkeypatch.setattr(demo_models, "EightViewYoloPredictor", lambda *_args, **_kwargs: predictor)
+    monkeypatch.setattr(
+        demo_models,
+        "load_part_rois",
+        lambda _path: {view: (0, 0, 10, 10) for view in VIEW_ORDER},
+    )
+    from bmw_inspection.lab import efficientad_ignore_mask
+
+    monkeypatch.setattr(efficientad_ignore_mask, "load_ignore_mask_asset", lambda *_args, **_kwargs: asset)
+    config = SimpleNamespace(
+        template_models={},
+        template_ignore_mask_index=Path("mask.json"),
+        template_ignore_mask_index_sha256="a" * 64,
+        template_masked_thresholds={view: 0.01 for view in VIEW_ORDER},
+        template_masked_threshold_artifact_sha256="b" * 64,
+        bright_streak_engine="calibrated_rule_v1",
+        bright_streak_config=Path("bright.json"),
+        yolo_checkpoint=Path("best.pt"),
+        yolo_candidate_conf=0.1,
+        yolo_final_threshold=0.2,
+        yolo_imgsz=640,
+        efficientad_checkpoints={},
+        efficientad_thresholds={},
+        efficientad_base_thresholds={},
+        efficientad_threshold_margin=0.0,
+        efficientad_ignore_mask_index=Path("mask.json"),
+        efficientad_ignore_mask_index_sha256="a" * 64,
+        roi_config=roi,
+        trusted_ok_reference_index=None,
+        trusted_ok_reference_index_sha256=None,
+    )
+
+    build_model_suite(config)
+
+    assert calls["template"]["ignore_masks"] is masks
+    assert calls["template"]["ignore_mask_index_sha256"] == "a" * 64
+    assert calls["template"]["masked_thresholds"] == config.template_masked_thresholds
+    assert calls["template"]["masked_threshold_artifact_sha256"] == "b" * 64
+    assert calls["efficientad"]["ignore_masks"] is masks
+
+
 def test_model_suite_matches_front_left_full_and_roi_independently_when_both_are_ng() -> None:
     calls: list[tuple[str, str]] = []
 
@@ -1212,6 +1278,44 @@ def test_efficientad_predictor_uses_deployment_threshold_not_pred_label(tmp_path
     assert not np.array_equal(output.overlay, cv2.addWeighted(image, 0.6, fixed_scale_heatmap(anomaly_map), 0.4, 0.0))
 
 
+def test_efficientad_predictor_excludes_manual_ignore_mask_but_keeps_empty_views_on_pred_score(
+    tmp_path: Path,
+) -> None:
+    checkpoints = {}
+    for view in VIEW_ORDER:
+        checkpoint = tmp_path / view / "model.ckpt"
+        checkpoint.parent.mkdir()
+        checkpoint.write_bytes(b"checkpoint")
+        checkpoints[view] = checkpoint
+    anomaly_map = np.array([[0.2, 1.0], [0.7, 0.4]], dtype=np.float32)
+    masks = {view: np.zeros((4, 4), dtype=np.uint8) for view in VIEW_ORDER}
+    masks["back"][:2, 2:] = 255
+    predictor = EightViewEfficientAdPredictor(
+        checkpoints,
+        thresholds={view: 0.8 for view in VIEW_ORDER},
+        predictor_factory=lambda _path: lambda _image: (0.9, True, anomaly_map),
+        ignore_masks=masks,
+        ignore_mask_index_sha256="a" * 64,
+    )
+    image = np.zeros((4, 4, 3), dtype=np.uint8)
+
+    masked = predictor.predict("back", image)
+    unchanged = predictor.predict("front", image)
+
+    assert masked.status is BranchStatus.PASS
+    assert masked.score == pytest.approx(0.7)
+    assert masked.details["raw_pred_score"] == pytest.approx(0.9)
+    assert masked.details["score_source"] == "manual_ignore_masked_anomaly_map_max"
+    assert masked.details["ignored_roi_pixel_count"] == 4
+    assert masked.details["hotspot_x"] == 0
+    assert masked.details["hotspot_y"] == 1
+    assert masked.details["ignore_mask_index_sha256"] == "a" * 64
+    assert "手动忽略区外异常图最大值" in masked.reason
+    assert unchanged.status is BranchStatus.NG
+    assert unchanged.score == pytest.approx(0.9)
+    assert unchanged.details["score_source"] == "pred_score"
+
+
 def test_template_difference_uses_best_match_alignment(tmp_path: Path) -> None:
     model_paths = {}
     base = np.zeros((16, 16), dtype=np.uint8)
@@ -1239,6 +1343,67 @@ def test_template_difference_uses_best_match_alignment(tmp_path: Path) -> None:
     assert output.details["aligned_mean_absolute_difference"] < 20
     assert "最佳平移 (2, 0)" in output.reason
     assert "诊断热区" in output.reason
+
+
+def _manual_mask_template_predictor(
+    tmp_path: Path,
+) -> tuple[EightViewTemplatePredictor, np.ndarray, np.ndarray]:
+    rng = np.random.default_rng(20260813)
+    base = rng.integers(0, 256, size=(32, 32), dtype=np.uint8)
+    model_paths: dict[str, Path] = {}
+    masks = {view: np.zeros(base.shape, dtype=np.uint8) for view in VIEW_ORDER}
+    masks["front"][3:13, 3:13] = 255
+    for view in VIEW_ORDER:
+        directory = tmp_path / view
+        directory.mkdir()
+        assert cv2.imwrite(str(directory / "template.png"), cv2.GaussianBlur(base, (3, 3), 0))
+        (directory / "model.json").write_text(
+            '{"view_id":"%s","input_width":32,"input_height":32,'
+            '"threshold":0.02,"preprocess":{"target_width":32,"target_height":32,"max_shift":2},'
+            '"templates":[{"path":"template.png"}]}' % view,
+            encoding="utf-8",
+        )
+        model_paths[view] = directory / "model.json"
+    predictor = EightViewTemplatePredictor(
+        model_paths,
+        ignore_masks=masks,
+        ignore_mask_index_sha256="a" * 64,
+        masked_thresholds={view: 0.02 for view in VIEW_ORDER},
+        masked_threshold_artifact_sha256="b" * 64,
+    )
+    return predictor, base, masks["front"]
+
+
+def test_template_predictor_excludes_manual_mask_and_preserves_raw_evidence(tmp_path: Path) -> None:
+    predictor, base, mask = _manual_mask_template_predictor(tmp_path)
+    query = base.copy()
+    query[5:11, 5:11] = 255
+
+    output = predictor.predict("front", query)
+
+    assert output.status is BranchStatus.PASS
+    assert output.score is not None and output.score <= 0.02
+    assert output.threshold == pytest.approx(0.02)
+    assert output.details["score_source"] == "manual_ignore_masked_ccoeff_normed"
+    assert output.details["raw_unmasked_risk"] > 0.02
+    assert output.details["masked_risk"] == pytest.approx(output.score)
+    assert output.details["ignored_input_pixel_count"] == 100
+    assert output.details["valid_target_pixel_fraction"] == pytest.approx(924 / 1024)
+    assert output.details["ignore_mask_index_sha256"] == "a" * 64
+    assert output.details["masked_threshold_artifact_sha256"] == "b" * 64
+    assert "手动忽略区外" in output.reason
+
+
+def test_template_predictor_keeps_corruption_outside_manual_mask_as_ng(tmp_path: Path) -> None:
+    predictor, base, _mask = _manual_mask_template_predictor(tmp_path)
+    query = base.copy()
+    query[18:26, 18:26] = 255
+
+    output = predictor.predict("front", query)
+
+    assert output.status is BranchStatus.NG
+    assert output.score is not None and output.score > 0.02
+    assert output.details["masked_risk"] == pytest.approx(output.score)
 
 
 def test_efficientad_predictor_threshold_equality_is_ng_when_pred_label_is_false(tmp_path: Path) -> None:
