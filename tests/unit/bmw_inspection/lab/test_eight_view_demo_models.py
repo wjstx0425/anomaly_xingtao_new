@@ -14,6 +14,10 @@ import numpy as np
 import pytest
 
 from bmw_inspection.lab import eight_view_demo_models as demo_models
+from bmw_inspection.lab.bright_streak_rotated_roi import (
+    RotatedBrightStreakRoi,
+    write_rotated_bright_streak_roi,
+)
 from bmw_inspection.lab.eight_view_dataset import VIEW_ORDER
 from bmw_inspection.lab.eight_view_demo import BranchStatus, DemoFinalStatus
 from bmw_inspection.lab.efficientad_analysis import fixed_scale_heatmap
@@ -278,6 +282,56 @@ def test_build_model_suite_keeps_trusted_ok_disabled_without_explicit_injection(
     assert inspection.final_status is DemoFinalStatus.OK
     assert dict(inspection.trusted_ok_by_comparison) == {}
     assert dict(inspection.diagnostic_metadata) == {}
+
+
+def test_build_model_suite_wires_manual_rotated_roi_into_tracked_v3(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    predictor = SimpleNamespace(
+        predict=lambda *_args: ModelOutput(BranchStatus.PASS, 0.1, 0.2, "pass", None)
+    )
+    received: dict[str, object] = {}
+
+    def tracked_factory(report: Path, **kwargs: object) -> SimpleNamespace:
+        received["report"] = report
+        received.update(kwargs)
+        return predictor
+
+    monkeypatch.setattr(demo_models, "EightViewTrackedProfileBrightStreakPredictor", tracked_factory)
+    monkeypatch.setattr(demo_models, "EightViewTemplatePredictor", lambda *_args, **_kwargs: predictor)
+    monkeypatch.setattr(demo_models, "EightViewYoloPredictor", lambda *_args, **_kwargs: predictor)
+    monkeypatch.setattr(demo_models, "EightViewEfficientAdPredictor", lambda *_args, **_kwargs: predictor)
+    monkeypatch.setattr(
+        demo_models,
+        "load_part_rois",
+        lambda _path: {view: (0, 0, 10, 10) for view in VIEW_ORDER},
+    )
+    config = SimpleNamespace(
+        template_models={},
+        bright_streak_engine="tracked_profile_v3_manual_rotated_roi",
+        bright_streak_config=Path("tracked-v3.json"),
+        bright_streak_rotated_roi=Path("rotated-roi.json"),
+        bright_streak_rotated_roi_sha256="a" * 64,
+        yolo_checkpoint=Path("best.pt"),
+        yolo_candidate_conf=0.1,
+        yolo_final_threshold=0.2,
+        yolo_imgsz=640,
+        efficientad_checkpoints={},
+        efficientad_thresholds={},
+        efficientad_base_thresholds={},
+        efficientad_threshold_margin=0.0,
+        roi_config=Path("roi.json"),
+        trusted_ok_reference_index=None,
+        trusted_ok_reference_index_sha256=None,
+    )
+
+    build_model_suite(config)
+
+    assert received == {
+        "report": Path("tracked-v3.json"),
+        "rotated_roi_path": Path("rotated-roi.json"),
+        "rotated_roi_sha256": "a" * 64,
+    }
 
 
 def test_model_suite_matches_front_left_full_and_roi_independently_when_both_are_ng() -> None:
@@ -854,6 +908,52 @@ def _tracked_full_image(kind: str) -> np.ndarray:
     image = np.full((1793, 1873), 20, dtype=np.uint8)
     image[1180:1793, 1792:1873] = _tracked_roi(kind)
     return image
+
+
+def _rotated_roi_asset(tmp_path: Path) -> tuple[Path, str]:
+    source = tmp_path / "front_left_hdr.png"
+    assert cv2.imwrite(str(source), _tracked_full_image("diagonal"))
+    asset = RotatedBrightStreakRoi(
+        points_xy=((1792, 1180), (1872, 1175), (1872, 1788), (1792, 1792)),
+        source_width=1873,
+        source_height=1793,
+        output_width=81,
+        output_height=613,
+        source_image=source.name,
+        source_image_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
+    )
+    path = tmp_path / "bright_streak_rotated_roi.json"
+    write_rotated_bright_streak_roi(path, asset)
+    return path, hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_rotated_v3_reuses_report_thresholds(tmp_path: Path) -> None:
+    roi_asset, roi_sha256 = _rotated_roi_asset(tmp_path)
+    predictor = EightViewTrackedProfileBrightStreakPredictor(
+        _tracked_report(tmp_path),
+        rotated_roi_path=roi_asset,
+        rotated_roi_sha256=roi_sha256,
+    )
+
+    result = predictor.predict(_tracked_full_image("diagonal"))
+
+    assert result.details["roi_mode"] == "manual_rotated_perspective"
+    assert result.details["threshold_calibration"] == "existing_v3_not_recalibrated"
+    assert result.details["rotated_roi_sha256"] == roi_sha256
+    assert result.overlay is not None
+    assert result.overlay.shape[:2] == (613, 81)
+    assert result.reason.startswith("手动倾斜ROI，沿用V3阈值（未重标定）")
+
+
+def test_rotated_v3_rejects_roi_sha_mismatch(tmp_path: Path) -> None:
+    roi_asset, _roi_sha256 = _rotated_roi_asset(tmp_path)
+
+    with pytest.raises(ValueError, match="倾斜光痕ROI.*SHA256"):
+        EightViewTrackedProfileBrightStreakPredictor(
+            _tracked_report(tmp_path),
+            rotated_roi_path=roi_asset,
+            rotated_roi_sha256="0" * 64,
+        )
 
 
 @pytest.mark.parametrize(
