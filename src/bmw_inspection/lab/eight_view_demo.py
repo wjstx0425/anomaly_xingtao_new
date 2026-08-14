@@ -330,6 +330,9 @@ def _sha256(path: Path) -> str:
 
 def _load_efficientad_thresholds(
     path: Path,
+    *,
+    expected_component_policy_sha256: str | None = None,
+    expected_mask_index_sha256: str | None = None,
 ) -> tuple[Mapping[str, float], Mapping[str, float], float, str, str, Mapping[str, str]]:
     """Load the Task 3 threshold contract and reject unsafe Demo assets."""
     try:
@@ -338,6 +341,18 @@ def _load_efficientad_thresholds(
         raise ValueError(f"无法读取EfficientAD整件阈值资产：{path}: {error}") from error
     if not isinstance(payload, dict):
         raise ValueError("EfficientAD整件阈值资产必须是JSON对象")
+    component_binding_expected = expected_component_policy_sha256 is not None
+    if component_binding_expected != (expected_mask_index_sha256 is not None):
+        raise ValueError("EfficientAD component threshold binding配置不完整")
+    if component_binding_expected:
+        if payload.get("score_source") != "accepted_component_max_p95":
+            raise ValueError(
+                "EfficientAD整件阈值资产score_source必须是accepted_component_max_p95"
+            )
+        if payload.get("component_policy_sha256") != expected_component_policy_sha256:
+            raise ValueError("EfficientAD整件阈值资产component_policy_sha256不匹配")
+        if payload.get("mask_index_sha256") != expected_mask_index_sha256:
+            raise ValueError("EfficientAD整件阈值资产mask_index_sha256不匹配")
     source_csv = payload.get("source_csv")
     if not isinstance(source_csv, str) or not source_csv.strip():
         raise ValueError("EfficientAD整件阈值资产source_csv必须是非空字符串")
@@ -622,6 +637,11 @@ def load_demo_config(path: Path) -> EightViewDemoConfig:
         != (efficientad_component_fields <= configured_efficientad_fields)
     ):
         raise ValueError("efficientad配置字段不正确")
+    if (
+        efficientad_component_fields <= configured_efficientad_fields
+        and not efficientad_mask_fields <= configured_efficientad_fields
+    ):
+        raise ValueError("EfficientAD component filter必须同时配置ignore mask")
     trusted_ok_config = payload.get("trusted_ok_reference")
     if "trusted_ok_reference" in payload and (
         not isinstance(trusted_ok_config, dict)
@@ -759,7 +779,15 @@ def load_demo_config(path: Path) -> EightViewDemoConfig:
         efficientad_source_csv,
         efficientad_source_csv_sha256,
         expected_checkpoint_sha256,
-    ) = _load_efficientad_thresholds(threshold_artifact)
+    ) = _load_efficientad_thresholds(
+        threshold_artifact,
+        expected_component_policy_sha256=efficientad_component_filter_artifact_sha256,
+        expected_mask_index_sha256=(
+            efficientad_ignore_mask_index_sha256
+            if efficientad_component_filter_artifact_sha256 is not None
+            else None
+        ),
+    )
     for label, asset in (("capture_config", capture_config), ("roi_config", roi_config)):
         if not asset.is_file():
             raise ValueError(f"{label}不存在：{asset}")

@@ -1378,6 +1378,9 @@ def test_efficientad_predictor_uses_component_p95_score_and_exposes_component_ev
         checkpoints[view] = checkpoint
     anomaly_map = np.zeros((9, 9), dtype=np.float32)
     anomaly_map[2:5, 3:6] = 0.70
+    anomaly_map[8, 8] = 0.99
+    masks = {view: np.zeros((9, 9), dtype=np.uint8) for view in VIEW_ORDER}
+    masks["front"][8, 8] = 255
     policy = ComponentFilterPolicy(
         low_threshold=0.30,
         seed_threshold=0.50,
@@ -1393,6 +1396,8 @@ def test_efficientad_predictor_uses_component_p95_score_and_exposes_component_ev
         predictor_factory=lambda _path: lambda _image: (0.10, False, anomaly_map),
         component_policies={view: policy for view in VIEW_ORDER},
         component_filter_artifact_sha256="b" * 64,
+        ignore_masks=masks,
+        ignore_mask_index_sha256="a" * 64,
     )
 
     output = predictor.predict("front", np.zeros((90, 90, 3), dtype=np.uint8))
@@ -1402,6 +1407,8 @@ def test_efficientad_predictor_uses_component_p95_score_and_exposes_component_ev
     assert output.raw_pred_label is False
     assert output.details["score_source"] == "accepted_component_max_p95"
     assert output.details["component_filter_artifact_sha256"] == "b" * 64
+    assert output.details["raw_anomaly_map_max"] == pytest.approx(0.99)
+    assert output.details["ignored_map_pixel_count"] == 1
     assert output.details["accepted_component_count"] == 1
     assert output.details["rejected_component_count"] == 0
     component = output.details["accepted_components"][0]
@@ -1418,6 +1425,16 @@ def test_efficientad_predictor_uses_component_p95_score_and_exposes_component_ev
     assert output.details["hotspot_y"] == 2
     assert output.overlay is not None
     assert np.any(output.overlay[:, :, 1] > output.overlay[:, :, 2])
+    masked_map = anomaly_map.copy()
+    masked_map[8, 8] = 0.0
+    expected = cv2.addWeighted(
+        np.zeros((90, 90, 3), dtype=np.uint8),
+        0.6,
+        cv2.resize(fixed_scale_heatmap(masked_map), (90, 90), interpolation=cv2.INTER_LINEAR),
+        0.4,
+        0.0,
+    )
+    assert np.array_equal(output.overlay[89, 89], expected[89, 89])
 
 
 def test_efficientad_predictor_uses_deployment_threshold_not_pred_label(tmp_path: Path) -> None:

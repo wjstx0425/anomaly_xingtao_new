@@ -134,6 +134,39 @@ def _component_filter_artifact(tmp_path: Path) -> Path:
     return artifact
 
 
+def _component_bound_payload(
+    tmp_path: Path,
+    *,
+    threshold_artifact: Path,
+    component_artifact: Path,
+    bind_threshold: bool = True,
+) -> tuple[dict[str, object], str, str]:
+    mask_index = tmp_path / "component_ignore_masks/index.json"
+    mask_index.parent.mkdir(exist_ok=True)
+    mask_index.write_text('{"schema_version":"bmw.efficientad_manual_ignore_masks/1.0"}', encoding="utf-8")
+    mask_sha256 = hashlib.sha256(mask_index.read_bytes()).hexdigest()
+    component_sha256 = hashlib.sha256(component_artifact.read_bytes()).hexdigest()
+    if bind_threshold:
+        threshold_payload = json.loads(threshold_artifact.read_text(encoding="utf-8"))
+        threshold_payload.update(
+            {
+                "score_source": "accepted_component_max_p95",
+                "component_policy_sha256": component_sha256,
+                "mask_index_sha256": mask_sha256,
+            }
+        )
+        threshold_artifact.write_text(json.dumps(threshold_payload), encoding="utf-8")
+    payload = _demo_payload(tmp_path, threshold_artifact=threshold_artifact)
+    payload["efficientad"] = {
+        **payload["efficientad"],
+        "ignore_mask_index": str(mask_index),
+        "ignore_mask_index_sha256": mask_sha256,
+        "component_filter_artifact": str(component_artifact),
+        "component_filter_artifact_sha256": component_sha256,
+    }
+    return payload, component_sha256, mask_sha256
+
+
 def _candidate_report_and_rotated_roi(tmp_path: Path) -> tuple[Path, Path]:
     source = tmp_path / "front_left_hdr.png"
     source.write_bytes(b"accepted-rotated-roi-source")
@@ -344,13 +377,11 @@ def test_demo_config_accepts_sha_bound_efficientad_ignore_mask_index(tmp_path: P
 def test_demo_config_accepts_sha_bound_eight_view_component_filter(tmp_path: Path) -> None:
     _roi, _capture, _run, threshold_artifact = _write_demo_assets(tmp_path)
     component_artifact = _component_filter_artifact(tmp_path)
-    component_sha256 = hashlib.sha256(component_artifact.read_bytes()).hexdigest()
-    payload = _demo_payload(tmp_path, threshold_artifact=threshold_artifact)
-    payload["efficientad"] = {
-        **payload["efficientad"],
-        "component_filter_artifact": str(component_artifact),
-        "component_filter_artifact_sha256": component_sha256,
-    }
+    payload, component_sha256, mask_sha256 = _component_bound_payload(
+        tmp_path,
+        threshold_artifact=threshold_artifact,
+        component_artifact=component_artifact,
+    )
     config_path = tmp_path / "demo.json"
     config_path.write_text(json.dumps(payload), encoding="utf-8")
 
@@ -358,20 +389,87 @@ def test_demo_config_accepts_sha_bound_eight_view_component_filter(tmp_path: Pat
 
     assert config.efficientad_component_filter_artifact == component_artifact.resolve()
     assert config.efficientad_component_filter_artifact_sha256 == component_sha256
+    assert config.efficientad_ignore_mask_index_sha256 == mask_sha256
     assert config.efficientad_component_policies is not None
     assert tuple(config.efficientad_component_policies) == VIEW_ORDER
     assert config.efficientad_component_policies["front"].minimum_area == 8
 
 
-def test_demo_config_rejects_tampered_component_filter_artifact(tmp_path: Path) -> None:
+def test_demo_config_rejects_component_filter_without_ignore_mask(tmp_path: Path) -> None:
     _roi, _capture, _run, threshold_artifact = _write_demo_assets(tmp_path)
     component_artifact = _component_filter_artifact(tmp_path)
     payload = _demo_payload(tmp_path, threshold_artifact=threshold_artifact)
     payload["efficientad"] = {
         **payload["efficientad"],
         "component_filter_artifact": str(component_artifact),
-        "component_filter_artifact_sha256": "0" * 64,
+        "component_filter_artifact_sha256": hashlib.sha256(component_artifact.read_bytes()).hexdigest(),
     }
+    config_path = tmp_path / "demo.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="component filter必须同时配置ignore mask"):
+        load_demo_config(config_path)
+
+
+def test_demo_config_rejects_legacy_threshold_for_component_filter(tmp_path: Path) -> None:
+    _roi, _capture, _run, threshold_artifact = _write_demo_assets(tmp_path)
+    component_artifact = _component_filter_artifact(tmp_path)
+    payload, _component_sha256, _mask_sha256 = _component_bound_payload(
+        tmp_path,
+        threshold_artifact=threshold_artifact,
+        component_artifact=component_artifact,
+        bind_threshold=False,
+    )
+    config_path = tmp_path / "demo.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="score_source必须是accepted_component_max_p95"):
+        load_demo_config(config_path)
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid", "message"),
+    [
+        ("score_source", "pred_score", "score_source必须是accepted_component_max_p95"),
+        ("component_policy_sha256", "0" * 64, "component_policy_sha256不匹配"),
+        ("mask_index_sha256", "0" * 64, "mask_index_sha256不匹配"),
+    ],
+)
+def test_demo_config_rejects_tampered_component_threshold_binding(
+    tmp_path: Path,
+    field: str,
+    invalid: str,
+    message: str,
+) -> None:
+    _roi, _capture, _run, threshold_artifact = _write_demo_assets(tmp_path)
+    component_artifact = _component_filter_artifact(tmp_path)
+    payload, _component_sha256, _mask_sha256 = _component_bound_payload(
+        tmp_path,
+        threshold_artifact=threshold_artifact,
+        component_artifact=component_artifact,
+    )
+    threshold_payload = json.loads(threshold_artifact.read_text(encoding="utf-8"))
+    threshold_payload[field] = invalid
+    threshold_artifact.write_text(json.dumps(threshold_payload), encoding="utf-8")
+    payload["efficientad"]["threshold_artifact_sha256"] = hashlib.sha256(
+        threshold_artifact.read_bytes()
+    ).hexdigest()
+    config_path = tmp_path / "demo.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=message):
+        load_demo_config(config_path)
+
+
+def test_demo_config_rejects_tampered_component_filter_artifact(tmp_path: Path) -> None:
+    _roi, _capture, _run, threshold_artifact = _write_demo_assets(tmp_path)
+    component_artifact = _component_filter_artifact(tmp_path)
+    payload, _component_sha256, _mask_sha256 = _component_bound_payload(
+        tmp_path,
+        threshold_artifact=threshold_artifact,
+        component_artifact=component_artifact,
+    )
+    payload["efficientad"]["component_filter_artifact_sha256"] = "0" * 64
     config_path = tmp_path / "demo.json"
     config_path.write_text(json.dumps(payload), encoding="utf-8")
 
@@ -385,12 +483,11 @@ def test_demo_config_rejects_component_filter_without_all_eight_views(tmp_path: 
     component_payload = json.loads(component_artifact.read_text(encoding="utf-8"))
     del component_payload["policies"]["back_secondary"]
     component_artifact.write_text(json.dumps(component_payload), encoding="utf-8")
-    payload = _demo_payload(tmp_path, threshold_artifact=threshold_artifact)
-    payload["efficientad"] = {
-        **payload["efficientad"],
-        "component_filter_artifact": str(component_artifact),
-        "component_filter_artifact_sha256": hashlib.sha256(component_artifact.read_bytes()).hexdigest(),
-    }
+    payload, _component_sha256, _mask_sha256 = _component_bound_payload(
+        tmp_path,
+        threshold_artifact=threshold_artifact,
+        component_artifact=component_artifact,
+    )
     config_path = tmp_path / "demo.json"
     config_path.write_text(json.dumps(payload), encoding="utf-8")
 
