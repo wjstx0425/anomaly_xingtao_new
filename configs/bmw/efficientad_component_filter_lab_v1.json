@@ -1,0 +1,15 @@
+{
+  "schema_version": "bmw.efficientad_component_filter/1.0",
+  "candidate_only": true,
+  "score_source": "accepted_component_max_p95",
+  "policies": {
+    "front": {"low_threshold": 0.2, "seed_threshold": 0.35, "p95_threshold": 0.35, "minimum_area": 8, "hard_peak_threshold": 0.9, "line_minimum_length": 10, "line_minimum_area": 4},
+    "front_left": {"low_threshold": 0.2, "seed_threshold": 0.35, "p95_threshold": 0.35, "minimum_area": 8, "hard_peak_threshold": 0.9, "line_minimum_length": 10, "line_minimum_area": 4},
+    "front_right": {"low_threshold": 0.2, "seed_threshold": 0.35, "p95_threshold": 0.35, "minimum_area": 8, "hard_peak_threshold": 0.9, "line_minimum_length": 10, "line_minimum_area": 4},
+    "front_secondary": {"low_threshold": 0.2, "seed_threshold": 0.35, "p95_threshold": 0.35, "minimum_area": 8, "hard_peak_threshold": 0.9, "line_minimum_length": 10, "line_minimum_area": 4},
+    "back": {"low_threshold": 0.2, "seed_threshold": 0.35, "p95_threshold": 0.35, "minimum_area": 8, "hard_peak_threshold": 0.9, "line_minimum_length": 10, "line_minimum_area": 4},
+    "back_left": {"low_threshold": 0.2, "seed_threshold": 0.35, "p95_threshold": 0.35, "minimum_area": 8, "hard_peak_threshold": 0.9, "line_minimum_length": 10, "line_minimum_area": 4},
+    "back_right": {"low_threshold": 0.2, "seed_threshold": 0.35, "p95_threshold": 0.35, "minimum_area": 8, "hard_peak_threshold": 0.9, "line_minimum_length": 10, "line_minimum_area": 4},
+    "back_secondary": {"low_threshold": 0.2, "seed_threshold": 0.35, "p95_threshold": 0.35, "minimum_area": 8, "hard_peak_threshold": 0.9, "line_minimum_length": 10, "line_minimum_area": 4}
+  }
+}

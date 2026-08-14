@@ -24,8 +24,8 @@ from bmw_inspection.lab.efficientad_ignore_mask import (  # noqa: E402
     polygons_to_ignore_mask,
     save_ignore_mask_asset,
 )
-from bmw_inspection.lab.eight_view_dataset import VIEW_ORDER  # noqa: E402
-from bmw_inspection.lab.eight_view_roi import fit_image_for_display  # noqa: E402
+from bmw_inspection.lab.eight_view_dataset import CAPTURE_SCOPES, VIEW_ORDER  # noqa: E402
+from bmw_inspection.lab.eight_view_roi import fit_image_for_display, load_roi_config  # noqa: E402
 
 
 DEFAULT_CAPTURE_ID = "bmw_right_normal_group002_000001"
@@ -53,12 +53,49 @@ def load_training_release_roi_images(
     training_release: Path,
     *,
     representative_sample: str | None = None,
+    public_roi_config: Path,
 ) -> tuple[dict[str, np.ndarray], dict[str, Path], str]:
     """Load one complete normal/train ROI crop set from an immutable training release."""
     root = Path(training_release).expanduser().resolve()
     manifest = root / "manifests/crop_manifest.csv"
     if not manifest.is_file() or manifest.is_symlink():
         raise ValueError(f"training release crop manifest does not exist: {manifest}")
+    roi_path = Path(public_roi_config).expanduser()
+    if not roi_path.is_file() or roi_path.is_symlink():
+        raise ValueError(f"public ROI config is missing or a symlink: {roi_path}")
+    roi_path = roi_path.resolve()
+    roi_config = load_roi_config(roi_path)
+    training_report_path = root / "report.json"
+    if not training_report_path.is_file() or training_report_path.is_symlink():
+        raise ValueError(f"training release report is missing or a symlink: {training_report_path}")
+    training_report = json.loads(training_report_path.read_text(encoding="utf-8"))
+    trained_roi_sha = training_report.get("roi_config_sha256")
+    training_scope = training_report.get("roi_capture_scope")
+    prepared_manifest_raw = training_report.get("prepared_manifest")
+    if not isinstance(trained_roi_sha, str) or trained_roi_sha != _sha256(roi_path):
+        raise ValueError("training release ROI SHA does not match the requested public ROI config")
+    if not isinstance(prepared_manifest_raw, str) or not prepared_manifest_raw:
+        raise ValueError("training release report lacks prepared_manifest")
+    prepared_manifest = Path(prepared_manifest_raw).expanduser()
+    if not prepared_manifest.is_file() or prepared_manifest.is_symlink():
+        raise ValueError(f"prepared manifest is missing or a symlink: {prepared_manifest}")
+    prepared_manifest = prepared_manifest.resolve()
+    prepared_root = prepared_manifest.parents[1]
+    if prepared_manifest != prepared_root / "manifests/dataset_manifest.csv":
+        raise ValueError("training release prepared_manifest has an unsupported layout")
+    prepared_report_path = prepared_root / "report.json"
+    if not prepared_report_path.is_file() or prepared_report_path.is_symlink():
+        raise ValueError(f"prepared release report is missing or a symlink: {prepared_report_path}")
+    prepared_report = json.loads(prepared_report_path.read_text(encoding="utf-8"))
+    prepared_scope = prepared_report.get("capture_scope")
+    if (
+        training_scope not in CAPTURE_SCOPES
+        or prepared_scope not in CAPTURE_SCOPES
+        or roi_config.capture_scope not in CAPTURE_SCOPES
+        or training_scope != prepared_scope
+        or training_scope != roi_config.capture_scope
+    ):
+        raise ValueError("training report, prepared report, and ROI config capture_scope must match")
     with manifest.open(newline="", encoding="utf-8") as stream:
         reader = csv.DictReader(stream)
         required = {"sample_id", "session_id", "view_id", "source_class", "split", "crop_path", "crop_sha256"}
@@ -103,10 +140,17 @@ def load_selector_roi_images(
     capture_id: str,
     training_release: Path | None,
     representative_sample: str | None,
+    public_roi_config: Path,
 ) -> tuple[dict[str, np.ndarray], dict[str, Path], str]:
     """Load either existing Demo ROIs or one complete training-release representative."""
     if training_release is not None:
-        return load_training_release_roi_images(training_release, representative_sample=representative_sample)
+        return load_training_release_roi_images(
+            training_release,
+            representative_sample=representative_sample,
+            public_roi_config=public_roi_config,
+        )
+    if representative_sample is not None:
+        raise ValueError("representative_sample requires --training-release")
     roi_dir = Path(inspection_root).expanduser().resolve() / capture_id / "rois"
     source_paths = {view: roi_dir / f"{view}.png" for view in VIEW_ORDER}
     return _load_images(source_paths), source_paths, capture_id
@@ -329,6 +373,7 @@ def main(argv: list[str] | None = None) -> int:
             capture_id=args.capture_id,
             training_release=args.training_release,
             representative_sample=args.representative_sample,
+            public_roi_config=args.roi_config,
         )
         if args.from_index is None:
             seed_polygons = {view: [] for view in VIEW_ORDER}
