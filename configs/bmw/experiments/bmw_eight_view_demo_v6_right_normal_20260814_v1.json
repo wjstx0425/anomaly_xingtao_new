@@ -14,7 +14,7 @@
     "threshold_artifact": "../../../results/bmw_lab_one_click/bmw_right_normal_20260814_v6_demo_v1/efficientad_thresholds_v5_rebound.json",
     "threshold_artifact_sha256": "e97ab6e13ccf58cade777ef50dae25c3e81f48a88430d9f6b6496b38d5d0b9b1"
   },
-  "prepared_manifest": "../../../dataset/bmw_lab_prepared/bmw_right_batch_20260810_21_v1/manifests/dataset_manifest.csv",
+  "prepared_manifest": "../../../dataset/bmw_lab_prepared/bmw_right_normal_20260814_v1/manifests/dataset_manifest.csv",
   "result_root": "../../../results/bmw_lab_one_click/bmw_eight_view_demo_v6_right_normal_20260814_v1",
   "roi_config": "../rois/bmw_right_hdr_eight_view_v1.json",
   "schema_version": 1,

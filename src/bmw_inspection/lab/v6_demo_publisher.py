@@ -20,6 +20,9 @@ from bmw_inspection.lab.eight_view_dataset import VIEW_ORDER
 _V5_CONFIG = Path("configs/bmw/experiments/bmw_eight_view_demo_v5_template_manual_ignore_mask_v1.json")
 _NEW_RUN = Path("results/bmw_lab_one_click/bmw_right_normal_20260814_models_v1")
 _NEW_TRAINING_ROI = Path("configs/bmw/rois/bmw_right_normal_20260814_roi_v1.json")
+_NEW_PREPARED_MANIFEST = Path(
+    "dataset/bmw_lab_prepared/bmw_right_normal_20260814_v1/manifests/dataset_manifest.csv"
+)
 _BRIGHT_CANDIDATE = Path(
     "results/bmw_bright_streak_rotated_retrain/bmw_right_normal50_no_streak1_20260814_v2/report.json"
 )
@@ -44,6 +47,9 @@ def publish_v6_demo(repo_root: Path, *, output_run: Path, output_config: Path) -
     v5_config = _load_object(v5_config_path, "V5 Demo config")
     new_run = root / _NEW_RUN
     _validate_new_training_run(new_run)
+    new_prepared_manifest = root / _NEW_PREPARED_MANIFEST
+    if not new_prepared_manifest.is_file():
+        raise ValueError(f"new prepared manifest is missing: {new_prepared_manifest}")
     _assert_public_roi_equivalent(
         _resolve_config_path(v5_config_path, v5_config["roi_config"]),
         root / _NEW_TRAINING_ROI,
@@ -97,6 +103,7 @@ def publish_v6_demo(repo_root: Path, *, output_run: Path, output_config: Path) -
             v5_config,
             output_run=final_run,
             output_config=final_config,
+            prepared_manifest=new_prepared_manifest,
             template_thresholds=final_run / "template_thresholds_v5_rebound.json",
             efficientad_thresholds=final_run / "efficientad_thresholds_v5_rebound.json",
             bright_candidate=root / _BRIGHT_CANDIDATE,
@@ -195,6 +202,7 @@ def _build_v6_config(
     *,
     output_run: Path,
     output_config: Path,
+    prepared_manifest: Path,
     template_thresholds: Path,
     efficientad_thresholds: Path,
     bright_candidate: Path,
@@ -202,6 +210,7 @@ def _build_v6_config(
     v6 = json.loads(json.dumps(v5_config))
     v6["demo_id"] = "bmw-eight-view-right-v6-normal-20260814-v1"
     v6["training_run"] = _relative_path(output_config.parent, output_run)
+    v6["prepared_manifest"] = _relative_path(output_config.parent, prepared_manifest)
     v6["result_root"] = _relative_path(output_config.parent, output_run.parent / "bmw_eight_view_demo_v6_right_normal_20260814_v1")
     template = _mapping(v6, "template")
     template["threshold_artifact"] = _relative_path(output_config.parent, template_thresholds)

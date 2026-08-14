@@ -118,6 +118,9 @@ def fixture(tmp_path: Path) -> _V6Fixture:
     )
 
     new_run = repo / "results/bmw_lab_one_click/bmw_right_normal_20260814_models_v1"
+    new_manifest = repo / "dataset/bmw_lab_prepared/bmw_right_normal_20260814_v1/manifests/dataset_manifest.csv"
+    new_manifest.parent.mkdir(parents=True)
+    new_manifest.write_text("sample_id\nnormal-1\n", encoding="utf-8")
     _write_json(new_run / "run_report.json", {"status": "complete"})
     _write_json(new_run / "efficientad/score_analysis/part_thresholds.json", {"thresholds": {view: 0.5 for view in VIEW_ORDER}})
     for view in VIEW_ORDER:
@@ -178,6 +181,9 @@ def test_keeps_v5_bytes_unchanged_and_refuses_existing_destinations(fixture: _V6
     assert fixture.v5_config.read_bytes() == before
     config = json.loads(fixture.output_config.read_text(encoding="utf-8"))
     assert config["roi_config"] == "../rois/bmw_right_hdr_eight_view_v1.json"
+    assert config["prepared_manifest"] == (
+        "../../../dataset/bmw_lab_prepared/bmw_right_normal_20260814_v1/manifests/dataset_manifest.csv"
+    )
     assert config["bright_streak"]["engine"] == "tracked_profile_v3_manual_rotated_candidate"
     with pytest.raises(FileExistsError, match="refuse to overwrite"):
         publish_v6_demo(**fixture.arguments)
@@ -187,6 +193,7 @@ def test_publishes_through_symlinked_results_root_without_allowing_parent_escape
     worktree = fixture.repo_root.parent / "worktree"
     worktree.mkdir()
     (worktree / "configs").symlink_to(fixture.repo_root / "configs", target_is_directory=True)
+    (worktree / "dataset").symlink_to(fixture.repo_root / "dataset", target_is_directory=True)
     (worktree / "results").symlink_to(fixture.repo_root / "results", target_is_directory=True)
 
     receipt = publish_v6_demo(
