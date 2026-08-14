@@ -1,0 +1,29 @@
+{
+  "bright_streak": {
+    "config": "../../../results/bmw_bright_streak_rotated_retrain/bmw_left_normal52_no_streak1_20260814_v1/report.json",
+    "config_sha256": "30df0e3e9e9997a80f89a3eeb27bfcb8ba6a4d8d3fe36270f49ebc44291ff27a",
+    "engine": "tracked_profile_v3_manual_rotated_candidate",
+    "rotated_roi": "../../../results/bmw_bright_streak_rotated_roi/bmw_left_20260814_v2/roi.json",
+    "rotated_roi_sha256": "6345ae0b48806102bddcec83b7d125a96677a43f8875e646195119473c2a253c"
+  },
+  "capture_config": "../capture/bmw_4cam_eight_view_hdr_v1.json",
+  "demo_id": "bmw-eight-view-left-normal-20260814-v1",
+  "efficientad": {
+    "component_filter_artifact": "../efficientad_component_filter_lab_v1.json",
+    "component_filter_artifact_sha256": "1fb9c12eaf2505f79dd9f44d59af02533983585a9f3f8322402c2a42520fc74f",
+    "ignore_mask_index": "../../../results/bmw_efficientad_manual_ignore_masks/bmw_left_normal_20260814_models_v3_mask_v1/index.json",
+    "ignore_mask_index_sha256": "f667684c5ef9087dba990dcb1ef968ddfab7efeced1d952a3d12393f0d5f98ef",
+    "threshold_artifact": "../../../results/bmw_lab_one_click/bmw_left_normal_20260814_models_v3/efficientad/component_score_analysis/part_thresholds.json",
+    "threshold_artifact_sha256": "1bf599974360131ad1f35a70356dd4e6753febeed865a9e3b8e37b73061814e5"
+  },
+  "prepared_manifest": "../../../dataset/bmw_lab_prepared/bmw_left_normal_20260814_v2/manifests/dataset_manifest.csv",
+  "result_root": "../../../results/bmw_lab_one_click/bmw_eight_view_demo_left_normal_20260814_v1",
+  "roi_config": "../rois/bmw_left_normal_20260814_roi_v2.json",
+  "schema_version": 1,
+  "training_run": "../../../results/bmw_lab_one_click/bmw_left_normal_20260814_demo_v1",
+  "yolo": {
+    "candidate_conf": 0.1,
+    "final_threshold": 0.25,
+    "imgsz": 640
+  }
+}
