@@ -18,6 +18,7 @@ import cv2
 import numpy as np
 
 from bmw_inspection.lab.eight_view_dataset import VIEW_ORDER
+from bmw_inspection.lab.efficientad_component_filter import ComponentFilterPolicy
 from bmw_inspection.lab.trusted_ok_reference import TrustedOkMatch
 
 
@@ -169,6 +170,9 @@ class EightViewDemoConfig:
     bright_streak_weak_row_score_override: float | None = None
     efficientad_ignore_mask_index: Path | None = None
     efficientad_ignore_mask_index_sha256: str | None = None
+    efficientad_component_filter_artifact: Path | None = None
+    efficientad_component_filter_artifact_sha256: str | None = None
+    efficientad_component_policies: Mapping[str, ComponentFilterPolicy] | None = None
     template_ignore_mask_index: Path | None = None
     template_ignore_mask_index_sha256: str | None = None
     template_masked_threshold_artifact: Path | None = None
@@ -188,6 +192,12 @@ class EightViewDemoConfig:
             "efficientad_base_thresholds",
             MappingProxyType(dict(self.efficientad_base_thresholds)),
         )
+        if self.efficientad_component_policies is not None:
+            object.__setattr__(
+                self,
+                "efficientad_component_policies",
+                MappingProxyType(dict(self.efficientad_component_policies)),
+            )
         if self.template_masked_thresholds is not None:
             object.__setattr__(
                 self,
@@ -446,6 +456,44 @@ def _load_template_masked_thresholds(
     return MappingProxyType(parsed), MappingProxyType(model_sha256)
 
 
+def _load_efficientad_component_policies(path: Path) -> Mapping[str, ComponentFilterPolicy]:
+    """Load one exact eight-view component-filter policy asset."""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"无法读取EfficientAD component filter artifact：{path}: {error}") from error
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != {"schema_version", "candidate_only", "score_source", "policies"}
+        or payload.get("schema_version") != "bmw.efficientad_component_filter/1.0"
+        or payload.get("candidate_only") is not True
+        or payload.get("score_source") != "accepted_component_max_p95"
+    ):
+        raise ValueError("EfficientAD component filter artifact字段不正确")
+    policies = payload.get("policies")
+    if not isinstance(policies, dict) or set(policies) != set(VIEW_ORDER):
+        raise ValueError("EfficientAD component filter policies必须覆盖八个标准视角")
+    expected_fields = {
+        "low_threshold",
+        "seed_threshold",
+        "p95_threshold",
+        "minimum_area",
+        "hard_peak_threshold",
+        "line_minimum_length",
+        "line_minimum_area",
+    }
+    parsed: dict[str, ComponentFilterPolicy] = {}
+    for view in VIEW_ORDER:
+        item = policies[view]
+        if not isinstance(item, dict) or set(item) != expected_fields:
+            raise ValueError(f"EfficientAD component filter policy字段不正确：{view}")
+        try:
+            parsed[view] = ComponentFilterPolicy(**item)
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"EfficientAD component filter policy无效：{view}") from error
+    return MappingProxyType(parsed)
+
+
 def load_demo_config(path: Path) -> EightViewDemoConfig:
     """Load the small profile and resolve the exact trained model assets."""
     resolved = Path(path).expanduser().resolve()
@@ -554,13 +602,24 @@ def load_demo_config(path: Path) -> EightViewDemoConfig:
         "threshold_artifact",
         "threshold_artifact_sha256",
     }
-    efficientad_mask_fields = efficientad_base_fields | {
+    efficientad_mask_fields = {
         "ignore_mask_index",
         "ignore_mask_index_sha256",
     }
+    efficientad_component_fields = {
+        "component_filter_artifact",
+        "component_filter_artifact_sha256",
+    }
+    allowed_efficientad_fields = efficientad_base_fields | efficientad_mask_fields | efficientad_component_fields
+    configured_efficientad_fields = set(efficientad_config) if isinstance(efficientad_config, dict) else set()
     if (
         not isinstance(efficientad_config, dict)
-        or set(efficientad_config) not in {frozenset(efficientad_base_fields), frozenset(efficientad_mask_fields)}
+        or not efficientad_base_fields.issubset(configured_efficientad_fields)
+        or not configured_efficientad_fields.issubset(allowed_efficientad_fields)
+        or bool(configured_efficientad_fields & efficientad_mask_fields)
+        != (efficientad_mask_fields <= configured_efficientad_fields)
+        or bool(configured_efficientad_fields & efficientad_component_fields)
+        != (efficientad_component_fields <= configured_efficientad_fields)
     ):
         raise ValueError("efficientad配置字段不正确")
     trusted_ok_config = payload.get("trusted_ok_reference")
@@ -638,6 +697,28 @@ def load_demo_config(path: Path) -> EightViewDemoConfig:
         raise ValueError("EfficientAD threshold artifact SHA256格式不正确")
     if not threshold_artifact.is_file() or _sha256(threshold_artifact) != expected_threshold_sha256:
         raise ValueError("EfficientAD threshold artifact SHA256不匹配")
+    efficientad_component_filter_artifact: Path | None = None
+    efficientad_component_filter_artifact_sha256: str | None = None
+    efficientad_component_policies: Mapping[str, ComponentFilterPolicy] | None = None
+    if "component_filter_artifact" in efficientad_config:
+        efficientad_component_filter_artifact = resolve(efficientad_config["component_filter_artifact"])
+        efficientad_component_filter_artifact_sha256 = efficientad_config[
+            "component_filter_artifact_sha256"
+        ]
+        if (
+            not isinstance(efficientad_component_filter_artifact_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", efficientad_component_filter_artifact_sha256) is None
+        ):
+            raise ValueError("EfficientAD component filter artifact SHA256格式不正确")
+        if (
+            not efficientad_component_filter_artifact.is_file()
+            or _sha256(efficientad_component_filter_artifact)
+            != efficientad_component_filter_artifact_sha256
+        ):
+            raise ValueError("EfficientAD component filter artifact SHA256不匹配")
+        efficientad_component_policies = _load_efficientad_component_policies(
+            efficientad_component_filter_artifact
+        )
     efficientad_ignore_mask_index: Path | None = None
     efficientad_ignore_mask_index_sha256: str | None = None
     if "ignore_mask_index" in efficientad_config:
@@ -730,6 +811,9 @@ def load_demo_config(path: Path) -> EightViewDemoConfig:
         bright_streak_weak_row_score_override=bright_streak_weak_row_score_override,
         efficientad_ignore_mask_index=efficientad_ignore_mask_index,
         efficientad_ignore_mask_index_sha256=efficientad_ignore_mask_index_sha256,
+        efficientad_component_filter_artifact=efficientad_component_filter_artifact,
+        efficientad_component_filter_artifact_sha256=efficientad_component_filter_artifact_sha256,
+        efficientad_component_policies=efficientad_component_policies,
         template_ignore_mask_index=template_ignore_mask_index,
         template_ignore_mask_index_sha256=template_ignore_mask_index_sha256,
         template_masked_threshold_artifact=template_masked_threshold_artifact,

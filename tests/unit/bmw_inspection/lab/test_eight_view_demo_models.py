@@ -21,6 +21,7 @@ from bmw_inspection.lab.bright_streak_rotated_roi import (
 from bmw_inspection.lab.eight_view_dataset import VIEW_ORDER
 from bmw_inspection.lab.eight_view_demo import BranchStatus, DemoFinalStatus
 from bmw_inspection.lab.efficientad_analysis import fixed_scale_heatmap
+from bmw_inspection.lab.efficientad_component_filter import ComponentFilterPolicy
 from bmw_inspection.lab.eight_view_demo_models import (
     EightViewBrightStreakPredictor,
     EightViewEfficientAdPredictor,
@@ -1363,6 +1364,60 @@ def test_efficientad_predictor_keeps_one_resident_predictor_per_view(tmp_path: P
     assert output.details["threshold_exceedance"] == pytest.approx(0.3)
     assert output.details["hotspot_x"] == 0
     assert output.details["hotspot_y"] == 0
+    assert output.details["score_source"] == "pred_score"
+
+
+def test_efficientad_predictor_uses_component_p95_score_and_exposes_component_evidence(
+    tmp_path: Path,
+) -> None:
+    checkpoints = {}
+    for view in VIEW_ORDER:
+        checkpoint = tmp_path / view / "model.ckpt"
+        checkpoint.parent.mkdir()
+        checkpoint.write_bytes(b"checkpoint")
+        checkpoints[view] = checkpoint
+    anomaly_map = np.zeros((9, 9), dtype=np.float32)
+    anomaly_map[2:5, 3:6] = 0.70
+    policy = ComponentFilterPolicy(
+        low_threshold=0.30,
+        seed_threshold=0.50,
+        p95_threshold=0.65,
+        minimum_area=8,
+        hard_peak_threshold=0.90,
+        line_minimum_length=5,
+        line_minimum_area=4,
+    )
+    predictor = EightViewEfficientAdPredictor(
+        checkpoints,
+        thresholds={view: 0.65 for view in VIEW_ORDER},
+        predictor_factory=lambda _path: lambda _image: (0.10, False, anomaly_map),
+        component_policies={view: policy for view in VIEW_ORDER},
+        component_filter_artifact_sha256="b" * 64,
+    )
+
+    output = predictor.predict("front", np.zeros((90, 90, 3), dtype=np.uint8))
+
+    assert output.status is BranchStatus.NG
+    assert output.score == pytest.approx(0.70)
+    assert output.raw_pred_label is False
+    assert output.details["score_source"] == "accepted_component_max_p95"
+    assert output.details["component_filter_artifact_sha256"] == "b" * 64
+    assert output.details["accepted_component_count"] == 1
+    assert output.details["rejected_component_count"] == 0
+    component = output.details["accepted_components"][0]
+    assert component == {
+        "area": 9,
+        "peak": pytest.approx(0.70),
+        "mean": pytest.approx(0.70),
+        "p95": pytest.approx(0.70),
+        "bounding_box_xyxy": (3, 2, 6, 5),
+        "acceptance_reason": "area_p95",
+        "contains_seed": True,
+    }
+    assert output.details["hotspot_x"] == 3
+    assert output.details["hotspot_y"] == 2
+    assert output.overlay is not None
+    assert np.any(output.overlay[:, :, 1] > output.overlay[:, :, 2])
 
 
 def test_efficientad_predictor_uses_deployment_threshold_not_pred_label(tmp_path: Path) -> None:

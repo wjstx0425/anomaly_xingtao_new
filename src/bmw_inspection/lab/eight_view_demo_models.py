@@ -21,6 +21,11 @@ import numpy as np
 
 from bmw_inspection.lab.eight_view_dataset import VIEW_ORDER
 from bmw_inspection.lab.efficientad_analysis import fixed_scale_heatmap
+from bmw_inspection.lab.efficientad_component_filter import (
+    ComponentFilterPolicy,
+    ComponentStatistics,
+    score_anomaly_components,
+)
 from bmw_inspection.lab.eight_view_demo import (
     BranchStatus,
     DemoBranch,
@@ -1323,6 +1328,8 @@ class EightViewEfficientAdPredictor:
         predictor_factory: EfficientPredictorFactory = _AnomalibEfficientPredictor,
         ignore_masks: Mapping[str, np.ndarray] | None = None,
         ignore_mask_index_sha256: str | None = None,
+        component_policies: Mapping[str, ComponentFilterPolicy] | None = None,
+        component_filter_artifact_sha256: str | None = None,
     ) -> None:
         if tuple(checkpoints) != VIEW_ORDER:
             raise ValueError("EfficientAD模型必须按标准顺序覆盖八个视角")
@@ -1356,6 +1363,24 @@ class EightViewEfficientAdPredictor:
             raise ValueError("EfficientAD基础阈值加余量必须等于部署阈值")
         self._base_thresholds = MappingProxyType(base_values)
         self._threshold_margin = margin
+        if component_policies is None:
+            if component_filter_artifact_sha256 is not None:
+                raise ValueError("EfficientAD component-filter SHA requires policies")
+            self._component_policies: Mapping[str, ComponentFilterPolicy] | None = None
+            self._component_filter_artifact_sha256 = None
+        else:
+            if tuple(component_policies) != VIEW_ORDER or any(
+                not isinstance(policy, ComponentFilterPolicy) for policy in component_policies.values()
+            ):
+                raise ValueError("EfficientAD component policies must use the canonical eight-view order")
+            if (
+                not isinstance(component_filter_artifact_sha256, str)
+                or len(component_filter_artifact_sha256) != 64
+                or any(character not in "0123456789abcdef" for character in component_filter_artifact_sha256)
+            ):
+                raise ValueError("EfficientAD component-filter artifact SHA must be lowercase SHA256")
+            self._component_policies = MappingProxyType(dict(component_policies))
+            self._component_filter_artifact_sha256 = component_filter_artifact_sha256
         if ignore_masks is None:
             if ignore_mask_index_sha256 is not None:
                 raise ValueError("EfficientAD ignore-mask SHA requires ignore masks")
@@ -1398,31 +1423,130 @@ class EightViewEfficientAdPredictor:
         ignored_roi_pixel_count = 0
         ignored_map_pixel_count = 0
         raw_map_max = float(np.max(anomaly_map))
-        if self._ignore_masks is not None and np.any(self._ignore_masks[view]):
+        view_ignore_mask = None if self._ignore_masks is None else self._ignore_masks[view]
+        if view_ignore_mask is not None and np.any(view_ignore_mask):
             from bmw_inspection.lab.efficientad_ignore_mask import mask_anomaly_map
 
-            masked = mask_anomaly_map(anomaly_map, self._ignore_masks[view])
+            masked = mask_anomaly_map(anomaly_map, view_ignore_mask)
             score = masked.score
             scoring_map = masked.masked_map
             score_source = "manual_ignore_masked_anomaly_map_max"
-            ignored_roi_pixel_count = int(np.count_nonzero(self._ignore_masks[view]))
+            ignored_roi_pixel_count = int(np.count_nonzero(view_ignore_mask))
             ignored_map_pixel_count = masked.ignored_map_pixel_count
             raw_map_max = masked.raw_max
+
+        component_result = None
+        if self._component_policies is not None:
+            component_result = score_anomaly_components(
+                anomaly_map,
+                view_ignore_mask,
+                self._component_policies[view],
+            )
+            score = component_result.score
+            score_source = "accepted_component_max_p95"
+            ignored_map_pixel_count = component_result.ignored_pixel_count
+            if view_ignore_mask is not None:
+                ignored_roi_pixel_count = int(np.count_nonzero(view_ignore_mask))
+
         threshold = self._thresholds[view]
         base_threshold = self._base_thresholds[view]
         heatmap = fixed_scale_heatmap(scoring_map)
         base = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR) if image.ndim == 2 else image.copy()
         heatmap = cv2.resize(heatmap, (base.shape[1], base.shape[0]), interpolation=cv2.INTER_LINEAR)
         overlay = cv2.addWeighted(base, 0.6, heatmap, 0.4, 0.0)
-        hotspot_y, hotspot_x = np.unravel_index(int(np.argmax(scoring_map)), scoring_map.shape)
-        display_x = int(round(hotspot_x * max(0, base.shape[1] - 1) / max(1, anomaly_map.shape[1] - 1)))
-        display_y = int(round(hotspot_y * max(0, base.shape[0] - 1) / max(1, anomaly_map.shape[0] - 1)))
-        cv2.drawMarker(overlay, (display_x, display_y), (0, 0, 255), cv2.MARKER_CROSS, 13, 2)
-        score_label = (
-            "手动忽略区外异常图最大值"
-            if score_source == "manual_ignore_masked_anomaly_map_max"
-            else "异常分数"
+
+        if component_result is None:
+            hotspot_y, hotspot_x = np.unravel_index(int(np.argmax(scoring_map)), scoring_map.shape)
+            hotspot: tuple[int, int] | None = (int(hotspot_x), int(hotspot_y))
+        else:
+            hotspot = component_result.hotspot
+            accepted_display_mask = cv2.resize(
+                component_result.accepted_mask,
+                (base.shape[1], base.shape[0]),
+                interpolation=cv2.INTER_NEAREST,
+            )
+            contours, _hierarchy = cv2.findContours(
+                accepted_display_mask,
+                cv2.RETR_EXTERNAL,
+                cv2.CHAIN_APPROX_SIMPLE,
+            )
+            cv2.drawContours(overlay, contours, -1, (0, 255, 0), 2)
+            for component, color in (
+                *((item, (0, 255, 0)) for item in component_result.accepted_components),
+                *((item, (0, 165, 255)) for item in component_result.rejected_components),
+            ):
+                x1, y1, x2, y2 = component.bounding_box_xyxy
+                display_box = (
+                    int(round(x1 * base.shape[1] / anomaly_map.shape[1])),
+                    int(round(y1 * base.shape[0] / anomaly_map.shape[0])),
+                    max(0, int(round(x2 * base.shape[1] / anomaly_map.shape[1])) - 1),
+                    max(0, int(round(y2 * base.shape[0] / anomaly_map.shape[0])) - 1),
+                )
+                cv2.rectangle(overlay, display_box[:2], display_box[2:], color, 2)
+
+        if hotspot is not None:
+            hotspot_x, hotspot_y = hotspot
+            display_x = int(round(hotspot_x * max(0, base.shape[1] - 1) / max(1, anomaly_map.shape[1] - 1)))
+            display_y = int(round(hotspot_y * max(0, base.shape[0] - 1) / max(1, anomaly_map.shape[0] - 1)))
+            cv2.drawMarker(overlay, (display_x, display_y), (0, 0, 255), cv2.MARKER_CROSS, 13, 2)
+            hotspot_value: float | None = float(scoring_map[hotspot_y, hotspot_x])
+        else:
+            hotspot_x = hotspot_y = None
+            hotspot_value = None
+
+        def component_details(component: ComponentStatistics) -> dict[str, object]:
+            return {
+                "area": component.area,
+                "peak": component.peak,
+                "mean": component.mean,
+                "p95": component.p95,
+                "bounding_box_xyxy": component.bounding_box_xyxy,
+                "acceptance_reason": component.acceptance_reason,
+                "contains_seed": component.contains_seed,
+            }
+
+        accepted_components = (
+            tuple(component_details(item) for item in component_result.accepted_components)
+            if component_result is not None
+            else ()
         )
+        rejected_components = (
+            tuple(component_details(item) for item in component_result.rejected_components)
+            if component_result is not None
+            else ()
+        )
+        score_label = {
+            "manual_ignore_masked_anomaly_map_max": "手动忽略区外异常图最大值",
+            "accepted_component_max_p95": "有效连通域最大P95",
+        }.get(score_source, "异常分数")
+        details = {
+            "evidence_type": "诊断热区",
+            "score": score,
+            "raw_pred_score": raw_pred_score,
+            "raw_anomaly_map_max": raw_map_max,
+            "score_source": score_source,
+            "base_threshold": base_threshold,
+            "deployment_threshold": threshold,
+            "threshold_margin": self._threshold_margin,
+            "threshold_exceedance": score - threshold,
+            "hotspot_x": hotspot_x,
+            "hotspot_y": hotspot_y,
+            "hotspot_value": hotspot_value,
+            "ignore_mask_index_sha256": self._ignore_mask_index_sha256,
+            "ignored_roi_pixel_count": ignored_roi_pixel_count,
+            "ignored_map_pixel_count": ignored_map_pixel_count,
+            "raw_pred_label": raw_pred_label,
+        }
+        if component_result is not None:
+            details.update(
+                {
+                    "component_filter_artifact_sha256": self._component_filter_artifact_sha256,
+                    "accepted_component_count": len(accepted_components),
+                    "rejected_component_count": len(rejected_components),
+                    "accepted_components": accepted_components,
+                    "rejected_components": rejected_components,
+                }
+            )
         return ModelOutput(
             BranchStatus.NG if score >= threshold else BranchStatus.PASS,
             score,
@@ -1433,24 +1557,7 @@ class EightViewEfficientAdPredictor:
             ),
             overlay,
             raw_pred_label=raw_pred_label,
-            details={
-                "evidence_type": "诊断热区",
-                "score": score,
-                "raw_pred_score": raw_pred_score,
-                "raw_anomaly_map_max": raw_map_max,
-                "score_source": score_source,
-                "base_threshold": base_threshold,
-                "deployment_threshold": threshold,
-                "threshold_margin": self._threshold_margin,
-                "threshold_exceedance": score - threshold,
-                "hotspot_x": int(hotspot_x),
-                "hotspot_y": int(hotspot_y),
-                "hotspot_value": float(scoring_map[hotspot_y, hotspot_x]),
-                "ignore_mask_index_sha256": self._ignore_mask_index_sha256,
-                "ignored_roi_pixel_count": ignored_roi_pixel_count,
-                "ignored_map_pixel_count": ignored_map_pixel_count,
-                "raw_pred_label": raw_pred_label,
-            },
+            details=details,
         )
 
 
@@ -1678,6 +1785,10 @@ def build_model_suite(
         threshold_margin=config.efficientad_threshold_margin,
         ignore_masks=ignore_masks,
         ignore_mask_index_sha256=ignore_mask_index_sha256,
+        component_policies=getattr(config, "efficientad_component_policies", None),
+        component_filter_artifact_sha256=getattr(
+            config, "efficientad_component_filter_artifact_sha256", None
+        ),
     )
     trusted_ok_matcher: TrustedOkMatcher | None = None
     trusted_ok_matcher_error: str | None = None
