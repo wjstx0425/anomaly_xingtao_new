@@ -362,6 +362,17 @@ def materialize_training_data(
         or manifest_sha256 != roi_config.source_manifest_sha256
     ):
         raise ValueError("ROI config is bound to a different prepared dataset")
+    if roi_config.binding_mode == "fixed_setup":
+        report_path = prepared / "report.json"
+        try:
+            prepared_report = json.loads(report_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise ValueError(f"cannot read prepared report for capture_scope validation: {report_path}") from error
+        prepared_capture_scope = prepared_report.get("capture_scope")
+        if prepared_capture_scope != roi_config.capture_scope:
+            raise ValueError(
+                "fixed_setup ROI capture_scope differs from the prepared report capture_scope"
+            )
     reviewed_labels, pending_rows = _reviewed_yolo_labels(rows, yolo_label_root)
     base_report: dict[str, object] = {
         "schema_version": 1,

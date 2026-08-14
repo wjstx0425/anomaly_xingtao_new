@@ -77,6 +77,7 @@ def _release(root: Path) -> tuple[Path, Path, dict[tuple[str, str], Path]]:
                 "dataset_id": release.name,
                 "image_width": 12,
                 "image_height": 10,
+                "capture_scope": "right",
                 "manifest_sha256": {"dataset_manifest.csv": manifest_hash},
             }
         ),
@@ -201,6 +202,34 @@ def test_fixed_setup_roi_materializes_a_different_prepared_release_with_same_dim
     assert report["prepared_dataset_id"] == "bmw-test-v1"
     assert report["prepared_manifest_sha256"] == hashlib.sha256(manifest.read_bytes()).hexdigest()
     assert report["crop_count"] == 24
+
+
+def test_fixed_setup_roi_rejects_a_different_prepared_capture_scope(tmp_path: Path) -> None:
+    release, _bound_roi_path, _paths = _release(tmp_path)
+    manifest = release / "manifests/dataset_manifest.csv"
+    left_roi_path = tmp_path / "left-reusable-rois.json"
+    save_roi_config(
+        left_roi_path,
+        EightViewRoiConfig(
+            dataset_id="bmw-left-fixed-setup-v1",
+            source_manifest=manifest,
+            source_manifest_sha256=hashlib.sha256(manifest.read_bytes()).hexdigest(),
+            representative_sample_id="normal-sample",
+            image_width=12,
+            image_height=10,
+            part_rois={view: (1, 2, 9, 8) for view in VIEW_ORDER},
+            binding_mode="fixed_setup",
+            capture_scope="left",
+        ),
+    )
+
+    with pytest.raises(ValueError, match="capture_scope"):
+        materialize_training_data(
+            prepared_root=release,
+            roi_config_path=left_roi_path,
+            output_root=tmp_path / "training",
+            training_id="bmw-left-reused-v1",
+        )
 
 
 def test_missing_or_invalid_review_labels_fail_without_release(tmp_path: Path) -> None:
