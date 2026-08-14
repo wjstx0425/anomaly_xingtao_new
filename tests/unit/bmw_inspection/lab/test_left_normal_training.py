@@ -1,0 +1,160 @@
+# Copyright (C) 2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+
+"""Contracts for the BMW left-hand normal-only training run."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from pathlib import Path
+
+import pytest
+
+from bmw_inspection.lab.eight_view_dataset import VIEW_ORDER
+
+
+def _write_json(path: Path, payload: object) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+def _left_inputs(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
+    prepared = tmp_path / "prepared"
+    _write_json(prepared / "report.json", {"capture_scope": "left", "release_status": "published"})
+    roi = _write_json(tmp_path / "left_roi.json", {"capture_scope": "left"})
+    mask = _write_json(tmp_path / "mask_index.json", {"capture_scope": "left"})
+    policy = _write_json(tmp_path / "component_policy.json", {"capture_scope": "left"})
+    return prepared, roi, mask, policy
+
+
+def _config(module: object, tmp_path: Path):
+    prepared, roi, mask, policy = _left_inputs(tmp_path)
+    return module.LeftNormalTrainingConfig(
+        repo_root=tmp_path,
+        prepared_root=prepared,
+        roi_config=roi,
+        training_root=tmp_path / "training",
+        training_id="left_roi_v1",
+        output_root=tmp_path / "results",
+        run_id="left_normal_v1",
+        mask_index=mask,
+        component_policy=policy,
+    )
+
+
+def test_plan_has_the_exact_left_normal_stage_order_without_yolo_or_bright_streak(tmp_path: Path) -> None:
+    from bmw_inspection.lab import left_normal_training as training
+
+    plan = training.build_left_normal_plan(_config(training, tmp_path))
+
+    assert tuple(step.name for step in plan) == (
+        "materialize",
+        "template",
+        "efficientad",
+        "score_component_maps",
+        "calibrate_component_thresholds",
+    )
+    assert all("yolo" not in step.name and "bright" not in step.name for step in plan)
+
+
+def test_dry_run_refuses_any_non_left_capture_scope_before_gpu_work(tmp_path: Path) -> None:
+    from bmw_inspection.lab import left_normal_training as training
+
+    config = _config(training, tmp_path)
+    _write_json(config.prepared_root / "report.json", {"capture_scope": "right", "release_status": "published"})
+
+    with pytest.raises(ValueError, match="capture_scope.*left"):
+        training.run_left_normal_training(config, dry_run=True)
+
+
+def test_template_candidate_thresholds_bind_all_eight_model_json_hashes(tmp_path: Path) -> None:
+    from bmw_inspection.lab import left_normal_training as training
+
+    models = {
+        view: _write_json(tmp_path / "template" / view / "model.json", {"view": view}) for view in VIEW_ORDER
+    }
+
+    artifact = training.build_template_normal_threshold_artifact(
+        models,
+        {view: 0.1 + index / 100 for index, view in enumerate(VIEW_ORDER)},
+        calibration_row_count=24,
+    )
+
+    assert artifact["candidate_only"] is True
+    assert artifact["fit_split"] == "calibration"
+    assert artifact["defect_metrics"] == "not_evaluated"
+    assert artifact["model_json_sha256_by_view"] == {
+        view: hashlib.sha256(models[view].read_bytes()).hexdigest() for view in VIEW_ORDER
+    }
+
+
+def test_component_threshold_artifact_binds_all_required_left_provenance(tmp_path: Path) -> None:
+    from bmw_inspection.lab import left_normal_training as training
+
+    checkpoints = {}
+    for view in VIEW_ORDER:
+        checkpoint = tmp_path / "efficientad" / view / "model.ckpt"
+        checkpoint.parent.mkdir(parents=True, exist_ok=True)
+        checkpoint.write_bytes(view.encode("utf-8"))
+        checkpoints[view] = checkpoint
+    mask = _write_json(tmp_path / "mask_index.json", {"capture_scope": "left"})
+    policy = _write_json(tmp_path / "policy.json", {"capture_scope": "left"})
+
+    artifact = training.build_component_threshold_artifact(
+        checkpoint_paths=checkpoints,
+        mask_index=mask,
+        component_policy=policy,
+        score_source="efficientad_component_p95_v1",
+        sample_count=40,
+        fpr_resolution=1 / 40,
+        thresholds={view: 0.2 for view in VIEW_ORDER},
+    )
+
+    assert artifact["target_part_fpr"] == 0.05
+    assert artifact["score_source"] == "efficientad_component_p95_v1"
+    assert artifact["sample_count"] == 40
+    assert artifact["fpr_resolution"] == 1 / 40
+    assert artifact["mask_index_sha256"] == hashlib.sha256(mask.read_bytes()).hexdigest()
+    assert artifact["component_policy_sha256"] == hashlib.sha256(policy.read_bytes()).hexdigest()
+    assert artifact["checkpoint_sha256_by_view"] == {
+        view: hashlib.sha256(checkpoints[view].read_bytes()).hexdigest() for view in VIEW_ORDER
+    }
+
+
+def test_run_uses_injected_handlers_in_order(tmp_path: Path) -> None:
+    from bmw_inspection.lab import left_normal_training as training
+
+    config = _config(training, tmp_path)
+    calls: list[str] = []
+
+    def handler(name: str):
+        def run(_config, _state):
+            calls.append(name)
+            return {"stage": name}
+
+        return run
+
+    report = training.run_left_normal_training(
+        config,
+        stage_handlers={
+            name: handler(name)
+            for name in (
+                "materialize",
+                "template",
+                "efficientad",
+                "score_component_maps",
+                "calibrate_component_thresholds",
+            )
+        },
+    )
+
+    assert calls == [
+        "materialize",
+        "template",
+        "efficientad",
+        "score_component_maps",
+        "calibrate_component_thresholds",
+    ]
+    assert [step["name"] for step in report["steps"]] == calls
