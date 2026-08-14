@@ -1056,6 +1056,9 @@ def test_rotated_candidate_predictor_uses_report_thresholds(tmp_path: Path) -> N
         _rotated_candidate_report(tmp_path, roi_asset, roi_sha256),
         roi_asset,
         roi_sha256,
+        expected_report_sha256=hashlib.sha256(
+            (tmp_path / "candidate_report.json").read_bytes()
+        ).hexdigest(),
     )
 
     output = predictor.predict(_tracked_full_image("diagonal"))

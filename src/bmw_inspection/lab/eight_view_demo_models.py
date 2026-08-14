@@ -1040,6 +1040,8 @@ class EightViewRotatedTrackedProfileCandidatePredictor(
         report_path: Path,
         rotated_roi_path: Path,
         rotated_roi_sha256: str,
+        *,
+        expected_report_sha256: str,
     ) -> None:
         from bmw_inspection.lab.bright_streak_rotated_roi import load_rotated_bright_streak_roi
         from bmw_inspection.lab.bright_streak_tracked_profile import (
@@ -1048,6 +1050,10 @@ class EightViewRotatedTrackedProfileCandidatePredictor(
         )
 
         path = Path(report_path).expanduser().resolve()
+        if not self._is_sha256(expected_report_sha256):
+            raise ValueError("候选旋转光痕报告 SHA256格式不正确")
+        if not path.is_file() or _file_sha256(path) != expected_report_sha256:
+            raise ValueError("候选旋转光痕报告 SHA256不匹配")
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as error:
@@ -1612,6 +1618,7 @@ def build_model_suite(
             config.bright_streak_config,
             getattr(config, "bright_streak_rotated_roi", None),
             getattr(config, "bright_streak_rotated_roi_sha256", None),
+            expected_report_sha256=getattr(config, "bright_streak_config_sha256", None),
         )
     else:
         bright_streak = EightViewBrightStreakPredictor(config.bright_streak_config)

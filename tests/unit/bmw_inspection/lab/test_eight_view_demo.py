@@ -23,6 +23,7 @@ from bmw_inspection.lab.eight_view_demo import (
     load_demo_config,
     load_manifest_sample,
 )
+from bmw_inspection.lab.eight_view_demo_models import build_model_suite
 
 
 def _branch_result(status: BranchStatus) -> DemoBranchResult:
@@ -183,6 +184,27 @@ def test_rotated_candidate_config_requires_exact_report_and_rotated_roi_sha(tmp_
     assert config.bright_streak_engine == "tracked_profile_v3_manual_rotated_candidate"
     assert config.bright_streak_config == report.resolve()
     assert config.bright_streak_rotated_roi == rotated_roi.resolve()
+
+
+def test_rotated_candidate_build_rejects_report_replaced_after_config_load(tmp_path: Path) -> None:
+    _roi, _capture, _run, threshold_artifact = _write_demo_assets(tmp_path)
+    report, rotated_roi = _candidate_report_and_rotated_roi(tmp_path)
+    payload = _demo_payload(tmp_path, threshold_artifact=threshold_artifact)
+    payload["bright_streak"] = {
+        "engine": "tracked_profile_v3_manual_rotated_candidate",
+        "config": str(report),
+        "config_sha256": hashlib.sha256(report.read_bytes()).hexdigest(),
+        "rotated_roi": str(rotated_roi),
+        "rotated_roi_sha256": hashlib.sha256(rotated_roi.read_bytes()).hexdigest(),
+    }
+    config_path = tmp_path / "demo.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    config = load_demo_config(config_path)
+    report.write_text(report.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="候选旋转光痕报告 SHA256不匹配"):
+        build_model_suite(config)
 
 
 def test_fusion_runs_as_all_pass_ng_or_error() -> None:

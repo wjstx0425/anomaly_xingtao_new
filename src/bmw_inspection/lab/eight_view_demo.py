@@ -159,6 +159,7 @@ class EightViewDemoConfig:
     efficientad_threshold_source_csv_sha256: str
     bright_streak_engine: str
     bright_streak_config: Path
+    bright_streak_config_sha256: str | None
     yolo_checkpoint: Path
     yolo_candidate_conf: float
     yolo_final_threshold: float
@@ -719,6 +720,7 @@ def load_demo_config(path: Path) -> EightViewDemoConfig:
         efficientad_threshold_source_csv_sha256=efficientad_source_csv_sha256,
         bright_streak_engine=bright_streak_engine,
         bright_streak_config=bright,
+        bright_streak_config_sha256=bright_streak_sha256,
         yolo_checkpoint=yolo_checkpoint,
         yolo_candidate_conf=candidate,
         yolo_final_threshold=final,
