@@ -24,7 +24,8 @@ uv run --no-sync python pipeline/bmw_lab_prepare_eight_view_data.py \
   --output-root /home/yunjing/anomaly_xingtao_new/dataset/bmw_lab_prepared \
   --hand left \
   --session-id "$SESSION_ID" \
-  --dataset-id "$DATASET_ID"
+  --dataset-id "$DATASET_ID" \
+  --skip-image-hash
 ```
 
 ## 2. 选择左手八视图公共 ROI

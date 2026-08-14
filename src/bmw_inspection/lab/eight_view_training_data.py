@@ -161,7 +161,7 @@ def _crop_one(
     source = Path(row["source_path"]).expanduser().resolve()
     if not source.is_file() or source.is_symlink():
         raise ValueError(f"source image is missing or a symlink: {source}")
-    if _sha256(source) != row["source_sha256"]:
+    if row["source_sha256"] and _sha256(source) != row["source_sha256"]:
         raise ValueError(f"source image SHA-256 mismatch: {source}")
     image = cv2.imread(str(source), cv2.IMREAD_UNCHANGED)
     if image is None or image.size == 0 or image.dtype != np.uint8 or image.ndim not in {2, 3}:
@@ -391,7 +391,7 @@ def materialize_training_data(
     if dry_run:
         for row in rows:
             source = Path(row["source_path"]).expanduser().resolve()
-            if not source.is_file() or _sha256(source) != row["source_sha256"]:
+            if not source.is_file() or (row["source_sha256"] and _sha256(source) != row["source_sha256"]):
                 raise ValueError(f"source image is missing or has a different SHA-256: {source}")
             image = cv2.imread(str(source), cv2.IMREAD_UNCHANGED)
             if image is None or image.shape[:2] != (roi_config.image_height, roi_config.image_width):

@@ -266,3 +266,46 @@ def test_yolo_validation_tolerates_only_six_decimal_serialization_error(tmp_path
             "0 0.454308 0.959186 0.146040 0.081633\n",
             path=path,
         )
+
+
+def test_materializes_experimental_release_without_source_hashes(tmp_path: Path) -> None:
+    release, _roi_path, _paths = _release(tmp_path)
+    manifest = release / "manifests/dataset_manifest.csv"
+    with manifest.open(newline="", encoding="utf-8") as stream:
+        rows = list(csv.DictReader(stream))
+    for row in rows:
+        row["source_sha256"] = ""
+    with manifest.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=FIELDS)
+        writer.writeheader()
+        writer.writerows(rows)
+    manifest_hash = hashlib.sha256(manifest.read_bytes()).hexdigest()
+    report_path = release / "report.json"
+    report_payload = json.loads(report_path.read_text(encoding="utf-8"))
+    report_payload["image_sha256_verified"] = False
+    report_payload["manifest_sha256"]["dataset_manifest.csv"] = manifest_hash
+    report_path.write_text(json.dumps(report_payload), encoding="utf-8")
+    roi_path = tmp_path / "experimental-rois.json"
+    save_roi_config(
+        roi_path,
+        EightViewRoiConfig(
+            dataset_id="experimental-fixed-setup-v1",
+            source_manifest=manifest,
+            source_manifest_sha256=manifest_hash,
+            representative_sample_id="normal-sample",
+            image_width=12,
+            image_height=10,
+            part_rois={view: (1, 2, 9, 8) for view in VIEW_ORDER},
+            binding_mode="fixed_setup",
+            capture_scope="right",
+        ),
+    )
+
+    report = materialize_training_data(
+        prepared_root=release,
+        roi_config_path=roi_path,
+        output_root=tmp_path / "training",
+        training_id="bmw-experimental-no-hash-v1",
+    )
+
+    assert report["crop_count"] == 24
