@@ -721,3 +721,7 @@
   Template, YOLO, and EfficientAD `(branch, view, status, score, threshold, reason)` tuples. There are zero real
   broken-but-present samples, so broken-path handling is synthetic regression evidence only and real broken-streak
   recall remains unverified.
+
+## BMW V6 one-command handoff (2026-08-14)
+
+- `pipeline/bmw_lab_prepare_normal_20260814_v6_demo.py` invokes `publish_v6_demo` with no-overwrite V6 output defaults, emits a Chinese JSON error on publication failure, and prints the exact experiment-mode launch command after the receipt. It delegates source validation and rebinding to `src/bmw_inspection/lab/v6_demo_publisher.py`; no training or live inference is performed by this CLI.
