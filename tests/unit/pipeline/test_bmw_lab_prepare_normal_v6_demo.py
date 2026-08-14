@@ -67,7 +67,8 @@ def test_cli_prints_receipt_and_v6_launch_command(monkeypatch, capsys, tmp_path:
     assert capsys.readouterr().out == (
         json.dumps(receipt, ensure_ascii=False, indent=2, sort_keys=True)
         + "\n"
-        + "uv run --no-sync python pipeline/bmw_lab_eight_view_demo.py "
+        + "MPLCONFIGDIR=/tmp/bmw-mpl-cache /home/yunjing/anomaly_xingtao_new/.venv/bin/python "
+        + "pipeline/bmw_lab_eight_view_demo.py "
         + "--config configs/bmw/experiments/bmw_eight_view_demo_v6_right_normal_20260814_v1.json "
         + "--experiment-mode\n"
     )

@@ -20,7 +20,8 @@ from bmw_inspection.lab.v6_demo_publisher import publish_v6_demo  # noqa: E402
 DEFAULT_OUTPUT_RUN = REPO_ROOT / "results/bmw_lab_one_click/bmw_right_normal_20260814_v6_demo_v1"
 DEFAULT_OUTPUT_CONFIG = REPO_ROOT / "configs/bmw/experiments/bmw_eight_view_demo_v6_right_normal_20260814_v1.json"
 V6_LAUNCH_COMMAND = (
-    "uv run --no-sync python pipeline/bmw_lab_eight_view_demo.py "
+    "MPLCONFIGDIR=/tmp/bmw-mpl-cache /home/yunjing/anomaly_xingtao_new/.venv/bin/python "
+    "pipeline/bmw_lab_eight_view_demo.py "
     "--config configs/bmw/experiments/bmw_eight_view_demo_v6_right_normal_20260814_v1.json "
     "--experiment-mode"
 )
