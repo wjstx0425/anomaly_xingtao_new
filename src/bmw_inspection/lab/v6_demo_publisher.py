@@ -118,12 +118,13 @@ def publish_v6_demo(repo_root: Path, *, output_run: Path, output_config: Path) -
 
 def _under_root(root: Path, path: Path) -> Path:
     candidate = Path(path).expanduser()
-    resolved = (candidate if candidate.is_absolute() else root / candidate).resolve()
+    lexical_root = Path(os.path.abspath(root))
+    lexical_path = Path(os.path.abspath(candidate if candidate.is_absolute() else root / candidate))
     try:
-        resolved.relative_to(root)
+        lexical_path.relative_to(lexical_root)
     except ValueError as error:
-        raise ValueError(f"V6 output must be inside repo_root: {resolved}") from error
-    return resolved
+        raise ValueError(f"V6 output must be inside repo_root: {lexical_path}") from error
+    return lexical_path
 
 
 def _validate_new_training_run(run: Path) -> None:

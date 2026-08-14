@@ -181,3 +181,24 @@ def test_keeps_v5_bytes_unchanged_and_refuses_existing_destinations(fixture: _V6
     assert config["bright_streak"]["engine"] == "tracked_profile_v3_manual_rotated_candidate"
     with pytest.raises(FileExistsError, match="refuse to overwrite"):
         publish_v6_demo(**fixture.arguments)
+
+
+def test_publishes_through_symlinked_results_root_without_allowing_parent_escape(fixture: _V6Fixture) -> None:
+    worktree = fixture.repo_root.parent / "worktree"
+    worktree.mkdir()
+    (worktree / "configs").symlink_to(fixture.repo_root / "configs", target_is_directory=True)
+    (worktree / "results").symlink_to(fixture.repo_root / "results", target_is_directory=True)
+
+    receipt = publish_v6_demo(
+        worktree,
+        output_run=worktree / "results/bmw_v6_composite",
+        output_config=worktree / "configs/bmw/experiments/bmw_eight_view_demo_v6_right_normal_20260814_v1.json",
+    )
+
+    assert receipt["status"] == "complete"
+    with pytest.raises(ValueError, match="inside repo_root"):
+        publish_v6_demo(
+            worktree,
+            output_run=worktree / "results/../../outside",
+            output_config=worktree / "configs/bmw/experiments/second-v6.json",
+        )
