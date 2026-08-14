@@ -170,6 +170,7 @@ def test_selects_raw_right_representative_for_reusable_roi(tmp_path: Path) -> No
         capture_scope="right",
         source_class="others",
         sample_id=sample_id,
+        session_id="20260810_164527_229315",
     )
 
     assert selection.dataset_id == "bmw-right-hdr-v1"
@@ -180,6 +181,15 @@ def test_selects_raw_right_representative_for_reusable_roi(tmp_path: Path) -> No
     assert selection.image_width == 100
     assert selection.image_height == 80
 
+    with pytest.raises(ValueError, match="no complete raw eight-view"):
+        eight_view_roi.select_raw_representative_images(
+            tmp_path,
+            profile_id="bmw-right-hdr-v1",
+            capture_scope="right",
+            source_class="others",
+            sample_id=sample_id,
+            session_id="different-session",
+        )
 
 def test_display_mapping_returns_half_open_source_roi() -> None:
     source = np.zeros((3036, 4024, 3), dtype=np.uint8)

@@ -235,6 +235,7 @@ def select_raw_representative_images(
     capture_scope: str,
     source_class: str | None = None,
     sample_id: str | None = None,
+    session_id: str | None = None,
 ) -> RepresentativeSelection:
     """Select one complete raw capture as a fixed-setup ROI reference.
 
@@ -244,6 +245,7 @@ def select_raw_representative_images(
         capture_scope: Top-level capture hand to select, either ``left`` or ``right``.
         source_class: Optional source class such as ``others`` or ``normal``.
         sample_id: Optional exact complete sample identifier.
+        session_id: Optional exact capture session identifier.
 
     Returns:
         One deterministic complete eight-view sample and its source-manifest provenance.
@@ -257,6 +259,8 @@ def select_raw_representative_images(
         raise ValueError(f"source_class must be one of {SOURCE_CLASSES}")
     if sample_id is not None and (not isinstance(sample_id, str) or not sample_id.strip()):
         raise ValueError("sample_id must be a non-empty string when provided")
+    if session_id is not None and (not isinstance(session_id, str) or not session_id.strip()):
+        raise ValueError("session_id must be a non-empty string when provided")
     root = Path(raw_root).expanduser().resolve()
     rows, audit = read_complete_capture_rows(
         root,
@@ -268,6 +272,8 @@ def select_raw_representative_images(
         if source_class is not None and row.source_class != source_class:
             continue
         if sample_id is not None and row.sample_id != sample_id:
+            continue
+        if session_id is not None and row.session_id != session_id:
             continue
         key = (row.session_id, row.sample_id, row.physical_part_id)
         candidates.setdefault(key, []).append(row)
