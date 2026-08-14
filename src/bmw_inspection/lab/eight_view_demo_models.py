@@ -1005,6 +1005,144 @@ class EightViewTrackedProfileBrightStreakPredictor:
         )
 
 
+class EightViewRotatedTrackedProfileCandidatePredictor(
+    EightViewTrackedProfileBrightStreakPredictor
+):
+    """Run one SHA-bound rotated bright-streak candidate without promoting it to production."""
+
+    _REPORT_FIELDS = {
+        "schema",
+        "status",
+        "algorithm",
+        "candidate_only",
+        "normal_count",
+        "no_streak_count",
+        "no_streak_independent_test_count",
+        "fit_data",
+        "presence_fit_weak_row_score",
+        "weak_row_score_policy",
+        "geometry",
+        "thresholds",
+        "normal_false_rejects",
+        "no_streak_false_accepts",
+        "normal_manifest",
+        "normal_manifest_sha256",
+        "no_streak_image",
+        "no_streak_image_sha256",
+        "rotated_roi",
+        "rotated_roi_sha256",
+        "metrics_csv",
+        "report_json",
+    }
+
+    def __init__(
+        self,
+        report_path: Path,
+        rotated_roi_path: Path,
+        rotated_roi_sha256: str,
+    ) -> None:
+        from bmw_inspection.lab.bright_streak_rotated_roi import load_rotated_bright_streak_roi
+        from bmw_inspection.lab.bright_streak_tracked_profile import (
+            TrackedProfileGeometry,
+            TrackedProfileThresholds,
+        )
+
+        path = Path(report_path).expanduser().resolve()
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise ValueError(f"候选旋转光痕报告不可用：{path}: {error}") from error
+        if not isinstance(payload, dict) or set(payload) != self._REPORT_FIELDS:
+            raise ValueError("候选旋转光痕report schema不正确")
+        if (
+            payload["schema"] != "bmw.bright_streak_rotated_v3_candidate/1.0"
+            or payload["status"] != "complete"
+            or payload["algorithm"] != "tracked_profile_v3_manual_rotated_roi"
+            or payload["candidate_only"] is not True
+            or payload["no_streak_independent_test_count"] != 0
+            or payload["fit_data"] != "all_current_normals_plus_one_current_no_streak"
+            or payload["weak_row_score_policy"] != "reuse_rotated_hdr_field_recalibration_v1"
+        ):
+            raise ValueError("候选旋转光痕report identity不正确")
+        for field, minimum in (("normal_count", 1), ("no_streak_count", 1)):
+            value = payload[field]
+            if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+                raise ValueError("候选旋转光痕report计数不正确")
+        for field in ("normal_false_rejects", "no_streak_false_accepts"):
+            value = payload[field]
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError("候选旋转光痕report计数不正确")
+        if (
+            isinstance(payload["presence_fit_weak_row_score"], bool)
+            or not isinstance(payload["presence_fit_weak_row_score"], Real)
+            or not math.isfinite(float(payload["presence_fit_weak_row_score"]))
+        ):
+            raise ValueError("候选旋转光痕弱响应阈值不正确")
+        geometry_values = payload["geometry"]
+        threshold_values = payload["thresholds"]
+        if not isinstance(geometry_values, dict) or set(geometry_values) != self._GEOMETRY_FIELDS:
+            raise ValueError("候选旋转光痕geometry schema不正确")
+        if not isinstance(threshold_values, dict) or set(threshold_values) != self._THRESHOLD_FIELDS:
+            raise ValueError("候选旋转光痕thresholds schema不正确")
+        try:
+            self._geometry = TrackedProfileGeometry(**geometry_values)
+            self._thresholds = TrackedProfileThresholds(**threshold_values)
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"候选旋转光痕参数不正确：{error}") from error
+        required_width = self._geometry.candidate_width + 2 * (
+            self._geometry.background_gap + self._geometry.background_width
+        )
+        if required_width > 81:
+            raise ValueError("候选旋转光痕geometry超出旋转ROI宽度")
+        report_roi = Path(payload["rotated_roi"]).expanduser().resolve()
+        configured_roi = Path(rotated_roi_path).expanduser().resolve()
+        if report_roi != configured_roi or payload["rotated_roi_sha256"] != rotated_roi_sha256:
+            raise ValueError("候选旋转光痕ROI路径或SHA256不匹配")
+        if not self._is_sha256(rotated_roi_sha256):
+            raise ValueError("候选旋转光痕ROI SHA256格式不正确")
+        if Path(payload["report_json"]).expanduser().resolve() != path:
+            raise ValueError("候选旋转光痕report_json身份不正确")
+        for path_field, sha_field in (
+            ("normal_manifest", "normal_manifest_sha256"),
+            ("no_streak_image", "no_streak_image_sha256"),
+        ):
+            source = Path(payload[path_field]).expanduser().resolve()
+            digest = payload[sha_field]
+            if not self._is_sha256(digest) or not source.is_file() or _file_sha256(source) != digest:
+                raise ValueError("候选旋转光痕source SHA256不匹配")
+        metrics = Path(payload["metrics_csv"]).expanduser().resolve()
+        if not metrics.is_file() or metrics.is_symlink():
+            raise ValueError("候选旋转光痕metrics不可用")
+        try:
+            self._rotated_roi = load_rotated_bright_streak_roi(
+                configured_roi,
+                expected_sha256=rotated_roi_sha256,
+            )
+        except ValueError as error:
+            raise ValueError(f"候选旋转光痕ROI SHA256或资产校验失败：{error}") from error
+        self._rotated_roi_sha256 = rotated_roi_sha256
+        self._roi = None
+        self._report_weak_row_score = self._thresholds.weak_row_score
+        self._weak_row_score_overridden = False
+        self._candidate_report_sha256 = _file_sha256(path)
+
+    def predict(self, image: np.ndarray) -> ModelOutput:
+        """Reuse the established tracked-profile renderer with candidate provenance."""
+        output = super().predict(image)
+        return ModelOutput(
+            output.status,
+            output.score,
+            output.threshold,
+            f"候选运行时，仅用于评估；{output.reason}",
+            output.overlay,
+            details={
+                **output.details,
+                "candidate_only": True,
+                "candidate_report_sha256": self._candidate_report_sha256,
+            },
+        )
+
+
 def _default_yolo_factory(path: Path) -> Any:
     from ultralytics import YOLO
 
@@ -1469,6 +1607,12 @@ def build_model_suite(
                 None,
             ),
         )
+    elif config.bright_streak_engine == "tracked_profile_v3_manual_rotated_candidate":
+        bright_streak = EightViewRotatedTrackedProfileCandidatePredictor(
+            config.bright_streak_config,
+            getattr(config, "bright_streak_rotated_roi", None),
+            getattr(config, "bright_streak_rotated_roi_sha256", None),
+        )
     else:
         bright_streak = EightViewBrightStreakPredictor(config.bright_streak_config)
     yolo = EightViewYoloPredictor(
@@ -1578,6 +1722,7 @@ def _file_sha256(path: Path) -> str:
 __all__ = [
     "EightViewBrightStreakPredictor",
     "EightViewRawProfileBrightStreakPredictor",
+    "EightViewRotatedTrackedProfileCandidatePredictor",
     "EightViewTrackedProfileBrightStreakPredictor",
     "EightViewEfficientAdPredictor",
     "EightViewModelSuite",

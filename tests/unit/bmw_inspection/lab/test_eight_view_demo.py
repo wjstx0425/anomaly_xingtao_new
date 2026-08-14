@@ -106,6 +106,85 @@ def _demo_payload(tmp_path: Path, *, threshold_artifact: Path) -> dict[str, obje
     }
 
 
+def _candidate_report_and_rotated_roi(tmp_path: Path) -> tuple[Path, Path]:
+    source = tmp_path / "front_left_hdr.png"
+    source.write_bytes(b"accepted-rotated-roi-source")
+    rotated_roi = tmp_path / "rotated_roi.json"
+    rotated_roi.write_text('{"accepted":true}', encoding="utf-8")
+    normal_manifest = tmp_path / "normal_manifest.csv"
+    normal_manifest.write_text("sample_id\nnormal-1\n", encoding="utf-8")
+    no_streak = tmp_path / "no_streak.png"
+    no_streak.write_bytes(b"no-streak-source")
+    metrics = tmp_path / "metrics.csv"
+    metrics.write_text("sample_key\nnormal-1\n", encoding="utf-8")
+    report = tmp_path / "report.json"
+    report.write_text(
+        json.dumps(
+            {
+                "schema": "bmw.bright_streak_rotated_v3_candidate/1.0",
+                "status": "complete",
+                "algorithm": "tracked_profile_v3_manual_rotated_roi",
+                "candidate_only": True,
+                "normal_count": 1,
+                "no_streak_count": 1,
+                "no_streak_independent_test_count": 0,
+                "fit_data": "all_current_normals_plus_one_current_no_streak",
+                "presence_fit_weak_row_score": 95.0,
+                "weak_row_score_policy": "reuse_rotated_hdr_field_recalibration_v1",
+                "geometry": {
+                    "candidate_width": 5,
+                    "background_width": 10,
+                    "background_gap": 3,
+                    "smooth_window": 5,
+                    "max_step": 2,
+                    "step_penalty": 1.0,
+                },
+                "thresholds": {
+                    "strong_row_score": 120.0,
+                    "weak_row_score": 95.0,
+                    "min_presence_coverage_ratio": 0.1,
+                    "min_longest_run_ratio": 0.1,
+                    "max_gap_ratio": 0.1,
+                    "max_gap_count": 2,
+                },
+                "normal_false_rejects": 0,
+                "no_streak_false_accepts": 0,
+                "normal_manifest": str(normal_manifest),
+                "normal_manifest_sha256": hashlib.sha256(normal_manifest.read_bytes()).hexdigest(),
+                "no_streak_image": str(no_streak),
+                "no_streak_image_sha256": hashlib.sha256(no_streak.read_bytes()).hexdigest(),
+                "rotated_roi": str(rotated_roi),
+                "rotated_roi_sha256": hashlib.sha256(rotated_roi.read_bytes()).hexdigest(),
+                "metrics_csv": str(metrics),
+                "report_json": str(report),
+            }
+        ),
+        encoding="utf-8",
+    )
+    return report, rotated_roi
+
+
+def test_rotated_candidate_config_requires_exact_report_and_rotated_roi_sha(tmp_path: Path) -> None:
+    _roi, _capture, _run, threshold_artifact = _write_demo_assets(tmp_path)
+    report, rotated_roi = _candidate_report_and_rotated_roi(tmp_path)
+    payload = _demo_payload(tmp_path, threshold_artifact=threshold_artifact)
+    payload["bright_streak"] = {
+        "engine": "tracked_profile_v3_manual_rotated_candidate",
+        "config": str(report),
+        "config_sha256": hashlib.sha256(report.read_bytes()).hexdigest(),
+        "rotated_roi": str(rotated_roi),
+        "rotated_roi_sha256": hashlib.sha256(rotated_roi.read_bytes()).hexdigest(),
+    }
+    config_path = tmp_path / "demo.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    config = load_demo_config(config_path)
+
+    assert config.bright_streak_engine == "tracked_profile_v3_manual_rotated_candidate"
+    assert config.bright_streak_config == report.resolve()
+    assert config.bright_streak_rotated_roi == rotated_roi.resolve()
+
+
 def test_fusion_runs_as_all_pass_ng_or_error() -> None:
     assert fuse_demo_status((_branch_result(BranchStatus.PASS),)) is DemoFinalStatus.OK
     assert fuse_demo_status((_branch_result(BranchStatus.NG),)) is DemoFinalStatus.NG

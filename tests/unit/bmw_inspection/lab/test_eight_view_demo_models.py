@@ -28,6 +28,7 @@ from bmw_inspection.lab.eight_view_demo_models import (
     EightViewTemplatePredictor,
     EightViewYoloPredictor,
     EightViewRawProfileBrightStreakPredictor,
+    EightViewRotatedTrackedProfileCandidatePredictor,
     EightViewTrackedProfileBrightStreakPredictor,
     ModelOutput,
     build_model_suite,
@@ -993,6 +994,75 @@ def _rotated_roi_asset(tmp_path: Path) -> tuple[Path, str]:
     path = tmp_path / "bright_streak_rotated_roi.json"
     write_rotated_bright_streak_roi(path, asset)
     return path, hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _rotated_candidate_report(tmp_path: Path, roi_asset: Path, roi_sha256: str) -> Path:
+    normal_manifest = tmp_path / "normal_manifest.csv"
+    normal_manifest.write_text("sample_id\nnormal-1\n", encoding="utf-8")
+    no_streak = tmp_path / "no_streak.png"
+    no_streak.write_bytes(b"no-streak-source")
+    metrics = tmp_path / "metrics.csv"
+    metrics.write_text("sample_key\nnormal-1\n", encoding="utf-8")
+    report = tmp_path / "candidate_report.json"
+    report.write_text(
+        json.dumps(
+            {
+                "schema": "bmw.bright_streak_rotated_v3_candidate/1.0",
+                "status": "complete",
+                "algorithm": "tracked_profile_v3_manual_rotated_roi",
+                "candidate_only": True,
+                "normal_count": 1,
+                "no_streak_count": 1,
+                "no_streak_independent_test_count": 0,
+                "fit_data": "all_current_normals_plus_one_current_no_streak",
+                "presence_fit_weak_row_score": 95.0,
+                "weak_row_score_policy": "reuse_rotated_hdr_field_recalibration_v1",
+                "geometry": {
+                    "candidate_width": 5,
+                    "background_width": 10,
+                    "background_gap": 3,
+                    "smooth_window": 5,
+                    "max_step": 2,
+                    "step_penalty": 1.0,
+                },
+                "thresholds": {
+                    "strong_row_score": 120.0,
+                    "weak_row_score": 95.0,
+                    "min_presence_coverage_ratio": 0.1,
+                    "min_longest_run_ratio": 0.1,
+                    "max_gap_ratio": 0.1,
+                    "max_gap_count": 2,
+                },
+                "normal_false_rejects": 0,
+                "no_streak_false_accepts": 0,
+                "normal_manifest": str(normal_manifest),
+                "normal_manifest_sha256": hashlib.sha256(normal_manifest.read_bytes()).hexdigest(),
+                "no_streak_image": str(no_streak),
+                "no_streak_image_sha256": hashlib.sha256(no_streak.read_bytes()).hexdigest(),
+                "rotated_roi": str(roi_asset),
+                "rotated_roi_sha256": roi_sha256,
+                "metrics_csv": str(metrics),
+                "report_json": str(report),
+            }
+        ),
+        encoding="utf-8",
+    )
+    return report
+
+
+def test_rotated_candidate_predictor_uses_report_thresholds(tmp_path: Path) -> None:
+    roi_asset, roi_sha256 = _rotated_roi_asset(tmp_path)
+    predictor = EightViewRotatedTrackedProfileCandidatePredictor(
+        _rotated_candidate_report(tmp_path, roi_asset, roi_sha256),
+        roi_asset,
+        roi_sha256,
+    )
+
+    output = predictor.predict(_tracked_full_image("diagonal"))
+
+    assert output.details["candidate_only"] is True
+    assert output.details["weak_row_score"] == pytest.approx(95.0)
+    assert output.details["rotated_roi_sha256"] == roi_sha256
 
 
 def test_rotated_v3_reuses_report_thresholds(tmp_path: Path) -> None:

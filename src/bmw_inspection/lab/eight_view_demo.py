@@ -486,7 +486,10 @@ def load_demo_config(path: Path) -> EightViewDemoConfig:
     elif set(bright_streak_config) == {"engine", "config", "config_sha256"}:
         bright_streak_engine = bright_streak_config["engine"]
         bright_streak_sha256 = bright_streak_config["config_sha256"]
-        if bright_streak_engine == "tracked_profile_v3_manual_rotated_roi":
+        if bright_streak_engine in {
+            "tracked_profile_v3_manual_rotated_roi",
+            "tracked_profile_v3_manual_rotated_candidate",
+        }:
             raise ValueError("bright_streak配置字段不正确")
         if bright_streak_engine not in {"raw_profile_v2", "tracked_profile_v3"}:
             raise ValueError("bright_streak.engine只支持raw_profile_v2或tracked_profile_v3")
@@ -514,11 +517,19 @@ def load_demo_config(path: Path) -> EightViewDemoConfig:
         ),
     }:
         bright_streak_engine = bright_streak_config["engine"]
-        if bright_streak_engine != "tracked_profile_v3_manual_rotated_roi":
+        if bright_streak_engine not in {
+            "tracked_profile_v3_manual_rotated_roi",
+            "tracked_profile_v3_manual_rotated_candidate",
+        }:
             raise ValueError("bright_streak.engine与倾斜光痕ROI配置不匹配")
         bright_streak_sha256 = bright_streak_config["config_sha256"]
         bright_streak_rotated_roi_raw = bright_streak_config["rotated_roi"]
         bright_streak_rotated_roi_sha256 = bright_streak_config["rotated_roi_sha256"]
+        if (
+            bright_streak_engine == "tracked_profile_v3_manual_rotated_candidate"
+            and "weak_row_score_override" in bright_streak_config
+        ):
+            raise ValueError("候选旋转光痕配置不允许弱响应覆盖阈值")
         if "weak_row_score_override" in bright_streak_config:
             override = bright_streak_config["weak_row_score_override"]
             if (
