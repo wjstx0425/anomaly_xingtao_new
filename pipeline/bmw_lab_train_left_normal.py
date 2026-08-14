@@ -22,8 +22,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--prepared-root", type=Path, required=True)
     parser.add_argument("--roi-config", type=Path, required=True)
-    parser.add_argument("--mask-index", type=Path, required=True)
-    parser.add_argument("--component-policy", type=Path, required=True)
+    parser.add_argument("--mask-index", type=Path, help="Required only for --stage calibrate or all.")
+    parser.add_argument("--component-policy", type=Path, help="Required only for --stage calibrate or all.")
+    parser.add_argument("--stage", choices=("train", "calibrate", "all"), default="train")
     parser.add_argument("--training-root", type=Path, default=REPO_ROOT / "dataset/bmw_lab_training")
     parser.add_argument("--training-id", required=True)
     parser.add_argument("--output-root", type=Path, default=REPO_ROOT / "results/bmw_lab_one_click")
@@ -55,11 +56,11 @@ def _config(args: argparse.Namespace) -> LeftNormalTrainingConfig:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Validate and print a candidate plan; execution needs concrete handlers."""
+    """Execute the default train/calibrate stage or validate it with no GPU work."""
 
     args = build_parser().parse_args(argv)
     try:
-        report = run_left_normal_training(_config(args), dry_run=args.dry_run)
+        report = run_left_normal_training(_config(args), dry_run=args.dry_run, stage=args.stage)
     except (FileExistsError, OSError, RuntimeError, TypeError, ValueError) as error:
         print(json.dumps({"status": "failed", "error": f"{type(error).__name__}: {error}"}, ensure_ascii=False), file=sys.stderr)
         return 2

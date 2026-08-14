@@ -158,3 +158,23 @@ def test_run_uses_injected_handlers_in_order(tmp_path: Path) -> None:
         "calibrate_component_thresholds",
     ]
     assert [step["name"] for step in report["steps"]] == calls
+
+
+def test_train_stage_uses_real_default_handlers_without_mask_or_policy(tmp_path: Path, monkeypatch) -> None:
+    from bmw_inspection.lab import left_normal_training as training
+
+    config = _config(training, tmp_path)
+    config = training.LeftNormalTrainingConfig(
+        repo_root=config.repo_root, prepared_root=config.prepared_root, roi_config=config.roi_config,
+        training_root=config.training_root, training_id=config.training_id, output_root=config.output_root,
+        run_id=config.run_id,
+    )
+    calls: list[str] = []
+    monkeypatch.setattr(training, "materialize_left_normal_data", lambda _config: calls.append("materialize") or {})
+    monkeypatch.setattr(training, "train_left_normal_templates", lambda _config: calls.append("template") or {})
+    monkeypatch.setattr(training, "_efficientad_stage", lambda _config: calls.append("efficientad") or {})
+
+    report = training.run_left_normal_training(config, stage="train")
+
+    assert calls == ["materialize", "template", "efficientad"]
+    assert [step["name"] for step in report["steps"]] == calls
