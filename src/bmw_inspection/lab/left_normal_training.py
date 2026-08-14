@@ -252,22 +252,74 @@ def _lab_config(config: LeftNormalTrainingConfig):
     return replace(defaults, prepared_root=config.prepared_root, roi_config=config.roi_config, training_root=config.training_root, training_id=config.training_id, output_root=config.output_root, run_id=config.run_id, efficientad_epochs=config.efficientad_epochs, gpu=config.gpu, workers=config.workers, seed=config.seed)
 
 
-def score_component_maps(config: LeftNormalTrainingConfig, state: Mapping[str, Any]) -> dict[str, Any]:
-    """Require the completed component-map scorer rather than silently use pred_score."""
+def score_component_maps(
+    config: LeftNormalTrainingConfig,
+    state: Mapping[str, Any],
+    *,
+    predictor_factory: Callable[[Path], Callable[[Any], tuple[float, bool, Any]]] | None = None,
+) -> dict[str, Any]:
+    """Re-score every left calibration ROI with the Task 2 component score."""
+    del state
     if config.mask_index is None or config.component_policy is None:
         raise ValueError("calibrate stage requires --mask-index and --component-policy")
-    mask = _read_object(config.mask_index, "mask index")
-    policy = _read_object(config.component_policy, "component policy")
-    if mask.get("public_roi_config_sha256") != _sha256(config.roi_config):
-        raise ValueError("mask index ROI SHA does not match the left ROI config")
-    if policy.get("schema_version") != "bmw.efficientad_component_filter/1.0":
-        raise ValueError("unsupported component policy schema")
-    raise RuntimeError("component-map predictor must be provided by the completed EfficientAD integration")
+    import numpy as np
+    from bmw_inspection.lab.efficientad_component_filter import score_anomaly_components
+    from bmw_inspection.lab.efficientad_ignore_mask import load_ignore_mask_asset
+    from bmw_inspection.lab.eight_view_demo import _load_efficientad_component_policies
+    from bmw_inspection.lab.eight_view_demo_models import _AnomalibEfficientPredictor
+    factory = _AnomalibEfficientPredictor if predictor_factory is None else predictor_factory
+    roots = {view: config.training_release / "efficientad" / view / "normal_test" for view in config.views}
+    images = {view: sorted(roots[view].rglob("*.png")) for view in config.views}
+    if any(not images[view] for view in config.views):
+        raise ValueError("left EfficientAD calibration normal_test images are incomplete")
+    shapes: dict[str, tuple[int, int]] = {}
+    for view in config.views:
+        image = cv2.imread(str(images[view][0]), cv2.IMREAD_UNCHANGED)
+        if image is None:
+            raise ValueError(f"cannot decode calibration image: {images[view][0]}")
+        shapes[view] = image.shape[:2]
+    masks = load_ignore_mask_asset(config.mask_index, expected_views=config.views, expected_roi_config_sha256=_sha256(config.roi_config), expected_shapes=shapes)
+    policies = _load_efficientad_component_policies(config.component_policy)
+    predictors = {view: factory(config.run_dir / "efficientad" / view / "model.ckpt") for view in config.views}
+    output = config.run_dir / "efficientad" / "component_score_analysis"
+    if output.exists():
+        raise FileExistsError(f"component score output already exists: {output}")
+    output.mkdir(parents=True)
+    records: list[dict[str, str]] = []
+    for view in config.views:
+        for image_path in images[view]:
+            image = cv2.imread(str(image_path), cv2.IMREAD_UNCHANGED)
+            if image is None:
+                raise ValueError(f"cannot decode calibration image: {image_path}")
+            _raw, _label, anomaly_map = predictors[view](image)
+            result = score_anomaly_components(np.asarray(anomaly_map), masks.masks[view], policies[view])
+            from bmw_inspection.lab.efficientad_thresholds import part_id_from_image_path
+            part_id = part_id_from_image_path(image_path, view)
+            records.append({"part_id": f"{config.training_id}::{part_id}", "view_id": view, "label": "normal", "score": f"{result.score:.12g}", "image_path": str(image_path)})
+    csv_path = output / "efficientad_component_scores.csv"
+    with csv_path.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=("part_id", "view_id", "label", "score", "image_path"))
+        writer.writeheader()
+        writer.writerows(sorted(records, key=lambda row: (row["part_id"], row["view_id"])))
+    return {"status": "complete", "scores_csv": str(csv_path), "score_source": "accepted_component_max_p95", "mask_index_sha256": masks.index_sha256, "component_policy_sha256": _sha256(config.component_policy), "sample_count": len(records)}
 
 
 def calibrate_component_thresholds(config: LeftNormalTrainingConfig, state: Mapping[str, Any]) -> dict[str, Any]:
-    raise RuntimeError("component-map predictor must publish a component score CSV before calibration")
-
+    """Fit the existing whole-part threshold model at the required 5 percent FPR."""
+    from bmw_inspection.lab.efficientad_thresholds import fit_part_thresholds, read_part_scores_csv_snapshot
+    score = state.get("score_component_maps")
+    source = Path(score.get("scores_csv")) if isinstance(score, Mapping) and isinstance(score.get("scores_csv"), str) else None
+    if source is None or not source.is_file():
+        raise ValueError("component score stage did not publish a readable CSV")
+    rows, source_sha = read_part_scores_csv_snapshot(source)
+    fit = fit_part_thresholds(rows, views=config.views, target_part_fpr=TARGET_PART_FPR)
+    checkpoints = {view: config.run_dir / "efficientad" / view / "model.ckpt" for view in config.views}
+    artifact = build_component_threshold_artifact(checkpoint_paths=checkpoints, mask_index=config.mask_index, component_policy=config.component_policy, score_source="accepted_component_max_p95", sample_count=len(rows), fpr_resolution=1 / fit.normal_part_count, thresholds=fit.thresholds)
+    artifact.update(fit.to_dict())
+    artifact.update({"source_csv": str(source), "source_csv_sha256": source_sha, "insufficient_for_5pct": fit.normal_part_count < 20})
+    output = config.run_dir / "efficientad" / "component_score_analysis" / "part_thresholds.json"
+    _write_json(output, artifact)
+    return {"status": "complete", "threshold_asset": str(output), **artifact}
 
 def run_left_normal_training(config: LeftNormalTrainingConfig, *, dry_run: bool = False, stage: str = "all", stage_handlers: Mapping[str, StageHandler] | None = None) -> dict[str, Any]:
     """Run real default train handlers; calibration is a separate post-mask stage."""

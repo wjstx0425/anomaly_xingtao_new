@@ -9,7 +9,10 @@ import hashlib
 import json
 from pathlib import Path
 
+import cv2
+import numpy as np
 import pytest
+from types import SimpleNamespace
 
 from bmw_inspection.lab.eight_view_dataset import VIEW_ORDER
 
@@ -178,3 +181,38 @@ def test_train_stage_uses_real_default_handlers_without_mask_or_policy(tmp_path:
 
     assert calls == ["materialize", "template", "efficientad"]
     assert [step["name"] for step in report["steps"]] == calls
+
+
+def test_component_calibration_rescores_all_eight_views_with_an_injected_predictor(tmp_path: Path, monkeypatch) -> None:
+    from bmw_inspection.lab import left_normal_training as training
+    from bmw_inspection.lab.efficientad_component_filter import ComponentFilterPolicy
+
+    config = _config(training, tmp_path)
+    for view in VIEW_ORDER:
+        image_path = config.training_release / "efficientad" / view / "normal_test" / "part-a" / "images" / f"session__part-a_000001__{view}.png"
+        image_path.parent.mkdir(parents=True, exist_ok=True)
+        assert cv2.imwrite(str(image_path), np.zeros((5, 5), dtype=np.uint8))
+        checkpoint = config.run_dir / "efficientad" / view / "model.ckpt"
+        checkpoint.parent.mkdir(parents=True, exist_ok=True)
+        checkpoint.write_bytes(view.encode())
+    policy = ComponentFilterPolicy(0.3, 0.5, 0.65, 4, 0.9, 5, 3)
+    monkeypatch.setattr(
+        "bmw_inspection.lab.efficientad_ignore_mask.load_ignore_mask_asset",
+        lambda *_args, **_kwargs: SimpleNamespace(masks={view: np.zeros((5, 5), dtype=np.uint8) for view in VIEW_ORDER}, index_sha256="a" * 64),
+    )
+    monkeypatch.setattr(
+        "bmw_inspection.lab.eight_view_demo._load_efficientad_component_policies",
+        lambda _path: {view: policy for view in VIEW_ORDER},
+    )
+
+    score = training.score_component_maps(
+        config, {}, predictor_factory=lambda _checkpoint: lambda _image: (0.9, True, np.pad(np.array([[0.55]], dtype=np.float32), ((2, 2), (2, 2))))
+    )
+    csv_text = Path(score["scores_csv"]).read_text(encoding="utf-8")
+    assert csv_text.count("\n") == 9
+    assert ",0," in csv_text
+    artifact = training.calibrate_component_thresholds(config, {"score_component_maps": score})
+
+    assert artifact["score_source"] == "accepted_component_max_p95"
+    assert artifact["source_csv"] == score["scores_csv"]
+    assert Path(artifact["threshold_asset"]).is_file()
