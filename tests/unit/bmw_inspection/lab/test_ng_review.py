@@ -134,21 +134,23 @@ def test_cli_parser_uses_shared_review_package_and_accepts_override(tmp_path: Pa
     assert custom_args.review_csv == tmp_path / "custom.csv"
 
 
-def test_template_evidence_alignment_removes_reflected_letterbox() -> None:
+def test_template_review_uses_original_roi_instead_of_misleading_difference_composite() -> None:
     script = Path(__file__).resolve().parents[4] / "pipeline/bmw_lab_review_ng_cases.py"
     namespace = runpy.run_path(script)
-    current = Image.new("RGB", (100, 300), "white")
-    evidence_array = np.zeros((300, 300, 3), dtype=np.uint8)
-    evidence_array[:, 100:200] = (240, 30, 20)
-    evidence = Image.fromarray(evidence_array)
+    current_array = np.zeros((80, 120, 3), dtype=np.uint8)
+    current_array[10:70, 25:95] = (30, 140, 220)
+    current = Image.fromarray(current_array)
+    misleading_composite = Image.new("RGB", (512, 512), (255, 0, 255))
 
-    aligned = namespace["_align_evidence_to_current"](current, evidence, branch="template")
+    display, title, explanation = namespace["_review_evidence_image"](
+        current,
+        misleading_composite,
+        branch="template",
+    )
 
-    assert aligned.size == current.size
-    aligned_array = np.asarray(aligned)
-    assert np.all(aligned_array[..., 0] == 240)
-    assert np.all(aligned_array[..., 1] == 30)
-    assert np.all(aligned_array[..., 2] == 20)
+    assert np.array_equal(np.asarray(display), current_array)
+    assert title == "Template整体匹配异常（原始ROI）"
+    assert "不提供像素级缺陷定位" in explanation
 
 
 def test_configure_fonts_applies_cjk_family_to_tk_and_ttk() -> None:

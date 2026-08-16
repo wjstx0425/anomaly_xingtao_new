@@ -82,30 +82,30 @@ def _configure_fonts(
     return fonts
 
 
-def _align_evidence_to_current(
+def _review_evidence_image(
     current: Image.Image,
     evidence: Image.Image,
     *,
     branch: str,
-) -> Image.Image:
-    """Restore Template evidence from its reflected square canvas to source ROI geometry."""
+) -> tuple[Image.Image, str, str]:
+    """Choose an honest review image for a detector branch."""
     current_rgb = current.convert("RGB")
+    if branch == "template":
+        return (
+            current_rgb.copy(),
+            "Template整体匹配异常（原始ROI）",
+            "Template只判断整体外观相似度，不提供像素级缺陷定位；旧差异混合图已隐藏。",
+        )
     evidence_rgb = evidence.convert("RGB")
-    if evidence_rgb.size == current_rgb.size:
-        return evidence_rgb
-    if branch != "template":
+    if evidence_rgb.size != current_rgb.size:
         raise ValueError(
             f"{branch} evidence geometry {evidence_rgb.size} does not match ROI {current_rgb.size}"
         )
-    source_width, source_height = current_rgb.size
-    target_width, target_height = evidence_rgb.size
-    scale = min(target_width / source_width, target_height / source_height)
-    fitted_width = max(1, min(target_width, int(round(source_width * scale))))
-    fitted_height = max(1, min(target_height, int(round(source_height * scale))))
-    left = (target_width - fitted_width) // 2
-    top = (target_height - fitted_height) // 2
-    content = evidence_rgb.crop((left, top, left + fitted_width, top + fitted_height))
-    return content.resize(current_rgb.size, Image.Resampling.LANCZOS)
+    return (
+        evidence_rgb,
+        "EfficientAD异常热图（同一零件、同一视角）",
+        "EfficientAD颜色区域是异常响应提示，底图与左侧原始ROI一致。",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -339,7 +339,7 @@ class NgReviewApp:
                 current = source.convert("RGB")
             with Image.open(case.row["evidence_path"]) as source:
                 evidence = source.convert("RGB")
-            aligned_evidence = _align_evidence_to_current(
+            review_evidence, evidence_title, evidence_explanation = _review_evidence_image(
                 current,
                 evidence,
                 branch=case.row["branch"],
@@ -358,7 +358,7 @@ class NgReviewApp:
             return
         labels = (
             ("当前零件ROI", current),
-            ("算法证据（同一零件、同一视角）", aligned_evidence),
+            (evidence_title, review_evidence),
         )
         for column, (title, image) in enumerate(labels):
             column_frame = tk.Frame(visuals, bg="#0f172a")
@@ -382,13 +382,12 @@ class NgReviewApp:
                 "<Double-Button-1>",
                 lambda _event, value=image.copy(), label=title: self._zoom_image(value, label),
             )
-        if case.row["branch"] == "template" and evidence.size != current.size:
-            tk.Label(
-                visuals,
-                text="Template证据已移除算法镜像填充，并恢复到原ROI方向；仅改变显示，不改变分数。",
-                bg="#0f172a",
-                fg="#93c5fd",
-            ).grid(row=1, column=0, columnspan=2, pady=(7, 0))
+        tk.Label(
+            visuals,
+            text=evidence_explanation,
+            bg="#0f172a",
+            fg="#93c5fd",
+        ).grid(row=1, column=0, columnspan=2, pady=(7, 0))
 
     def _refresh_sidebar(self) -> None:
         self.part_list.delete(0, "end")
