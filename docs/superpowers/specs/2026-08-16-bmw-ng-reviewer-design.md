@@ -22,7 +22,7 @@
 ## 数据合同
 
 - 输入默认指向 `results/bmw_template_efficientad_ng_review_left_20260816_v1/review_cases.csv`。
-- 必需字段包括 `case_id`、`capture_id`、`branch`、`view`、`decision`、`review_note` 和 `panel_path`。
+- 必需字段包括 `case_id`、`capture_id`、`branch`、`view_id`、`decision`、`review_note` 和 `panel_path`。
 - `decision` 仅允许空值、`误判`、`真实缺陷`、`不确定`。
 - 保存前先写同目录临时文件，再替换原 CSV；列顺序及未知列保持不变。
 - 不删除图片，不改 `inspection.json`，不改变算法结果。
