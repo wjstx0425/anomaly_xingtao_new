@@ -5,8 +5,11 @@ from __future__ import annotations
 import csv
 import runpy
 from pathlib import Path
+from types import SimpleNamespace
 
+import numpy as np
 import pytest
+from PIL import Image
 
 from bmw_inspection.lab.ng_review import ReviewDataset
 
@@ -129,3 +132,60 @@ def test_cli_parser_uses_shared_review_package_and_accepts_override(tmp_path: Pa
     assert default_args.review_csv.name == "review_cases.csv"
     assert default_args.review_csv.parent.name == "bmw_template_efficientad_ng_review_left_20260816_v1"
     assert custom_args.review_csv == tmp_path / "custom.csv"
+
+
+def test_template_evidence_alignment_removes_reflected_letterbox() -> None:
+    script = Path(__file__).resolve().parents[4] / "pipeline/bmw_lab_review_ng_cases.py"
+    namespace = runpy.run_path(script)
+    current = Image.new("RGB", (100, 300), "white")
+    evidence_array = np.zeros((300, 300, 3), dtype=np.uint8)
+    evidence_array[:, 100:200] = (240, 30, 20)
+    evidence = Image.fromarray(evidence_array)
+
+    aligned = namespace["_align_evidence_to_current"](current, evidence, branch="template")
+
+    assert aligned.size == current.size
+    aligned_array = np.asarray(aligned)
+    assert np.all(aligned_array[..., 0] == 240)
+    assert np.all(aligned_array[..., 1] == 30)
+    assert np.all(aligned_array[..., 2] == 20)
+
+
+def test_configure_fonts_applies_cjk_family_to_tk_and_ttk() -> None:
+    script = Path(__file__).resolve().parents[4] / "pipeline/bmw_lab_review_ng_cases.py"
+    namespace = runpy.run_path(script)
+    configured_fonts: dict[str, dict[str, object]] = {}
+    style_settings: dict[str, dict[str, object]] = {}
+    option_settings: list[tuple[str, str]] = []
+
+    class FakeFont:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def configure(self, **kwargs: object) -> None:
+            configured_fonts[self.name] = kwargs
+
+    font_module = SimpleNamespace(
+        nametofont=lambda name, root=None: FakeFont(name),
+        Font=lambda root=None, name=None, **kwargs: FakeFont(str(name)),
+    )
+
+    class FakeStyle:
+        def configure(self, name: str, **kwargs: object) -> None:
+            style_settings[name] = kwargs
+
+    root = SimpleNamespace(option_add=lambda pattern, value: option_settings.append((pattern, value)))
+
+    fonts = namespace["_configure_fonts"](
+        root,
+        font_module=font_module,
+        style_factory=lambda _root: FakeStyle(),
+    )
+
+    assert configured_fonts["TkDefaultFont"]["family"] == "song ti"
+    assert configured_fonts["TkDefaultFont"]["size"] == 12
+    assert style_settings["."]["font"] == "TkDefaultFont"
+    assert style_settings["TButton"]["font"] == "TkDefaultFont"
+    assert style_settings["TRadiobutton"]["font"] == "TkDefaultFont"
+    assert option_settings == [("*Font", "TkDefaultFont")]
+    assert set(fonts) == {"title", "section", "case"}

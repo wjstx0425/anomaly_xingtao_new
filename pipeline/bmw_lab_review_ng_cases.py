@@ -7,9 +7,10 @@ import argparse
 import json
 import sys
 import tkinter as tk
+import tkinter.font as tkfont
 from pathlib import Path
 from tkinter import messagebox, ttk
-from typing import Sequence
+from typing import Any, Callable, Sequence
 
 from PIL import Image, ImageTk
 
@@ -38,6 +39,73 @@ DECISION_COLORS = {
     "真实缺陷": "#dc2626",
     "不确定": "#d97706",
 }
+
+
+def _configure_fonts(
+    root: Any,
+    *,
+    font_module: Any = None,
+    style_factory: Callable[[Any], Any] | None = None,
+) -> dict[str, Any]:
+    """Apply one explicit Chinese font to classic Tk and themed ttk widgets."""
+    font_module = tkfont if font_module is None else font_module
+    style_factory = ttk.Style if style_factory is None else style_factory
+    named_specs = {
+        "TkDefaultFont": (12, "normal"),
+        "TkTextFont": (12, "normal"),
+        "TkMenuFont": (12, "normal"),
+        "TkHeadingFont": (13, "bold"),
+        "TkCaptionFont": (12, "bold"),
+        "TkSmallCaptionFont": (10, "normal"),
+    }
+    for name, (size, weight) in named_specs.items():
+        font_module.nametofont(name, root=root).configure(
+            family="song ti",
+            size=size,
+            weight=weight,
+        )
+    fonts: dict[str, Any] = {}
+    for key, name, size in (
+        ("title", "BmwReviewTitleFont", 20),
+        ("section", "BmwReviewSectionFont", 16),
+        ("case", "BmwReviewCaseFont", 13),
+    ):
+        font = font_module.Font(root=root, name=name)
+        font.configure(family="song ti", size=size, weight="bold")
+        fonts[key] = font
+    root.option_add("*Font", "TkDefaultFont")
+    style = style_factory(root)
+    style.configure(".", font="TkDefaultFont")
+    style.configure("TButton", font="TkDefaultFont", padding=(10, 5))
+    style.configure("TRadiobutton", font="TkDefaultFont")
+    style.configure("TEntry", font="TkTextFont")
+    return fonts
+
+
+def _align_evidence_to_current(
+    current: Image.Image,
+    evidence: Image.Image,
+    *,
+    branch: str,
+) -> Image.Image:
+    """Restore Template evidence from its reflected square canvas to source ROI geometry."""
+    current_rgb = current.convert("RGB")
+    evidence_rgb = evidence.convert("RGB")
+    if evidence_rgb.size == current_rgb.size:
+        return evidence_rgb
+    if branch != "template":
+        raise ValueError(
+            f"{branch} evidence geometry {evidence_rgb.size} does not match ROI {current_rgb.size}"
+        )
+    source_width, source_height = current_rgb.size
+    target_width, target_height = evidence_rgb.size
+    scale = min(target_width / source_width, target_height / source_height)
+    fitted_width = max(1, min(target_width, int(round(source_width * scale))))
+    fitted_height = max(1, min(target_height, int(round(source_height * scale))))
+    left = (target_width - fitted_width) // 2
+    top = (target_height - fitted_height) // 2
+    content = evidence_rgb.crop((left, top, left + fitted_width, top + fitted_height))
+    return content.resize(current_rgb.size, Image.Resampling.LANCZOS)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -70,7 +138,7 @@ class NgReviewApp:
         root.geometry("1560x940")
         root.minsize(1180, 720)
         root.configure(bg="#eef2f7")
-        root.option_add("*Font", ("Noto Sans CJK SC", 11))
+        self._fonts = _configure_fonts(root)
 
         self._build_layout()
         self._bind_shortcuts()
@@ -84,7 +152,7 @@ class NgReviewApp:
             text="BMW 误判复核",
             bg="#0f172a",
             fg="white",
-            font=("Noto Sans CJK SC", 18, "bold"),
+            font=self._fonts["title"],
         ).pack(side="left")
         self.progress_label = tk.Label(header, bg="#0f172a", fg="#cbd5e1")
         self.progress_label.pack(side="left", padx=24)
@@ -102,7 +170,7 @@ class NgReviewApp:
             text="零件列表",
             bg="#f8fafc",
             fg="#0f172a",
-            font=("Noto Sans CJK SC", 13, "bold"),
+            font=self._fonts["case"],
         ).pack(anchor="w", pady=(0, 7))
         list_frame = tk.Frame(sidebar, bg="#f8fafc")
         list_frame.pack(fill="both", expand=True)
@@ -188,7 +256,7 @@ class NgReviewApp:
             bg="#eef2f7",
             fg="#0f172a",
             anchor="w",
-            font=("Noto Sans CJK SC", 16, "bold"),
+            font=self._fonts["section"],
         )
         title.pack(fill="x", pady=(0, 10))
         for index, case in enumerate(group.cases):
@@ -222,7 +290,7 @@ class NgReviewApp:
             bg="white",
             fg="#0f172a",
             anchor="w",
-            font=("Noto Sans CJK SC", 13, "bold"),
+            font=self._fonts["case"],
         )
         header.pack(fill="x")
         header.bind("<Button-1>", lambda _event, value=index: self._select_case(value))
@@ -239,10 +307,7 @@ class NgReviewApp:
                 wraplength=1100,
             ).pack(fill="x", pady=(3, 7))
 
-        image_label = self._make_panel_label(card, Path(case.row["panel_path"]))
-        image_label.pack(fill="x", pady=(0, 9))
-        image_label.bind("<Button-1>", lambda _event, value=index: self._select_case(value))
-        image_label.bind("<Double-Button-1>", lambda _event, path=case.row["panel_path"]: self._zoom(path))
+        self._render_direct_evidence(card, case, index)
 
         controls = tk.Frame(card, bg="white")
         controls.pack(fill="x")
@@ -266,22 +331,64 @@ class NgReviewApp:
         note_entry.bind("<FocusOut>", lambda _event, item=case: self._save_note(item))
         note_entry.bind("<Return>", lambda _event, item=case: self._save_note(item))
 
-    def _make_panel_label(self, parent: tk.Widget, path: Path) -> tk.Label:
+    def _render_direct_evidence(self, parent: tk.Widget, case: ReviewCase, index: int) -> None:
+        visuals = tk.Frame(parent, bg="#0f172a", padx=10, pady=8)
+        visuals.pack(fill="x", pady=(0, 9))
         try:
-            with Image.open(path) as source:
-                image = source.convert("RGB")
-            image.thumbnail((1120, 330), Image.Resampling.LANCZOS)
-            photo = ImageTk.PhotoImage(image)
-            self._image_refs.append(photo)
-            return tk.Label(parent, image=photo, bg="#0f172a", cursor="hand2")
+            with Image.open(case.row["current_roi_path"]) as source:
+                current = source.convert("RGB")
+            with Image.open(case.row["evidence_path"]) as source:
+                evidence = source.convert("RGB")
+            aligned_evidence = _align_evidence_to_current(
+                current,
+                evidence,
+                branch=case.row["branch"],
+            )
         except (OSError, ValueError) as error:
-            return tk.Label(
-                parent,
-                text=f"图片无法读取：{path}\n{error}",
+            tk.Label(
+                visuals,
+                text=(
+                    f"图片无法读取：{case.row['current_roi_path']} / "
+                    f"{case.row['evidence_path']}\n{error}"
+                ),
                 bg="#fee2e2",
                 fg="#991b1b",
                 pady=30,
+            ).pack(fill="x")
+            return
+        labels = (
+            ("当前零件ROI", current),
+            ("算法证据（同一零件、同一视角）", aligned_evidence),
+        )
+        for column, (title, image) in enumerate(labels):
+            column_frame = tk.Frame(visuals, bg="#0f172a")
+            column_frame.grid(row=0, column=column, sticky="nsew", padx=8)
+            visuals.grid_columnconfigure(column, weight=1)
+            tk.Label(
+                column_frame,
+                text=title,
+                bg="#0f172a",
+                fg="white",
+                font=self._fonts["case"],
+            ).pack(pady=(0, 5))
+            display = image.copy()
+            display.thumbnail((510, 410), Image.Resampling.LANCZOS)
+            photo = ImageTk.PhotoImage(display)
+            self._image_refs.append(photo)
+            image_label = tk.Label(column_frame, image=photo, bg="#020617", cursor="hand2")
+            image_label.pack(expand=True)
+            image_label.bind("<Button-1>", lambda _event, value=index: self._select_case(value))
+            image_label.bind(
+                "<Double-Button-1>",
+                lambda _event, value=image.copy(), label=title: self._zoom_image(value, label),
             )
+        if case.row["branch"] == "template" and evidence.size != current.size:
+            tk.Label(
+                visuals,
+                text="Template证据已移除算法镜像填充，并恢复到原ROI方向；仅改变显示，不改变分数。",
+                bg="#0f172a",
+                fg="#93c5fd",
+            ).grid(row=1, column=0, columnspan=2, pady=(7, 0))
 
     def _refresh_sidebar(self) -> None:
         self.part_list.delete(0, "end")
@@ -383,17 +490,12 @@ class NgReviewApp:
         self.canvas.yview_scroll(int(-event.delta / 120), "units")
         return "break"
 
-    def _zoom(self, path: str) -> None:
+    def _zoom_image(self, image: Image.Image, title: str) -> None:
         self._close_zoom()
-        try:
-            with Image.open(path) as source:
-                image = source.convert("RGB")
-        except (OSError, ValueError) as error:
-            messagebox.showerror("图片无法读取", f"{path}\n{error}", parent=self.root)
-            return
+        image = image.convert("RGB")
         window = tk.Toplevel(self.root)
         self._zoom_window = window
-        window.title(Path(path).name)
+        window.title(title)
         window.configure(bg="#020617")
         max_width = max(800, window.winfo_screenwidth() - 80)
         max_height = max(500, window.winfo_screenheight() - 120)
