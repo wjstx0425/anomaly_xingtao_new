@@ -32,7 +32,13 @@ TOPOLOGY = REPOSITORY_ROOT / "configs/zs32/topology/zs32_4cam_double_side_v1.jso
 class _Coordinator:
     instances: list[_Coordinator] = []
 
-    def __init__(self, operator_id: str, timeout_seconds: float, *, manual_load: bool) -> None:
+    def __init__(
+        self,
+        operator_id: str,
+        timeout_seconds: float | None,
+        *,
+        manual_load: bool,
+    ) -> None:
         self.operator_id = operator_id
         self.timeout_seconds = timeout_seconds
         self.manual_load = manual_load
@@ -55,8 +61,9 @@ class _Adapter:
     failed_round: str | None = None
     interrupt_round: str | None = None
 
-    def __init__(self, config) -> None:
+    def __init__(self, config, *, timing_recorder=None) -> None:
         self.config = config
+        self.timing_recorder = timing_recorder
         self.rounds: list[str] = []
         self.exited = False
         self.__class__.instances.append(self)
@@ -158,6 +165,7 @@ def test_four_camera_bootstrap_writes_eight_bound_pngs_and_manifest(
 
     assert bootstrap_capture._run(_argv(tmp_path)) == 0
 
+    assert _Coordinator.instances[0].timeout_seconds is None
     assert _Coordinator.instances[0].rounds == [("front", 1, 2), ("back", 2, 2)]
     assert _Adapter.instances[0].rounds == ["front", "back"]
     assert len(results) == 1
@@ -188,6 +196,27 @@ def test_four_camera_bootstrap_writes_eight_bound_pngs_and_manifest(
         assert row["camera_slot_id"] == slot_id
         assert row["camera_serial"] == serial
         assert row["image_sha256"] == hashlib.sha256(image_path.read_bytes()).hexdigest()
+
+
+def test_explicit_round_confirmation_timeout_is_preserved(tmp_path: Path) -> None:
+    assert bootstrap_capture._run(
+        [*_argv(tmp_path), "--round-confirmation-timeout", "45"]
+    ) == 0
+
+    assert _Coordinator.instances[0].timeout_seconds == 45.0
+
+
+def test_optional_timing_json_records_both_capture_rounds_atomically(tmp_path: Path) -> None:
+    timing_path = tmp_path / "diagnostics" / "timing.json"
+
+    assert bootstrap_capture._run([*_argv(tmp_path / "capture"), "--timing-json", str(timing_path)]) == 0
+
+    payload = json.loads(timing_path.read_text(encoding="utf-8"))
+    assert payload["component"] == "zs32_bootstrap_capture"
+    assert payload["total_seconds"] >= 0
+    assert payload["stages"]["front_capture"]["count"] == 1
+    assert payload["stages"]["back_capture"]["count"] == 1
+    assert not timing_path.with_name(".timing.json.tmp").exists()
 
 
 def test_four_camera_legacy_layout_writes_historical_tree_and_one_manifest_payload(

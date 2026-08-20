@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 from collections.abc import Mapping
@@ -11,6 +10,7 @@ from typing import Any, NoReturn
 
 import cv2
 
+from .compositor import load_source_image
 from .contracts import (
     VIEW_ORDER,
     BranchEvidence,
@@ -198,6 +198,13 @@ def _parse_branch(
     score: float | None = None
     try:
         score = _finite_score(value.get("score"), field=f"{context}.score")
+        if "threshold" not in value:
+            raise DashboardResultError(f"{context}.threshold is required")
+        threshold = _finite_score(value.get("threshold"), field=f"{context}.threshold")
+        if branch != "fusion" and threshold is None:
+            raise DashboardResultError(f"{context}.threshold must be a finite number")
+        if branch == "fusion" and threshold is not None:
+            raise DashboardResultError(f"{context}.threshold must be null")
         state = _branch_state(value, context=context)
         status = value.get("status", state.value.upper())
         reason = value.get("reason", "")
@@ -245,6 +252,7 @@ def _parse_branch(
             status=status,
             score=score,
             reason=reason,
+            threshold=threshold,
             evidence_path=evidence_path,
             mask_path=mask_path,
             mask_source=mask_source,
@@ -260,6 +268,7 @@ def _parse_branch(
             status="ERROR",
             score=score,
             reason=reason,
+            threshold=None,
         )
 
 
@@ -290,26 +299,17 @@ def _parse_view(
         raise DashboardResultError(f"{context}.model_supported must be True")
 
     source_path = _require_file(result_dir, value.get("source_path"), field=f"{context}.source_path")
-    source_sha256 = _required_text(value, "source_sha256", context=context)
-    try:
-        source_bytes = source_path.read_bytes()
-    except OSError as error:
-        raise DashboardResultError(f"{context}.source_path could not be read: {error}") from error
-    actual_sha256 = hashlib.sha256(source_bytes).hexdigest()
-    if source_sha256 != actual_sha256:
-        raise DashboardResultError(f"{context}.source_sha256 does not match source_path")
     source_shape = _source_shape(value.get("source_shape"), view=expected_view)
-    image = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
-    if image is None:
-        raise DashboardResultError(f"{context}.source_path could not be decoded by OpenCV")
+    try:
+        image = load_source_image(source_path)
+    except ValueError as error:
+        raise DashboardResultError(f"{context}.source_path could not be decoded by OpenCV") from error
     if tuple(image.shape[:2]) != source_shape:
         raise DashboardResultError(
             f"{context}.source_shape {source_shape!r} does not match decoded shape {tuple(image.shape[:2])!r}",
         )
 
     branch_values = value.get("branches")
-    if branch_values is None:
-        branch_values = {branch: value[branch] for branch in _BRANCH_NAMES if branch in value}
     if not isinstance(branch_values, dict) or set(branch_values) != set(_BRANCH_NAMES):
         raise DashboardResultError(f"{context}.branches must contain exactly {_BRANCH_NAMES!r}")
     branches = {
@@ -337,7 +337,6 @@ def _parse_view(
         return ViewResult(
             view=expected_view,
             source_path=source_path,
-            source_sha256=source_sha256,
             source_shape=source_shape,
             model_supported=model_supported,
             branches=branches,

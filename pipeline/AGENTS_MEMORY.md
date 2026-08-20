@@ -1,5 +1,31 @@
 # Pipeline Memory
 
+## ZS32 EfficientAD six-view benchmark audit blocker (2026-07-21)
+
+- New speed-only candidate evidence: `results/zs32_efficientad_s_six_view_seed42_v1/runtime_benchmark_same_image_20260721.json`. With six checkpoints resident on RTX 4090, one warmup and five formal rounds over the exact current primary-view crops, EfficientAD-S six-view `Engine.predict` is 1.748 s median (1.717-1.787) versus PatchCore 3.301 s, saving 1.553 s / 47.0% in the Engine segment. A simple Stage32 projection is 7.006 -> 5.454 s, but no EfficientAD runtime/evidence/Stage18 integration has been run.
+- Current `capture_data/zs32_model_runtime.py` cannot load EfficientAD by path substitution: it constructs `Patchcore`, publishes PatchCore-specific contracts, and v10 binds those model/profile hashes. The new EfficientAD reports provide one threshold per view, not strict low/high thresholds. Keep this as a separate candidate until a new no-clobber bundle supplies an EfficientAD backend, evidence equivalence, dual thresholds, and full same-image benchmark.
+- Historical context: the earlier mandatory audit completed without training. The later user-supplied EfficientAD-S checkpoints now enable speed testing, but the data contract remains unresolved: `crop_manifest.csv` has no verified physical-part ID and existing workflow outputs do not provide independent train/calibration/final-test partitions.
+- Do not run `pipeline/8_train_custom_models.py` unchanged for this benchmark. It hardcodes EfficientAD `model_size="medium"`, maps validation to test, calibrates thresholds on `normal_test`, and reports FPR on that same set. It also lacks the requested resume, per-type/pixel metrics, and segmented load/read/ROI/forward/postprocess/write timing.
+- The strict `pipeline/zs32_train_anomaly.py` path is the preferred training foundation once inputs exist, because it already enforces small/medium parameters, teacher/ImageNette hashes, train-normal-only consumption, and immutable candidate publication. It is currently blocked by the absence of a real EfficientAD recipe, bound dataset release, and materialized Anomalib export.
+- Active v10 points to the collision-affected `results/zs32_patchcore_eight_view_all_seed42`, while `_v2` fixes path uniqueness but still has only train plus reused normal-test/test semantics. Preserve both roots and all v10 artifacts unchanged.
+
+## Stage32/35/36 resident-worker speed path (2026-07-17)
+
+- Capture CPU parallelism added 2026-07-21 in `src/zs32_inspection/capture/hikvision.py`: after each four-camera SDK exposure pass is complete, HDR fusion+clip and PNG encoding run in bounded four-worker pools. Futures are collected in topology order, PNG failures retain only the canonical successful prefix, `CaptureFrame` construction/timestamps and `TimingRecorder.add()` stay on the main thread, and SDK calls are not part of these new CPU pools.
+- Read `hdr_fusion_parallel_wall` and `image_encoding_parallel_wall` for elapsed capture cost; their unsuffixed counterparts are now overlapping per-worker CPU sums. Offline 4024x3036 four-image microbenchmark: fusion 1.742 -> 0.683 s, encoding 2.290 -> 0.978 s, exact pixels/PNG bytes, about 2.88 GiB peak RSS. A real front/back operator capture is still required to establish the live improvement.
+- Final capture-parallel gate: 253 related tests passed, targeted compile/diff checks passed, and code review has no remaining Critical/Important findings. The expanded capture-data suite's 19 unrelated pre-existing failures are not acceptance failures for this change.
+- Current lossless parallel path (2026-07-19): Stage32 uses four workers for the eight independent `cv2.imread` calls, then keeps canonical result/error ordering. It writes all eight Template crops serially before using six workers for the six primary Template evaluations; 20/22-group secondary views remain exact `SKIPPED` entries and are never submitted. Workers return timing/results to the main thread because `TimingRecorder` is not thread-safe.
+- Authoritative artifact is `results/zs32_timing_worker_parallel_v1/run_01..05` plus `warmup`. Five formal runs are all OK/complete: median total 7.006 s (6.826-7.296), decode 0.299 s, Template aggregate 0.906 s, and Template evaluate wall 0.123 s. Relative to io-v3, total/decode/Template improve 14.1%/66.6%/32.3%. Normalized Template/PatchCore/YOLO/fusion CSVs, all source/crop/evidence PNG bytes, and six raw maps exactly match io-v3 run_02.
+- Second lossless I/O pass: Stage32 no longer writes eight temporary YOLO crop PNGs; it passes canonical contiguous BGR ndarray crops directly. PatchCore retains only six required primary-view PNG crops, overlaps evidence writers with later GPU inference, and YOLO evidence uses two bounded writers. Each archived source SHA is computed once, while `sources/` stays an independent copy for immutable audit.
+- Authoritative benchmark `results/zs32_timing_worker_io_v3/run_01..03` completes Stage32+Stage18 in 8.171/8.155/8.061 s (median 8.155 s), down 30.7% from worker v2. The target I/O critical path falls from 3.798 s to 1.276 s median (-66.4%). All three runs exactly match worker v2 semantic fields, CSV values, hashes, raw maps, decoded evidence pixels, 20-group decisions, and secondary SKIPPED states.
+- `pipeline/zs32_inference_worker.py` is the Dashboard-owned persistent execution process. It imports Stage32 once, preloads six primary PatchCore models plus YOLO and prepared six-view Template assets, then serves serial `run_argv` jobs over a private Unix socket.
+- `pipeline/32_run_zs32_multimodel_inference.py` retains standalone CLI compatibility and the immutable output/Stage18 contracts. In a worker it reuses the prepared runtime, while each job still creates a unique generation and writes `timing.json`.
+- `pipeline/35_run_zs32_live_commissioning.py` accepts the private `--inference-socket`; without it, the old Stage32 subprocess path remains active. Stage35 merges capture/Stage32/Stage35 timings before publishing `complete`.
+- `pipeline/36_zs32_inspection_dashboard.py` command shape is unchanged. Dashboard startup creates the worker automatically and shutdown sends STOP before process-group fallback termination.
+- The active 20-group v10 still runs six primary Template/PatchCore branches and eight YOLO branches; `front_secondary/back_secondary` Template and PatchCore remain explicit SKIPPED. Do not call `_ensure_backends()` without the six-view subset in this profile.
+- Same-image measured inference improved from 24.260 s cold to 11.765 s prepared-worker without projected result differences. See `docs/ZS32_DEMO_SPEED_OPTIMIZATION_20260717.md` and `results/zs32_timing_worker_v2/worker_benchmark_v2`.
+- Final directly related verification: 354 pipeline/model/live tests, 135 Dashboard tests, 28 capture tests, and 5 worker socket tests passed. Broader suites still expose unrelated pre-existing runtime-bundle CLI, strict-fusion fixture, and compositor pixel-equality failures; see the report for exact counts.
+
 ## ZS32 four-camera legacy-layout capture design (2026-07-14)
 
 - Implemented design: `docs/designs/2026-07-14-zs32-four-camera-legacy-layout-capture-design.md`; copy-paste hardware commands: `configs/zs32/topology/README.md`.
@@ -103,6 +129,7 @@
 - Checked-in model bundle: `config/fusion/zs32_runtime_models.json`. It pins six checkpoints below `results/six_view_roi_fixed_seed42` and YOLO `/home/yunjing/ultralytics-c789/final_n640_p1_seed42/weights/best.pt` by SHA-256. The assets are local/ignored and must exist on the deployment host.
 - Current weights are right-hand only. Reject left requests before model loading; do not reuse the right models or YOLO ROI for left parts.
 - PatchCore and YOLO use different ROI files. PatchCore runs once per canonical view with one persistent model/Engine per view; YOLO runs one six-image batch with `candidate_conf=0.001`, which is only a candidate acquisition floor.
+- Dashboard Fusion must not visualize sub-threshold YOLO candidates: keep all candidates on the standalone YOLO evidence page, but on Fusion draw only per-box `confidence >=` the view's final YOLO threshold, and draw none when the branch score is below threshold.
 - `infer` writes `patchcore.csv`, `yolo.csv`, heatmaps/box overlays, crop files, hashes, `runtime_manifest.json`, and optional Stage-31-compatible `calibration_rows.csv`. Without locked dual thresholds it must remain REVIEW/incomplete.
 - `--template-model-dir` uses the PatchCore ROI and runs before any PatchCore/YOLO backend. A non-PASS result short-circuits and publishes no fabricated downstream evidence.
 - Right-only strict profile: `config/fusion/zs32_right_six_view.json`, named Stage-18 profile `zs32-right`, exactly 36 versioned groups. Keep the original `zs32` two-hand 72-group profile unchanged.
@@ -181,3 +208,190 @@
 - `--reuse-existing-inference` requires `--resume` and complete exact case generations; directory existence alone is never enough.
 - Stage31 report files and `stage33_publication.json` publish together through atomic no-replace directory publication. Resume requires the exact five files and matching input, parameters, and four report hashes.
 - When optional YOLO auxiliary calibration is enabled, each canonical view requires both box and no-box val labels before execution.
+
+## ZS32 Task 8 minimal dashboard acceptance (2026-07-15)
+
+- Offline acceptance reuses `results/zs32_stage33_eight_view_commissioning_v4/cases/right_normal_group064-b1959d15`; Stage36 headless wrote `artifacts/zs32_dashboard_eight_view_commissioning/group064_stage33_v4_dashboard_1600x920.png` without rerunning GPU inference.
+- Strict parser acceptance: canonical eight views, all modeled, exact four dashboard branches, commissioning true, production false. Case status is intentionally `REVIEW` because its Fusion branch is `SKIPPED`.
+- Final bundle is `results/zs32_runtime_bundle_eight_view_v2/runtime_bundle.json`; fresh bundle plus four-camera topology preflight passed. Device listing found the four configured serials, but operator hardware capture was not performed.
+- Preserve the v2 caveats in user docs: Stage33 v4 test leakage, known normal group064 back `NG_YOLO`, and finite zero-area post-clipping YOLO candidate exclusion for commissioning compatibility.
+
+## ZS32 EfficientAD-S/M six-primary-view runner (2026-07-21)
+
+- Entrypoint: `pipeline/run_efficientad_s_m_six_views.sh DATA_ROOT [SMALL_OUTPUT_ROOT] [MEDIUM_OUTPUT_ROOT] [GPU]`.
+- It calls Stage 8 through `uv`, serially runs exactly six primary views for `small` and then `medium`, and passes `--efficientad-model-size` through Stage 8 to the repository workflow. Secondary views are hard-excluded by the runner's fixed view list.
+- Default parameters are image size `256,256`, batch size 1, 100 epochs, seed 42, one GPU job, and workers 8. Each view has its own output root and Stage 8 logs/checkpoint/report; each model family gets a SHA256-bearing `six_view_summary.csv`.
+- Resume rules mirror the existing PatchCore runner: summary+checkpoint skips, checkpoint without summary evaluates only, and an existing preprocess manifest uses `--skip-preprocess`. Existing aggregate summaries are not overwritten.
+
+## ZS32 0723 retraining release builder (2026-07-26)
+
+- Entrypoint: `pipeline/prepare_zs32_0723_retraining.py`; implementation:
+  `capture_data/prepare_zs32_0723_retraining.py`.
+- The accepted immutable output is `dataset/zs32_all_plus_0723_retraining_release_v2`, with 2852 PatchCore rows,
+  848 Template rows, 1627 YOLO rows, and 106 physical parts split 64/16/13/13 at seed 42.
+- The builder materializes live symlinks, preserves PatchCore session-qualified paths, copies and receipts the ROI config,
+  preserves legacy YOLO label bytes, and refuses overwrite. Use its `validate` subcommand before training.
+- `capture_data/zs32_template_gate.py` supports explicit train/model_val/calibration/final_test roles without changing
+  legacy calibration/test behavior. Do not use the older generated `release_v1`.
+
+## ZS32 0723 secondary PatchCore normal-only handling (2026-07-26)
+
+- Secondary views intentionally contain only 0723 normal/normal_test data. `_build_datamodule` must pass
+  `abnormal_dir=None` when `<preprocessed-view>/defect` is absent; never create fake defect images and never skip the
+  secondary models.
+- The v11 runner is resume-safe after this fix: primary summaries skip, and failed secondary views reuse their
+  preprocess manifests before training.
+
+## ZS32 0723 v11 platform publication (2026-07-26)
+
+- Source/profile:
+  `config/fusion/zs32_eight_view_24group_v11_bundle_source.json` and
+  `config/fusion/zs32_right_eight_view_24_group_commissioning_v11.json`.
+- Published chain:
+  `results/zs32_runtime_assets_eight_view_v11` ->
+  `results/zs32_24group_0723_v11_commissioning` ->
+  `results/zs32_runtime_bundle_eight_view_v11/runtime_bundle.json`.
+- The contract is strict 24-group: Template + per-view PatchCore + YOLO on all eight views, including both secondary
+  views. Stage35 and Dashboard default to v11; pass v10 explicitly for rollback.
+- When adapting old Stage33 thresholds whose ROI version name differs, Stage34 requires both
+  `--allow-roi-version-rebind` and `--source-roi-config`. It validates the YOLO-sidecar-signed Stage33 run contract,
+  bound source runtime path/SHA and ROI versions, and all old/new PatchCore/YOLO ROI bytes before permitting identity
+  rebind, then signs the complete evidence.
+- This v11 artifact is commissioning-only/non-production. Its YOLO source retains test leakage/model-rebind warnings,
+  all YOLO thresholds are `0.07`, and all PatchCore low/high pairs use the corresponding v11 deploy threshold.
+- Template records use current-model calibration counts. Rebound PatchCore/YOLO records use neutral `0/0` counts plus
+  `count_provenance=unavailable_for_rebound_model`, never stale Stage33 counts.
+
+## ZS32 0727 Template v12 release builder (2026-07-27)
+
+- Entrypoint: `pipeline/prepare_zs32_template_release.py`; implementation:
+  `capture_data/prepare_zs32_template_release.py`. It makes a Template-only immutable release from a Stage30
+  `crop_manifest.csv`; it does not alter v11 PatchCore, YOLO, or ROI assets.
+- Use `prepare` with source `zs32_0727`, 19 expected parts, seed 42, and explicit counts
+  `train=11`, `model_val=3`, `calibration=3`, `final_test=2`. `template_manifest.csv` includes trainer-consumed
+  `split` values exactly matching those four roles, and keeps all eight canonical views of each
+  `session_id:groupNNN` physical part together.
+- The builder rejects non-right/non-normal rows, incomplete or duplicate `(part, view)` records, cross-part encoded
+  SHA256 duplication, and overwrite. It symlinks source crops, byte-copies the sibling ROI config, records input and
+  artifact SHA256 evidence, and `validate` fails closed on role leakage or any artifact drift.
+
+## ZS32 0727 Template v12 candidate publication
+
+- Model: `results/zs32_template_gate_right_0727_eight_view_v12/model.json`, SHA256
+  `5b071bcfb8a603f5bbf20ecf284f590e88e3e65e114f434fbde1eaf81692ff6e`.
+- Candidate:
+  `results/zs32_runtime_bundle_eight_view_template_0727_v12/runtime_bundle.json`, canonical SHA
+  `1b3341ca05ac7e786733690534c8a75ee6c5a493927145cc39860c4448c29133`.
+- The v12 profile is strict 24-group; both secondary views require Template/PatchCore/YOLO. PatchCore, YOLO, labels,
+  and ROI remain the v11 assets. v11 and v10 rollback bundles remain loadable.
+- The user reviewed the final-test visualization and accepted final-test normal scoring of 12 PASS/4 NG_TEMPLATE.
+  Stage35 and Dashboard now default to v12. Explicitly pass
+  `results/zs32_runtime_bundle_eight_view_v11/runtime_bundle.json` to roll back.
+- Operational commands and per-view thresholds are in
+  `docs/ZS32_0727_TEMPLATE_V12_REPLACEMENT_20260727.md`.
+
+## ZS32 0727 Template v13 default and rollback chain
+
+- `pipeline/35_run_zs32_live_commissioning.py` and the Dashboard worker now default to
+  `results/zs32_runtime_bundle_eight_view_template_0727_v13/runtime_bundle.json`.
+- v13 Template SHA256 is `eac211cab4ee1d27adda9933c3cb9c6fde71c4a7eb50fae138201a600fa17ab5`;
+  runtime-bundle canonical identity is `94b025f85bb2f529fc36a0f62a941eafe30cbd71b1c2298431c24b539a29e2bf`.
+  It contains 24 required records and eight Template groups, including required Template/PatchCore/YOLO on both
+  secondary views, while PatchCore, YOLO, and ROI bindings stay equal to v12.
+- Fresh-process loads passed independently for v13, v12, v11, and v10. Roll back only by explicitly passing the
+  desired bundle to `--runtime-config`; do not mutate or alias the versioned directories.
+- The v13 addendum in `docs/ZS32_0727_TEMPLATE_V12_REPLACEMENT_20260727.md` records all exact manual thresholds,
+  hashes, the `/opt/MVS/Samples/64/Python/MvImport` live command, and rollback commands. v13 is still
+  commissioning-only/non-production with preserved leakage/rebind warnings.
+
+## ZS32 single Demo entry (2026-07-27)
+
+- The previous v13 `--runtime-config` entry above is historical. Current online operation uses only
+  `pipeline/36_zs32_inspection_dashboard.py --live --demo-config configs/zs32/zs32_demo.json --part-id ...`.
+- `zs32_demo_inference.py` is the unified offline/resident-worker execution API. `zs32_inference_worker.py` prepares
+  the Demo runtime once and serially calls `run_argv`; a bad per-part JSON or inference request returns an error but
+  does not terminate the worker.
+- Stage35 retains topology-driven four-camera capture and two operator confirmations, then sends exactly eight image
+  paths plus the same Demo config to the worker. Its online production files no longer reference runtime bundle,
+  Stage18, threshold artifact, fusion profile, diagnostic skip, or SHA validation.
+- The current docs expose one Dashboard command and label the path `DEMO / 非生产`. Historical Stage32/34/37 commands
+  remain only for replay and must not be treated as online instructions.
+
+## ZS32 Demo Template-first short circuit (2026-07-27)
+
+- The current `zs32_demo_inference.py` runtime contract is Template-first: evaluate all eight Template views, aggregate
+  the global gate, and invoke PatchCore/YOLO only when every Template result is PASS.
+- A Template NG generation has 8 evaluated model branches and 24 planned branches; all 16 downstream model records are
+  explicit `SKIPPED`, while Fusion is available per view and mirrors that view's Template `NG_TEMPLATE` or `PASS`.
+  It is a valid complete `NG_TEMPLATE` result, not a worker failure.
+
+## ZS32 Demo runtime speed pass (2026-07-27)
+
+- For the actual ZS32 inspection path, optimize single-part detection latency first. Higher RAM, VRAM, GPU occupancy,
+  larger resident caches, duplicated resident model processes, and other space-for-time tradeoffs are acceptable when
+  measured output remains complete and equivalent.
+- Dashboard source decoding is shared by the strict parser and compositor through a bounded eight-entry path cache.
+  Callers receive detached copies, so overlays cannot mutate cached pixels. A real eight-view result decoded 8 sources
+  on its first parse/render and 0 additional sources across 10 repeated parse/render cycles.
+- Stage35 online manifest loading uses `validate_decode=False`; the resident worker is the authoritative decoder.
+  The direct `load_complete_sample(...)` API keeps decode validation enabled by default.
+- The Demo worker reads each source PNG byte stream once for color and grayscale decode, copies the original PNG bytes
+  unchanged into `sources/`, and performs both color and Template grayscale ROI crops in memory. It writes `crops/`
+  only after all eight Template views pass.
+- Real Template-NG replay evidence is in
+  `results/zs32_demo_speedup_20260727/template_ng_replay.json`: 2.1237 s worker wall time, zero PatchCore/YOLO calls,
+  no `crops/`, byte-identical sources, exact pre-change Template records, and output size 61,048,298 bytes versus the
+  prior 142,312,909-byte generation.
+- The live HDR command keeps manual front/back confirmation, 1500/5500 us exposures, settle 1, and
+  `--capture-interval 0.2`. On 2026-07-27 it was aligned with the actual `dataset/zs32_top` collection command:
+  timeout 2000, short-dark threshold 80, long-clip threshold 245, blend width 50, blur size 101, zero retries,
+  max clip 5%, and HDR alignment disabled. Actual camera wall-time improvement still requires an operator hardware run.
+- Do not enable two-thread PatchCore inference with the current Lightning/Anomalib engines. The RTX 4090 A/B in
+  `results/zs32_demo_speedup_20260727/patchcore_concurrency_ab.json` rejected it: serial median 5.115354 s, parallel
+  median 4.170282 s, but every parallel arm failed four views with `IndexError: pop from empty list`. This rejects only
+  same-process threaded inference; the later spawn-only process-isolated implementation supersedes the old serial
+  production setting.
+- Focused executable regressions passed: Demo runtime/Stage35 44, strict parser 55, Dashboard cache 1, capture CLI 13.
+  Broader legacy tests still expose unrelated contract drift: four old `ZS32ModelRuntime` manifests omit the now
+  required branch `threshold`, and one compositor test expects an unsupported Fusion branch to suppress otherwise
+  available downstream overlays.
+
+## ZS32 resident multiprocess PatchCore (2026-07-27)
+
+- The production Demo config now uses `patchcore_process_count=8`. This was selected by the strict RTX 4090 gate in
+  `results/zs32_demo_speedup_20260727/patchcore_multiprocess_ab.json`; set it back to `1` for serial rollback.
+- The parent uses only `multiprocessing.get_context("spawn")`. Eight long-lived children each own one distinct
+  PatchCore model and Lightning Engine. IPC carries paths and small result envelopes; raw maps, masks, and overlays
+  are written to unique staging paths by their owning child.
+- The protocol requires per-request `DONE -> DONE_ACK -> IDLE`; timeout, stale/duplicate/missing response, child exit,
+  malformed payload, and close failure are fail-closed and cannot contaminate the next part.
+- Same real crops, 2 warmups + 5 formal + 20 stability rounds per count:
+  serial median/p95 `4.9488/4.9768 s`; 2-process `3.3362/3.3506 s`; 4-process `2.1468/2.2291 s`;
+  8-process `1.4662/1.4785 s`. All counts had zero errors, stable PIDs, and exact score-hex/raw-map/mask/overlay
+  equality. Eight processes improved median PatchCore wall time by `70.37%`.
+- A real full worker startup with eight children, ROI warmup, YOLO load, READY publication, STOP, and bounded cleanup
+  completed in `12.94 s`; exit code was 0 and the Unix socket was removed.
+
+## ZS32 v14 Demo model replacement (2026-07-27)
+
+- `configs/zs32/zs32_demo.json` now binds Template to
+  `results/zs32_template_gate_right_0727_plus_defect_eight_view_v14` and all eight PatchCore views to
+  `results/zs32_patchcore_eight_view_0727_plus_defect_seed42_v14`.
+- The binary Template gate uses each v14 `model.json` `high_threshold`; PatchCore uses each v14
+  `eight_view_summary.csv` `deploy_threshold`. Do not mix either v14 model family with v13/v11 thresholds.
+- Template model SHA256 is `f0f5db9f3e1bd40efd510f47c236e11b4a92472a8378b5181c8bffcc511895ad`.
+  All 40 declared Template PNG hashes and all eight checkpoint paths were verified.
+- A real RTX 4090 worker loaded and warmed all eight v14 PatchCore children plus YOLO, published READY in `11.634 s`,
+  then handled STOP with exit code 0 and removed its Unix socket.
+- ROI, topology, YOLO, and `patchcore_process_count=8` did not change. Model rollback roots are Template v13
+  `results/zs32_template_gate_right_0727_eight_view_v13` and PatchCore v11
+  `results/zs32_patchcore_eight_view_all_plus_0723_seed42_v11`, together with their old paired thresholds.
+
+## ZS32 top front/back PatchCore v15 candidate (2026-07-27)
+
+- Prepare/validate with `pipeline/prepare_zs32_top_patchcore.py`; training used
+  `pipeline/8_train_custom_models.py --views right_front right_back --models patchcore`, not the eight-view runner.
+- The dry-run and real output both contain exactly `right_front` and `right_back`. Candidate root:
+  `results/zs32_patchcore_front_back_top_incremental_seed42_v15`.
+- Holdout and the prior live-normal probe did not meet the deployment gate, so the candidate was not written into
+  `configs/zs32/zs32_demo.json`.

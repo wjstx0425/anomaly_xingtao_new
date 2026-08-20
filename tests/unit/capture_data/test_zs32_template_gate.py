@@ -8,6 +8,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import math
 from typing import TYPE_CHECKING
 
 import cv2
@@ -17,6 +18,7 @@ from capture_data.fusion_calibration import fit_dual_thresholds
 from capture_data.zs32_template_gate import (
     CALIBRATION_FILENAME,
     MODEL_SHA256_FILENAME,
+    PreparedTemplateGate,
     ZS32_VIEWS,
     TemplateGateError,
     load_model,
@@ -224,6 +226,93 @@ def test_training_publishes_all_right_hand_eight_view_groups(tmp_path: Path) -> 
     assert tuple(model["groups"]) == tuple(f"right/{view}" for view in VIEW_ORDER)
 
 
+def test_normal_only_training_preserves_explicit_four_role_splits(tmp_path: Path) -> None:
+    """Train, validation, calibration, and final-test parts must keep independent roles."""
+    rows: list[dict[str, str]] = []
+    for view in EXPECTED_ZS32_VIEWS:
+        for split, count in (("train", 4), ("model_val", 2), ("calibration", 2), ("final_test", 2)):
+            for sample in range(count):
+                image = tmp_path / "four-role-images" / f"{view}-{split}-{sample}.png"
+                _write(image, _pattern(sample))
+                rows.append(
+                    {
+                        "part_id": f"{view}-{split}-{sample}",
+                        "hand": "right",
+                        "view": view,
+                        "label": "normal",
+                        "split": split,
+                        "image_path": str(image),
+                    },
+                )
+    manifest = tmp_path / "four-role-manifest.csv"
+    with manifest.open("w", encoding="utf-8", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=tuple(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+
+    output = tmp_path / "four-role-model"
+    model = train_template_gate(
+        manifest,
+        output,
+        required_hands=("right",),
+        width=90,
+        max_shift=3,
+        templates_per_group=2,
+        normal_quantile=1.0,
+        normal_only=True,
+        model_version="four-role-model-v1",
+        threshold_version="four-role-threshold-v1",
+        roi_version="roi-v1",
+        template_version="four-role-template-v1",
+    )
+
+    for group in model["groups"].values():
+        assert group["template_normal_count"] == 4
+        assert group["threshold_normal_count"] == 2
+        assert group["model_val_count"] == 2
+        assert group["final_test_count"] == 2
+        assert all("-train-" in template["source_part_id"] for template in group["templates"])
+    with (output / CALIBRATION_FILENAME).open(encoding="utf-8", newline="") as file:
+        calibration_rows = list(csv.DictReader(file))
+    assert {row["split"] for row in calibration_rows} == {"calibration", "model_val", "final_test"}
+
+
+def test_normal_only_training_ignores_all_defect_rows_and_removes_review_band(tmp_path: Path) -> None:
+    """Normal-only commissioning must derive templates and thresholds exclusively from normals."""
+    output = tmp_path / "normal-only-model"
+
+    model = train_template_gate(
+        _manifest(tmp_path, hand="right"),
+        output,
+        required_hands=("right",),
+        width=90,
+        templates_per_group=2,
+        normal_quantile=1.0,
+        normal_only=True,
+        model_version="normal-only-model-v1",
+        threshold_version="normal-only-threshold-v1",
+        roi_version="roi-v1",
+        template_version="normal-only-template-v1",
+    )
+
+    assert model["threshold_policy"]["calibration_mode"] == "normal_only"
+    for group in model["groups"].values():
+        assert group["low_threshold"] == group["high_threshold"]
+        assert group["calibration_defect_count"] == 0
+    with (output / CALIBRATION_FILENAME).open(encoding="utf-8", newline="") as file:
+        rows = list(csv.DictReader(file))
+    assert rows
+    assert {row["gt_label"] for row in rows} == {"0"}
+    by_view = {view: [] for view in EXPECTED_ZS32_VIEWS}
+    for row in rows:
+        if row["split"] == "calibration":
+            by_view[row["view"]].append(float(row["raw_score"]))
+    for view, risks in by_view.items():
+        threshold = model["groups"][f"right/{view}"]["high_threshold"]
+        assert threshold == math.nextafter(max(risks), 2.0)
+        assert all(risk < threshold for risk in risks)
+
+
 @pytest.mark.parametrize(
     ("view", "label"),
     [("front_secondary", "normal"), ("back_secondary", "defect")],
@@ -268,6 +357,19 @@ def test_prediction_preserves_continuous_evidence_and_best_template(tmp_path: Pa
     assert result.best_template.startswith("templates/left/front/")
     assert len(result.best_template_sha256) == 64
     assert len(result.offset) == 2
+
+
+def test_prepared_template_gate_is_numerically_identical(tmp_path: Path) -> None:
+    """Caching model and template bytes must not alter evidence or decisions."""
+    model_dir = _train(tmp_path)
+    image = tmp_path / "query.png"
+    _write(image, _pattern())
+
+    expected = predict_template_gate(model_dir, image, hand="left", view="front")
+    prepared = PreparedTemplateGate(model_dir, hand="left", views=("front",))
+    actual = prepared.evaluate(image, "left", "front")
+
+    assert actual == expected
 
 
 def test_dual_threshold_boundary_statuses(tmp_path: Path) -> None:

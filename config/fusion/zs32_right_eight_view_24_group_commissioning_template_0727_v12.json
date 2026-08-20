@@ -1,0 +1,113 @@
+{
+  "profile": "zs32_right_eight_view_24_group_commissioning_template_0727_v12",
+  "commissioning_only": true,
+  "production_release_allowed": false,
+  "template_review_allows_downstream": true,
+  "identity": {
+    "product": "ZS32",
+    "profile": "zs32_right_eight_view_24_group_commissioning_template_0727_v12",
+    "allowed_hands": [
+      "right"
+    ],
+    "required_side": "zs32"
+  },
+  "ok_requires": {
+    "required_view_keys": [
+      "zs32:front",
+      "zs32:front_left",
+      "zs32:front_right",
+      "zs32:front_secondary",
+      "zs32:back",
+      "zs32:back_left",
+      "zs32:back_right",
+      "zs32:back_secondary"
+    ]
+  },
+  "required_branches_by_view": {
+    "front": [
+      "template_match",
+      "anomaly_front",
+      "yolo"
+    ],
+    "front_left": [
+      "template_match",
+      "anomaly_front_left",
+      "yolo"
+    ],
+    "front_right": [
+      "template_match",
+      "anomaly_front_right",
+      "yolo"
+    ],
+    "front_secondary": [
+      "template_match",
+      "anomaly_front_secondary",
+      "yolo"
+    ],
+    "back": [
+      "template_match",
+      "anomaly_back",
+      "yolo"
+    ],
+    "back_left": [
+      "template_match",
+      "anomaly_back_left",
+      "yolo"
+    ],
+    "back_right": [
+      "template_match",
+      "anomaly_back_right",
+      "yolo"
+    ],
+    "back_secondary": [
+      "template_match",
+      "anomaly_back_secondary",
+      "yolo"
+    ]
+  },
+  "expected_versions": [],
+  "branch_order": [
+    "template_match",
+    "yolo",
+    "anomaly_front",
+    "anomaly_front_left",
+    "anomaly_front_right",
+    "anomaly_front_secondary",
+    "anomaly_back",
+    "anomaly_back_left",
+    "anomaly_back_right",
+    "anomaly_back_secondary"
+  ],
+  "rules": {
+    "template_match": {
+      "status_on_positive": "NG_TEMPLATE"
+    },
+    "yolo": {
+      "status_on_positive": "NG_YOLO"
+    },
+    "anomaly_front": {
+      "status_on_positive": "NG_ANOMALY"
+    },
+    "anomaly_front_left": {
+      "status_on_positive": "NG_ANOMALY"
+    },
+    "anomaly_front_right": {
+      "status_on_positive": "NG_ANOMALY"
+    },
+    "anomaly_front_secondary": {
+      "status_on_positive": "NG_ANOMALY"
+    },
+    "anomaly_back": {
+      "status_on_positive": "NG_ANOMALY"
+    },
+    "anomaly_back_left": {
+      "status_on_positive": "NG_ANOMALY"
+    },
+    "anomaly_back_right": {
+      "status_on_positive": "NG_ANOMALY"
+    },
+    "anomaly_back_secondary": {
+      "status_on_positive": "NG_ANOMALY"
+    }
+  }
+}

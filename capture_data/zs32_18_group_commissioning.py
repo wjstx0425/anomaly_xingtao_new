@@ -10,11 +10,10 @@ import hashlib
 import json
 import math
 import shutil
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import Any, Mapping
 
 from capture_data.fusion_calibration import THRESHOLD_ARTIFACT_SCHEMA, THRESHOLD_ARTIFACT_VERSION
-if TYPE_CHECKING:
-    from pathlib import Path
 
 GroupKey = tuple[str, str, str, str, str]
 LEGACY_VIEWS = ("front", "front_left", "front_right", "back", "back_left", "back_right")
@@ -116,26 +115,32 @@ def _validate_profile(profile: dict[str, Any]) -> tuple[list[str], list[dict[str
     views = list(by_view)
     if tuple(views) not in {LEGACY_VIEWS, EIGHT_VIEWS}:
         raise ValueError("commissioning profile must use the exact legacy six-view or canonical eight-view order")
+    normalized_by_view = {}
+    for view in views:
+        branches = tuple(by_view[view]) if isinstance(by_view[view], list) else ()
+        required = (f"anomaly_{view}", "yolo")
+        allowed = {("template_match", *required), required}
+        if view in {"front_secondary", "back_secondary"}:
+            allowed.add(("yolo",))
+        if branches not in allowed:
+            raise ValueError(f"commissioning profile has unexpected branches for {view}")
+        normalized_by_view[view] = branches
     records = profile.get("expected_versions")
-    expected_count = len(views) * 3
+    expected_count = sum(len(branches) for branches in normalized_by_view.values())
     if (
         not isinstance(records, list)
         or len(records) != expected_count
         or not all(isinstance(item, dict) for item in records)
     ):
         raise ValueError(f"commissioning profile must contain exactly {expected_count} expected version records")
-    for view in views:
-        expected = {"template_match", f"anomaly_{view}", "yolo"}
-        if set(by_view[view]) != expected:
-            raise ValueError(f"commissioning profile has unexpected branches for {view}")
     keys = [_group_key(record) for record in records]
     if len(set(keys)) != expected_count:
         raise ValueError("commissioning profile contains duplicate identities")
     actual_pairs = {(str(record["view"]), str(record["branch"])) for record in records}
     expected_pairs = {
         (view, branch)
-        for view in views
-        for branch in ("template_match", f"anomaly_{view}", "yolo")
+        for view, branches in normalized_by_view.items()
+        for branch in branches
     }
     if actual_pairs != expected_pairs or any(record.get("hand") != "right" for record in records):
         raise ValueError("commissioning profile must contain exact right-hand view and branch identities")
@@ -188,15 +193,142 @@ def _validate_runtime_contract(
                 raise ValueError(f"runtime version mismatch for {view}:{branch}:{field}")
 
 
-def _threshold_map(path: Path, expected_groups: set[GroupKey]) -> dict[GroupKey, dict[str, Any]]:
+def _threshold_map(
+    path: Path,
+    expected_groups: set[GroupKey],
+    *,
+    allow_model_version_rebind: bool = False,
+    allow_roi_version_rebind: bool = False,
+) -> dict[GroupKey, dict[str, Any]]:
     payload = _read_object(path)
     records = payload.get("thresholds")
     if not isinstance(records, list) or not all(isinstance(item, dict) for item in records):
         raise TypeError(f"threshold records must be objects: {path}")
     output = {_group_key(record): record for record in records}
-    if len(output) != len(records) or set(output) != expected_groups:
-        raise ValueError(f"source threshold groups do not match the required commissioning groups: {path}")
-    return output
+    if len(output) != len(records):
+        raise ValueError(f"source threshold groups contain duplicate identities: {path}")
+    if allow_model_version_rebind or allow_roi_version_rebind:
+        rebound: dict[GroupKey, dict[str, Any]] = {}
+        for expected in expected_groups:
+            candidates = [
+                record
+                for key, record in output.items()
+                if key[:3] == expected[:3]
+                and (allow_model_version_rebind or key[3] == expected[3])
+                and (allow_roi_version_rebind or key[4] == expected[4])
+            ]
+            if len(candidates) != 1:
+                raise ValueError(f"source threshold groups cannot be uniquely rebound to {expected}: {path}")
+            rebound[expected] = candidates[0]
+        return rebound
+    if not expected_groups.issubset(output):
+        raise ValueError(
+            f"source threshold groups do not match: they do not contain the required commissioning groups: {path}",
+        )
+    return {key: output[key] for key in expected_groups}
+
+
+def _validate_roi_version_rebind(
+    runtime_config_path: Path,
+    runtime: dict[str, Any],
+    template_patchcore_thresholds_path: Path,
+    yolo_auxiliary_thresholds_path: Path,
+    yolo_sidecar: dict[str, Any],
+    *,
+    allow_roi_version_rebind: bool,
+    source_roi_config_path: Path | None,
+) -> dict[str, Any] | None:
+    if not allow_roi_version_rebind:
+        if source_roi_config_path is not None:
+            raise ValueError("source ROI config requires explicit ROI-version-rebind authorization")
+        return None
+    if source_roi_config_path is None:
+        raise ValueError("ROI-version rebind requires an explicit source ROI config")
+
+    source_path = source_roi_config_path.resolve()
+    source_sha256 = _sha256(source_path)
+    base_root = template_patchcore_thresholds_path.resolve().parent.parent
+    yolo_root = yolo_auxiliary_thresholds_path.resolve().parent.parent
+    if base_root != yolo_root:
+        raise ValueError("ROI-version rebind requires Stage33 threshold artifacts from the same commissioning run root")
+    run_contract_path = base_root / "commissioning_run_contract.json"
+    run_contract_sha256 = _sha256(run_contract_path)
+    if yolo_sidecar.get("commissioning_run_contract_sha256") != run_contract_sha256:
+        raise ValueError("Stage33 commissioning run contract SHA256 differs from the signed YOLO publication")
+    run_contract = _read_object(run_contract_path)
+    if run_contract.get("commissioning_only") is not True:
+        raise ValueError("Stage33 commissioning run contract must be commissioning-only")
+    source_runtime_value = run_contract.get("runtime_config")
+    source_runtime_sha256 = run_contract.get("runtime_config_sha256")
+    if not isinstance(source_runtime_value, str) or not _valid_sha256(source_runtime_sha256):
+        raise ValueError("Stage33 commissioning run contract has no valid source runtime binding")
+    source_runtime_path = Path(source_runtime_value)
+    if not source_runtime_path.is_absolute():
+        source_runtime_path = run_contract_path.parent / source_runtime_path
+    source_runtime_path = source_runtime_path.resolve()
+    if _sha256(source_runtime_path) != source_runtime_sha256:
+        raise ValueError("source runtime config SHA256 differs from the Stage33 commissioning run contract")
+    source_runtime = _read_object(source_runtime_path)
+    source_runtime_versions = source_runtime.get("versions")
+    if not isinstance(source_runtime_versions, dict):
+        raise ValueError("source runtime config has no ROI version contract")
+
+    expected_source_versions = {
+        template_patchcore_thresholds_path: source_runtime_versions.get("patchcore_roi"),
+        yolo_auxiliary_thresholds_path: source_runtime_versions.get("yolo_roi"),
+    }
+    for threshold_path, expected_roi_version in expected_source_versions.items():
+        if not isinstance(expected_roi_version, str) or not expected_roi_version:
+            raise ValueError("source runtime config has no valid ROI version identity")
+        threshold_records = _read_object(threshold_path).get("thresholds")
+        if not isinstance(threshold_records, list) or any(not isinstance(record, dict) for record in threshold_records):
+            raise TypeError(f"threshold records must be objects: {threshold_path}")
+        actual_roi_versions = {record.get("roi_version") for record in threshold_records}
+        if actual_roi_versions != {expected_roi_version}:
+            raise ValueError(f"source threshold ROI identities differ from the signed source runtime: {threshold_path}")
+
+    bindings: dict[str, dict[str, str]] = {
+        "commissioning_run_contract": {
+            "path": str(run_contract_path.resolve()),
+            "sha256": run_contract_sha256,
+        },
+        "source_runtime_config": {
+            "path": str(source_runtime_path),
+            "sha256": str(source_runtime_sha256),
+        },
+    }
+    for field in ("patchcore_roi_config", "yolo_roi_config"):
+        value = source_runtime.get(field)
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"source runtime config has no valid {field} for ROI-version rebind")
+        source_runtime_roi_path = Path(value)
+        if not source_runtime_roi_path.is_absolute():
+            source_runtime_roi_path = source_runtime_path.parent / source_runtime_roi_path
+        source_runtime_roi_path = source_runtime_roi_path.resolve()
+        source_runtime_roi_sha256 = _sha256(source_runtime_roi_path)
+        if source_runtime_roi_sha256 != source_sha256:
+            raise ValueError(f"source runtime {field} SHA256 differs from the explicit source ROI config")
+        bindings[f"source_{field}"] = {
+            "path": str(source_runtime_roi_path),
+            "sha256": source_runtime_roi_sha256,
+        }
+    for field in ("patchcore_roi_config", "yolo_roi_config"):
+        value = runtime.get(field)
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"runtime config has no valid {field} for ROI-version rebind")
+        runtime_roi_path = Path(value)
+        if not runtime_roi_path.is_absolute():
+            runtime_roi_path = runtime_config_path.parent / runtime_roi_path
+        runtime_roi_path = runtime_roi_path.resolve()
+        runtime_roi_sha256 = _sha256(runtime_roi_path)
+        if runtime_roi_sha256 != source_sha256:
+            raise ValueError(f"{field} SHA256 differs from the explicit source ROI config")
+        bindings[field] = {"path": str(runtime_roi_path), "sha256": runtime_roi_sha256}
+    return {
+        "authorized": True,
+        "source_roi_config": {"path": str(source_path), "sha256": source_sha256},
+        **bindings,
+    }
 
 
 def _validate_split_contract(payload: dict[str, Any], path: Path) -> None:
@@ -264,11 +396,24 @@ def _finite_threshold(value: object, field: str) -> float:
     return numeric
 
 
+def _nonnegative_count(value: object, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{field} must be a non-negative integer")
+    if value < 0:
+        raise ValueError(f"{field} must be a non-negative integer")
+    return value
+
+
 def _compose_records(
     expected: list[dict[str, Any]],
     template: dict[str, Any],
     base: dict[GroupKey, dict[str, Any]],
     yolo: dict[GroupKey, dict[str, Any]],
+    *,
+    allow_yolo_model_rebind: bool = False,
+    allow_patchcore_model_rebind: bool = False,
+    yolo_threshold_override: float | None = None,
+    patchcore_threshold_overrides: Mapping[str, tuple[float, float]] | None = None,
 ) -> list[dict[str, Any]]:
     groups = template.get("groups")
     if not isinstance(groups, dict):
@@ -286,18 +431,51 @@ def _compose_records(
             low = _finite_threshold(model_group.get("low_threshold"), "template low_threshold")
             high = _finite_threshold(model_group.get("high_threshold"), "template high_threshold")
             provenance = "online_template_model"
+            normal_count = _nonnegative_count(
+                model_group.get("calibration_normal_count"),
+                "template calibration_normal_count",
+            )
+            defect_count = _nonnegative_count(
+                model_group.get("calibration_defect_count"),
+                "template calibration_defect_count",
+            )
+            count_provenance = "template_model_calibration"
         elif branch == "yolo":
             source = yolo[key]
-            low = high = _finite_threshold(source.get("threshold"), "YOLO threshold")
-            provenance = "stage33_high_precision_auxiliary"
+            fit = source.get("fit") if isinstance(source.get("fit"), dict) else {}
+            if yolo_threshold_override is None:
+                low = high = _finite_threshold(source.get("threshold"), "YOLO threshold")
+                provenance = "stage33_high_precision_auxiliary"
+            else:
+                low = high = yolo_threshold_override
+                provenance = "manual_demo_override"
+            if allow_yolo_model_rebind:
+                normal_count = defect_count = 0
+                count_provenance = "unavailable_for_rebound_model"
+            else:
+                normal_count = int(source.get("normal_count", fit.get("negative_count", 0)))
+                defect_count = int(source.get("defect_count", fit.get("positive_count", 0)))
+                count_provenance = "stage33_threshold_record"
         else:
             source = base[key]
-            low = _finite_threshold(source.get("low_threshold"), "PatchCore low_threshold")
-            high = _finite_threshold(source.get("high_threshold"), "PatchCore high_threshold")
-            provenance = "stage33_template_patchcore_calibration"
+            fit = source.get("fit") if isinstance(source.get("fit"), dict) else {}
+            override = (patchcore_threshold_overrides or {}).get(view)
+            if override is None:
+                low = _finite_threshold(source.get("low_threshold"), "PatchCore low_threshold")
+                high = _finite_threshold(source.get("high_threshold"), "PatchCore high_threshold")
+                provenance = "stage33_template_patchcore_calibration"
+            else:
+                low, high = override
+                provenance = "manual_demo_override"
+            if allow_patchcore_model_rebind:
+                normal_count = defect_count = 0
+                count_provenance = "unavailable_for_rebound_model"
+            else:
+                normal_count = int(source.get("normal_count", fit.get("negative_count", 0)))
+                defect_count = int(source.get("defect_count", fit.get("positive_count", 0)))
+                count_provenance = "stage33_threshold_record"
         if low > high:
             raise ValueError(f"low threshold exceeds high threshold for {key}")
-        fit = source.get("fit") if isinstance(source.get("fit"), dict) else {}
         records.append(
             {
                 "hand": expectation["hand"],
@@ -307,8 +485,9 @@ def _compose_records(
                 "roi_version": expectation["roi_version"],
                 "low_threshold": low,
                 "high_threshold": high,
-                "normal_count": int(source.get("normal_count", fit.get("negative_count", 0))),
-                "defect_count": int(source.get("defect_count", fit.get("positive_count", 0))),
+                "normal_count": normal_count,
+                "defect_count": defect_count,
+                "count_provenance": count_provenance,
                 "status": "ok",
                 "commissioning_source": provenance,
             },
@@ -325,11 +504,30 @@ def publish_commissioning_artifact(
     output_dir: Path,
     *,
     allow_test_leakage: bool = False,
+    allow_yolo_model_rebind: bool = False,
+    allow_patchcore_model_rebind: bool = False,
+    allow_roi_version_rebind: bool = False,
+    source_roi_config_path: Path | None = None,
+    yolo_threshold_override: float | None = None,
+    patchcore_threshold_overrides: Mapping[str, tuple[float, float]] | None = None,
 ) -> Path:
     """Compose and atomically publish a non-production Stage18-compatible artifact."""
     if output_dir.exists():
         raise FileExistsError(f"commissioning output already exists: {output_dir}")
     profile = _read_object(profile_path)
+    if yolo_threshold_override is not None:
+        yolo_threshold_override = _finite_threshold(yolo_threshold_override, "YOLO threshold override")
+        if not 0 < yolo_threshold_override <= 1:
+            raise ValueError("YOLO threshold override must be within (0, 1]")
+    patchcore_overrides = dict(patchcore_threshold_overrides or {})
+    for view, thresholds in patchcore_overrides.items():
+        if view not in EIGHT_VIEWS or len(thresholds) != 2:
+            raise ValueError(f"invalid PatchCore threshold override view: {view!r}")
+        low = _finite_threshold(thresholds[0], f"PatchCore {view} low override")
+        high = _finite_threshold(thresholds[1], f"PatchCore {view} high override")
+        if not 0 <= low <= high <= 2:
+            raise ValueError(f"PatchCore threshold override must satisfy 0 <= low <= high <= 2 for {view}")
+        patchcore_overrides[view] = (low, high)
     views, expected = _validate_profile(profile)
     runtime = _read_object(runtime_config_path)
     template = _read_object(template_model_path)
@@ -344,13 +542,44 @@ def publish_commissioning_artifact(
         yolo_auxiliary_thresholds_path,
         allow_test_leakage=allow_test_leakage,
     )
+    roi_version_rebind = _validate_roi_version_rebind(
+        runtime_config_path,
+        runtime,
+        template_patchcore_thresholds_path,
+        yolo_auxiliary_thresholds_path,
+        yolo_sidecar,
+        allow_roi_version_rebind=allow_roi_version_rebind,
+        source_roi_config_path=source_roi_config_path,
+    )
 
     all_keys = {_group_key(record) for record in expected}
     yolo_keys = {key for key in all_keys if key[2] == "yolo"}
     base_keys = all_keys - yolo_keys
-    base = _threshold_map(template_patchcore_thresholds_path, base_keys)
-    yolo = _threshold_map(yolo_auxiliary_thresholds_path, yolo_keys)
-    records = _compose_records(expected, template, base, yolo)
+    base = _threshold_map(
+        template_patchcore_thresholds_path,
+        base_keys,
+        allow_model_version_rebind=allow_patchcore_model_rebind,
+        allow_roi_version_rebind=allow_roi_version_rebind,
+    )
+    yolo = _threshold_map(
+        yolo_auxiliary_thresholds_path,
+        yolo_keys,
+        allow_model_version_rebind=allow_yolo_model_rebind,
+        allow_roi_version_rebind=allow_roi_version_rebind,
+    )
+    records = _compose_records(
+        expected,
+        template,
+        base,
+        yolo,
+        allow_yolo_model_rebind=allow_yolo_model_rebind,
+        allow_patchcore_model_rebind=allow_patchcore_model_rebind,
+        yolo_threshold_override=yolo_threshold_override,
+        patchcore_threshold_overrides=patchcore_overrides,
+    )
+    required_patchcore_views = {str(record["view"]) for record in expected if str(record["branch"]).startswith("anomaly_")}
+    if not set(patchcore_overrides).issubset(required_patchcore_views):
+        raise ValueError("PatchCore threshold overrides must target required PatchCore views")
     profile_sha256 = _sha256(profile_path)
     deployment_contract = {
         **profile["identity"],
@@ -371,6 +600,15 @@ def publish_commissioning_artifact(
         "evaluation_split": "test_reused_for_selection" if test_leakage else "test",
         "test_used_for_selection": test_leakage,
         "data_leakage": test_leakage,
+        "yolo_threshold_model_rebound": allow_yolo_model_rebind,
+        "patchcore_threshold_model_rebound": allow_patchcore_model_rebind,
+        "roi_version_rebound": allow_roi_version_rebind,
+        "roi_version_rebind": roi_version_rebind,
+        "yolo_threshold_override": yolo_threshold_override,
+        "patchcore_threshold_overrides": {
+            view: {"low_threshold": low, "high_threshold": high}
+            for view, (low, high) in sorted(patchcore_overrides.items())
+        },
         "leakage_notice": (
             "TEST DATA WAS USED FOR YOLO THRESHOLD SELECTION; THIS ARTIFACT HAS NO HELD-OUT YOLO EVALUATION."
             if test_leakage
@@ -385,6 +623,18 @@ def publish_commissioning_artifact(
         "source_artifacts": {
             "runtime_config": {"path": str(runtime_config_path.resolve()), "sha256": _sha256(runtime_config_path)},
             "template_model": {"path": str(template_model_path.resolve()), "sha256": _sha256(template_model_path)},
+            **(
+                {
+                    name: roi_version_rebind[name]
+                    for name in (
+                        "source_roi_config",
+                        "commissioning_run_contract",
+                        "source_runtime_config",
+                    )
+                }
+                if roi_version_rebind is not None
+                else {}
+            ),
             "template_patchcore_thresholds": {
                 "path": str(template_patchcore_thresholds_path.resolve()),
                 "sha256": _sha256(template_patchcore_thresholds_path),
@@ -405,12 +655,42 @@ def publish_commissioning_artifact(
         "production_release_allowed": False,
         "test_used_for_selection": test_leakage,
         "data_leakage": test_leakage,
+        "roi_version_rebound": allow_roi_version_rebind,
         "included_branches": ["template_match", "patchcore", "yolo"],
         "deferred_branches": ["quality_gate", "registration", "geometry"],
         "limitations": [
             f"Inspection completeness applies only to the explicit {len(records)}-group commissioning profile.",
             "This artifact must never be used as a production release approval.",
             "YOLO thresholds are image-presence candidates selected from small commissioning samples.",
+            *(
+                [
+                    "ROI version identities were explicitly rebound only after byte-identical source/runtime "
+                    "ROI verification through the signed Stage33 run contract "
+                    f"(SHA256 {roi_version_rebind['source_roi_config']['sha256']}).",
+                ]
+                if roi_version_rebind is not None
+                else []
+            ),
+            *(
+                ["YOLO thresholds were rebound from a different model version for demo-only commissioning."]
+                if allow_yolo_model_rebind
+                else []
+            ),
+            *(
+                [f"YOLO thresholds were manually overridden to {yolo_threshold_override} for demo use."]
+                if yolo_threshold_override is not None
+                else []
+            ),
+            *(
+                [f"PatchCore thresholds were manually overridden for: {', '.join(sorted(patchcore_overrides))}."]
+                if patchcore_overrides
+                else []
+            ),
+            *(
+                ["PatchCore thresholds were rebound from different model versions for demo-only commissioning."]
+                if allow_patchcore_model_rebind
+                else []
+            ),
             *(
                 ["TEST DATA WAS USED FOR YOLO THRESHOLD SELECTION; reported YOLO metrics are not held-out."]
                 if test_leakage

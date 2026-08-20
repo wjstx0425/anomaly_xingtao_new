@@ -19,11 +19,26 @@ from zs32_inspection.domain.views import CANONICAL_VIEWS
 
 DOWNSTREAM_BRANCHES = ("PatchCore", "YOLO", "geometry")
 TEMPLATE_BRANCH = "template_match"
+_TEMPLATE_SKIPPED_PROFILES = {
+    "zs32-right-20-commissioning",
+    "zs32-right-22-commissioning",
+    "zs32_right_eight_view_20_group_commissioning_v1",
+    "zs32_right_eight_view_22_group_commissioning_v1",
+}
+_SECONDARY_VIEWS = {"front_secondary", "back_secondary"}
 VALID_HANDS = {"right"}
 _PASS_STATUSES = {"PASS"}
 _REVIEW_STATUSES = {"REVIEW", "WARN", "WARNING", "SUSPECT", "GRAY", "ERROR"}
 _NG_STATUSES = {"NG", "FAIL", "FAILED", "DEFECT", "STRONG", "NG_TEMPLATE"}
 _DOWNSTREAM_STATUSES = {"OK", "REVIEW", "SUSPECT", "RETAKE", "INVALID_CAPTURE"}
+
+
+def _strict_finite_number(value: object) -> float | None:
+    """Return a finite number without accepting booleans or coercible strings."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    number = float(value)
+    return number if isfinite(number) else None
 
 
 @dataclass(frozen=True)
@@ -114,16 +129,15 @@ def _normalize_gate_result(  # noqa: C901
         if status != "PASS" and not reason:
             reason = f"template gate returned {normalized or 'an empty status'}"
     if raw_status not in {None, ""} and status in {"PASS", "REVIEW", "NG_TEMPLATE"}:
-        try:
-            risk = float(risk_score)
-            similarity = float(evidence["similarity"])
-            low = float(evidence["low_threshold"])
-            high = float(evidence["high_threshold"])
-        except (KeyError, TypeError, ValueError):
+        risk = _strict_finite_number(risk_score)
+        similarity = _strict_finite_number(evidence.get("similarity"))
+        low = _strict_finite_number(evidence.get("low_threshold"))
+        high = _strict_finite_number(evidence.get("high_threshold"))
+        if any(value is None for value in (risk, similarity, low, high)):
             status = "REVIEW"
             reason = "template gate result is missing continuous score or dual thresholds"
         else:
-            if not all(isfinite(value) for value in (risk, similarity, low, high)) or not 0 <= low <= high <= 2:
+            if not 0 <= low <= high <= 2:
                 status = "REVIEW"
                 reason = "template gate result contains invalid continuous evidence"
             else:
@@ -202,6 +216,11 @@ def template_results_to_branch_rows(
     for view in CANONICAL_VIEWS:
         result = results_by_view[view]
         status = str(result.get("status", "")).upper()
+        if profile in _TEMPLATE_SKIPPED_PROFILES and view in _SECONDARY_VIEWS:
+            if status != "SKIPPED":
+                msg = f"22-group profile requires SKIPPED template result for {view}"
+                raise ValueError(msg)
+            continue
         if status not in {"PASS", "REVIEW", "NG_TEMPLATE"}:
             msg = f"unsupported template result status for {view}: {status or 'missing'}"
             raise ValueError(msg)

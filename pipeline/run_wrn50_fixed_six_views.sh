@@ -25,14 +25,12 @@ PATCHCORE_NUM_NEIGHBORS="${PATCHCORE_NUM_NEIGHBORS:-9}"
 PATCHCORE_PRECISION="${PATCHCORE_PRECISION:-float16}"
 PATCHCORE_BATCH_SIZE="${PATCHCORE_BATCH_SIZE:-4}"
 EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-4}"
-VIEWS=(
-    right_front
-    right_front_left
-    right_front_right
-    right_back
-    right_back_left
-    right_back_right
-)
+DEFAULT_VIEWS="right_front right_front_left right_front_right right_back right_back_left right_back_right"
+read -r -a VIEWS <<< "${PATCHCORE_VIEWS:-$DEFAULT_VIEWS}"
+if (( ${#VIEWS[@]} == 0 )); then
+    echo "PATCHCORE_VIEWS must contain at least one view." >&2
+    exit 2
+fi
 
 mkdir -p "$RUN_BASE"
 failed_views=()
@@ -101,16 +99,18 @@ for view in "${VIEWS[@]}"; do
     fi
 done
 
-merged_summary="${RUN_BASE}/six_view_summary.csv"
+SUMMARY_NAME="${PATCHCORE_SUMMARY_NAME:-six_view_summary.csv}"
+merged_summary="${RUN_BASE}/${SUMMARY_NAME}"
 if [[ "$all_summaries" == true && ! -e "$merged_summary" ]]; then
-    "$PYTHON_BIN" - "$RUN_BASE" "$SUFFIX" "${VIEWS[@]}" <<'PY'
+    "$PYTHON_BIN" - "$RUN_BASE" "$SUFFIX" "$SUMMARY_NAME" "${VIEWS[@]}" <<'PY'
 import csv
 import sys
 from pathlib import Path
 
 run_base = Path(sys.argv[1])
 suffix = sys.argv[2]
-views = sys.argv[3:]
+summary_name = Path(sys.argv[3]).name
+views = sys.argv[4:]
 rows = []
 expected_model = f"patchcore_{suffix}"
 required_fields = (
@@ -166,7 +166,7 @@ preferred_fields = [
     "summary_csv",
 ]
 extra_fields = sorted({key for row in rows for key in row} - set(preferred_fields))
-output_path = run_base / "six_view_summary.csv"
+output_path = run_base / summary_name
 with output_path.open("x", newline="", encoding="utf-8") as file:
     writer = csv.DictWriter(file, fieldnames=[*preferred_fields, *extra_fields])
     writer.writeheader()

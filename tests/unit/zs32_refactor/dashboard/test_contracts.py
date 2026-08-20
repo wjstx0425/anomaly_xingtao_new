@@ -61,7 +61,6 @@ def test_inspection_contract_preserves_eight_ordered_views_and_optional_scores(
         ViewResult(
             view=view,
             source_path=tmp_path / f"{view}.png",
-            source_sha256="a" * 64,
             source_shape=(1080, 1440),
             model_supported=True,
             branches={"patchcore": branch},
@@ -92,7 +91,6 @@ def _make_view(tmp_path: Path, view: str, *, model_supported: bool | None = None
     return ViewResult(
         view=view,
         source_path=tmp_path / f"{view}.png",
-        source_sha256="a" * 64,
         source_shape=(1080, 1440),
         model_supported=True if model_supported is None else model_supported,
         branches={},

@@ -41,6 +41,83 @@ def test_live_headless_renders_without_highgui(monkeypatch: pytest.MonkeyPatch) 
     assert dashboard._run(["--live", "--part-id", "part-1", "--no-gui"]) == 0
 
 
+def test_live_demo_config_is_forwarded_to_controller(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    received: dict[str, object] = {}
+
+    class Controller:
+        def __init__(self, work_dir: Path, **kwargs: object) -> None:
+            received["work_dir"] = work_dir
+            received.update(kwargs)
+
+    def run_dashboard(*_args: object, **kwargs: object) -> None:
+        received["controller"] = kwargs["live_controller"]
+        received["part_id"] = kwargs["part_id"]
+
+    monkeypatch.setattr(dashboard, "Stage35Controller", Controller)
+    monkeypatch.setattr(dashboard, "run_dashboard", run_dashboard)
+
+    result = dashboard._run([
+        "--live",
+        "--part-id",
+        "part-22",
+        "--demo-config",
+        "configs/zs32/custom_demo.json",
+    ])
+
+    assert result == 0
+    assert received["demo_config"] == Path("configs/zs32/custom_demo.json")
+    assert received["part_id"] == "part-22"
+
+
+def test_live_uses_default_demo_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    received: dict[str, object] = {}
+
+    class Controller:
+        def __init__(self, _work_dir: Path, **kwargs: object) -> None:
+            received.update(kwargs)
+
+    monkeypatch.setattr(dashboard, "Stage35Controller", Controller)
+    monkeypatch.setattr(dashboard, "run_dashboard", lambda *_args, **_kwargs: None)
+
+    assert dashboard._run(["--live", "--part-id", "part-1"]) == 0
+    assert received["demo_config"] == Path("configs/zs32/zs32_demo.json")
+
+
+def test_runtime_config_option_is_removed() -> None:
+    with pytest.raises(SystemExit):
+        dashboard._parser().parse_args([
+            "--live",
+            "--part-id",
+            "part-1",
+            "--runtime-config",
+            "runtime.json",
+        ])
+
+
+@pytest.mark.parametrize(
+    ("option", "value"),
+    [
+        ("--part-id", "part-22"),
+        ("--demo-config", "demo.json"),
+    ],
+)
+def test_offline_rejects_live_only_options(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    option: str,
+    value: str,
+) -> None:
+    result = dashboard._run(["--result-dir", str(tmp_path), option, value])
+
+    assert result == 2
+    assert "may only be used with --live" in capsys.readouterr().err
+
+
 def test_offline_no_gui_saves_decodable_screenshot(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

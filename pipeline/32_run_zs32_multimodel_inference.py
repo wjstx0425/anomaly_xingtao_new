@@ -17,7 +17,9 @@ import math
 import shutil
 import sys
 import tempfile
-from collections.abc import Mapping
+import time
+from collections.abc import Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -35,14 +37,80 @@ from capture_data.zs32_inspection_orchestrator import (  # noqa: E402
     write_template_match_csv,
 )
 from capture_data.zs32_model_runtime import ZS32ModelRuntime, load_runtime_config  # noqa: E402
-from capture_data.zs32_template_gate import TemplateGate  # noqa: E402
+from capture_data.zs32_template_gate import PreparedTemplateGate, TemplateGate  # noqa: E402
 from zs32_inspection.capture.contracts import utc_now  # noqa: E402
 from zs32_inspection.dashboard.contracts import ProgressRecord  # noqa: E402
 from zs32_inspection.dashboard.control import write_progress  # noqa: E402
 from zs32_inspection.domain.views import CANONICAL_VIEWS  # noqa: E402
+from zs32_inspection.timing import TimingRecorder, print_timing_summary  # noqa: E402
 
 DEFAULT_RUNTIME_CONFIG = REPO_ROOT / "config/fusion/zs32_runtime_models_eight_view.json"
 EIGHT_VIEW_COMMISSIONING_FUSION_PROFILE = "zs32-right-24-commissioning"
+SECONDARY_SKIPPED_FUSION_PROFILE = "zs32-right-22-commissioning"
+SECONDARY_MODELS_SKIPPED_FUSION_PROFILE = "zs32-right-20-commissioning"
+COMMISSIONING_FUSION_PROFILES = (
+    EIGHT_VIEW_COMMISSIONING_FUSION_PROFILE,
+    SECONDARY_SKIPPED_FUSION_PROFILE,
+    SECONDARY_MODELS_SKIPPED_FUSION_PROFILE,
+)
+SECONDARY_TEMPLATE_SKIPPED_FUSION_PROFILES = frozenset(
+    {SECONDARY_SKIPPED_FUSION_PROFILE, SECONDARY_MODELS_SKIPPED_FUSION_PROFILE},
+)
+SECONDARY_TEMPLATE_VIEWS = frozenset({"front_secondary", "back_secondary"})
+SECONDARY_TEMPLATE_SKIP_REASON = "Template disabled for changed secondary commissioning view"
+PRIMARY_MODEL_VIEWS = tuple(view for view in CANONICAL_VIEWS if view not in SECONDARY_TEMPLATE_VIEWS)
+_PERSISTENT_RUNTIME: ZS32ModelRuntime | None = None
+_PERSISTENT_RUNTIME_CONFIG: Any | None = None
+_PERSISTENT_TEMPLATE_GATE: PreparedTemplateGate | None = None
+SOURCE_DECODE_WORKERS = 4
+TEMPLATE_INFERENCE_WORKERS = 6
+
+
+def prepare_persistent_runtime(
+    runtime_config: Path,
+    *,
+    accelerator: str = "gpu",
+    devices: int = 1,
+    yolo_device: str | None = "0",
+) -> tuple[ZS32ModelRuntime, dict[str, Any]]:
+    """Load exactly six PatchCore models and one YOLO model for worker reuse."""
+    global _PERSISTENT_RUNTIME, _PERSISTENT_RUNTIME_CONFIG
+    timing = TimingRecorder("inference_worker_startup")
+    total_started = time.perf_counter()
+    started = time.perf_counter()
+    config = load_runtime_config(runtime_config)
+    timing.add("runtime_config_load", time.perf_counter() - started)
+    runtime = ZS32ModelRuntime(
+        config,
+        accelerator=accelerator,
+        devices=devices,
+        yolo_device=yolo_device,
+        timing=timing,
+    )
+    runtime._ensure_backends(PRIMARY_MODEL_VIEWS)  # noqa: SLF001 - explicit worker preload boundary
+    _PERSISTENT_RUNTIME = runtime
+    _PERSISTENT_RUNTIME_CONFIG = config
+    return runtime, timing.payload(total_seconds=time.perf_counter() - total_started)
+
+
+def _attach_runtime_timing(runtime: ZS32ModelRuntime, timing: TimingRecorder) -> None:
+    """Move per-job timing onto already-loaded backend instances."""
+    runtime.timing = timing
+    for backend in (runtime._patchcore_backend, runtime._yolo_backend):  # noqa: SLF001
+        if backend is not None:
+            setattr(backend, "timing", timing)
+
+
+def prepare_persistent_template(model_dir: Path) -> tuple[PreparedTemplateGate, dict[str, Any]]:
+    """Load only six active Template groups for 20-group worker reuse."""
+    global _PERSISTENT_TEMPLATE_GATE
+    timing = TimingRecorder("template_worker_startup")
+    started = time.perf_counter()
+    gate = PreparedTemplateGate(model_dir, hand="right", views=PRIMARY_MODEL_VIEWS)
+    total = time.perf_counter() - started
+    timing.add("template_model_load", total)
+    _PERSISTENT_TEMPLATE_GATE = gate
+    return gate, timing.payload(total_seconds=total)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -75,7 +143,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--threshold-artifact", type=Path, help="Locked Stage-31 right-hand dual thresholds.")
     parser.add_argument(
         "--fusion-profile",
-        choices=(EIGHT_VIEW_COMMISSIONING_FUSION_PROFILE,),
+        choices=COMMISSIONING_FUSION_PROFILES,
         default=EIGHT_VIEW_COMMISSIONING_FUSION_PROFILE,
         help="Explicit Stage-18 right-hand fusion contract.",
     )
@@ -106,14 +174,19 @@ def _request_from_args(args: argparse.Namespace) -> InspectionRequest:
 def _template_status_allows_downstream(status: str, fusion_profile: str) -> bool:
     """Allow template GRAY evidence to be covered only in complementary commissioning."""
     normalized = status.strip().upper()
-    return normalized == "PASS" or (
-        fusion_profile == EIGHT_VIEW_COMMISSIONING_FUSION_PROFILE and normalized == "REVIEW"
-    )
+    return normalized == "PASS" or (fusion_profile in COMMISSIONING_FUSION_PROFILES and normalized == "REVIEW")
 
 
 def _template_result_allows_downstream(result: dict[str, Any], fusion_profile: str) -> bool:
     """Accept only complete PASS evidence or a genuine commissioning gray-band result."""
     status = str(result.get("status", "")).strip().upper()
+    if status == "SKIPPED":
+        return (
+            fusion_profile in SECONDARY_TEMPLATE_SKIPPED_FUSION_PROFILES
+            and result.get("view") in SECONDARY_TEMPLATE_VIEWS
+            and all(result.get(field) is None for field in ("score", "risk_score", "low_threshold", "high_threshold"))
+            and result.get("reason") == SECONDARY_TEMPLATE_SKIP_REASON
+        )
     if not _template_status_allows_downstream(status, fusion_profile):
         return False
     score = _finite_template_score(result.get("score"))
@@ -184,26 +257,52 @@ def _normalize_template_result_payload(result: Mapping[str, Any]) -> dict[str, A
     return {key: _json_safe_template_value(value, field=key) for key, value in result.items()}
 
 
+def _evaluate_template_view(gate: Any, crop_path: Path, hand: str, view: str) -> tuple[dict[str, Any], float | None]:
+    """Evaluate one independent Template view and preserve per-view fail-closed behavior."""
+    started = time.perf_counter()
+    try:
+        result = gate.evaluate(crop_path, hand, view).to_dict()
+    except Exception as error:  # noqa: BLE001 - gate errors always fail closed
+        return (
+            {
+                "view": view,
+                "status": "REVIEW",
+                "reason": f"template gate exception: {type(error).__name__}: {error}",
+            },
+            None,
+        )
+    return result, time.perf_counter() - started
+
+
 def _template_gate(
     request: InspectionRequest,
     runtime: ZS32ModelRuntime,
     model_dir: Path,
     workspace_parent: Path,
     fusion_profile: str,
+    timing: TimingRecorder | None = None,
+    source_images: Mapping[str, Any] | None = None,
 ) -> tuple[tuple[dict[str, Any], ...], Path]:
     """Crop and evaluate all eight template inputs before aggregate gating."""
-    if fusion_profile != EIGHT_VIEW_COMMISSIONING_FUSION_PROFILE:
-        raise ValueError("template gate requires the 24-group commissioning profile")
+    if fusion_profile not in COMMISSIONING_FUSION_PROFILES:
+        raise ValueError("template gate requires a supported commissioning profile")
     workspace_parent.mkdir(parents=True, exist_ok=True)
     workspace = Path(tempfile.mkdtemp(prefix=".zs32-template-first-", dir=workspace_parent))
-    gate = TemplateGate(model_dir.resolve())
-    results: list[dict[str, Any]] = []
+    gate = (
+        _PERSISTENT_TEMPLATE_GATE
+        if fusion_profile in SECONDARY_TEMPLATE_SKIPPED_FUSION_PROFILES
+        and _PERSISTENT_TEMPLATE_GATE is not None
+        and _PERSISTENT_TEMPLATE_GATE.model_dir == model_dir.resolve()
+        else TemplateGate(model_dir.resolve())
+    )
     crop_dir = workspace / "crops" / "template"
     crop_dir.mkdir(parents=True)
     try:
+        crop_paths: dict[str, Path] = {}
+        crop_started = time.perf_counter()
         for view in CANONICAL_VIEWS:
             source_path = Path(request.images[view]).resolve()
-            image = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
+            image = source_images[view] if source_images is not None else cv2.imread(str(source_path), cv2.IMREAD_COLOR)
             if image is None:
                 raise ValueError(f"could not read template source image: {source_path}")
             if (image.shape[1], image.shape[0]) != (runtime.config.image_width, runtime.config.image_height):
@@ -215,20 +314,85 @@ def _template_gate(
             crop_path = crop_dir / f"{view}.png"
             if not cv2.imwrite(str(crop_path), image[y1:y2, x1:x2]):
                 raise OSError(f"failed to write template crop: {crop_path}")
-            try:
-                raw_result = gate.evaluate(crop_path, request.hand, view)
-                result = raw_result.to_dict()
-            except Exception as error:  # noqa: BLE001 - gate errors always fail closed
-                result = {
-                    "view": view,
-                    "status": "REVIEW",
-                    "reason": f"template gate exception: {type(error).__name__}: {error}",
+            crop_paths[view] = crop_path
+        if timing is not None:
+            timing.add("template_crop_write", time.perf_counter() - crop_started)
+
+        if fusion_profile in SECONDARY_TEMPLATE_SKIPPED_FUSION_PROFILES:
+            evaluate_started = time.perf_counter()
+            with ThreadPoolExecutor(
+                max_workers=min(TEMPLATE_INFERENCE_WORKERS, len(PRIMARY_MODEL_VIEWS)),
+                thread_name_prefix="zs32-template",
+            ) as executor:
+                futures = {
+                    view: executor.submit(_evaluate_template_view, gate, crop_paths[view], request.hand, view)
+                    for view in PRIMARY_MODEL_VIEWS
                 }
+                evaluated = {view: futures[view].result() for view in PRIMARY_MODEL_VIEWS}
+            if timing is not None:
+                timing.add("template_parallel_evaluate_wall", time.perf_counter() - evaluate_started)
+        else:
+            evaluated = {
+                view: _evaluate_template_view(gate, crop_paths[view], request.hand, view)
+                for view in CANONICAL_VIEWS
+            }
+
+        results: list[dict[str, Any]] = []
+        for view in CANONICAL_VIEWS:
+            if view not in evaluated:
+                results.append(
+                    {
+                        "view": view,
+                        "status": "SKIPPED",
+                        "score": None,
+                        "risk_score": None,
+                        "low_threshold": None,
+                        "high_threshold": None,
+                        "reason": SECONDARY_TEMPLATE_SKIP_REASON,
+                    },
+                )
+                continue
+            result, elapsed = evaluated[view]
+            if timing is not None and elapsed is not None:
+                timing.add(f"template_inference/{view}", elapsed)
             results.append(result)
         return tuple(results), workspace
     except Exception:
         shutil.rmtree(workspace)
         raise
+
+
+def _decode_source_image(item: tuple[str, Path]) -> tuple[str, Path, Any]:
+    """Resolve and decode one source image without touching shared runtime state."""
+    view, source = item
+    path = Path(source).expanduser().resolve()
+    return view, path, cv2.imread(str(path), cv2.IMREAD_COLOR)
+
+
+def _load_source_images(request: InspectionRequest, runtime: ZS32ModelRuntime) -> dict[str, Any]:
+    """Decode the exact eight originals once for Template and model ROI generation."""
+    images: dict[str, Any] = {}
+    items = ((view, request.images[view]) for view in CANONICAL_VIEWS)
+    with ThreadPoolExecutor(
+        max_workers=min(SOURCE_DECODE_WORKERS, len(CANONICAL_VIEWS)),
+        thread_name_prefix="zs32-source-decode",
+    ) as executor:
+        for expected_view, (view, path, image) in zip(
+            CANONICAL_VIEWS,
+            executor.map(_decode_source_image, items),
+            strict=True,
+        ):
+            if view != expected_view:
+                raise RuntimeError(f"source decode order mismatch: expected {expected_view}, got {view}")
+            if image is None:
+                raise ValueError(f"could not read source image for {view}: {path}")
+            if (image.shape[1], image.shape[0]) != (runtime.config.image_width, runtime.config.image_height):
+                raise ValueError(
+                    f"source image dimensions for {view} must be "
+                    f"{runtime.config.image_width}x{runtime.config.image_height}",
+                )
+            images[view] = image
+    return images
 
 
 def _publish_template_stop(
@@ -295,12 +459,12 @@ def _publish_template_stop(
             raise ValueError(f"could not decode template-stop source image: {source}")
         template_source = Path(str(result.get("best_template_path", ""))).expanduser()
         template_branch: dict[str, Any] = {
-            "state": "error",
+            "state": "skipped" if result.get("status") == "SKIPPED" else "error",
             "status": str(result.get("status", "REVIEW")).upper(),
             "score": result.get("score"),
             "reason": str(result.get("reason") or "template evidence is incomplete"),
         }
-        if template_source.is_file():
+        if result.get("status") != "SKIPPED" and template_source.is_file():
             evidence_copy = template_evidence_dir / f"{view}{template_source.suffix or '.bin'}"
             shutil.copy2(template_source, evidence_copy)
             template_branch.update(
@@ -358,7 +522,12 @@ def _load_stage18() -> ModuleType:
     return module
 
 
-def _run_strict_fusion(args: argparse.Namespace, output_dir: Path, template_csv: Path) -> dict[str, Any]:
+def _run_strict_fusion(
+    args: argparse.Namespace,
+    output_dir: Path,
+    template_csv: Path,
+    timing: TimingRecorder | None = None,
+) -> dict[str, Any]:
     """Call Stage 18 in-process so one profile remains authoritative."""
     stage18 = _load_stage18()
     fusion_config = getattr(args, "fusion_config", None)
@@ -381,7 +550,10 @@ def _run_strict_fusion(args: argparse.Namespace, output_dir: Path, template_csv:
         str(output_dir / "fusion"),
     ]
     fusion_args = stage18.build_parser().parse_args(values)
+    started = time.perf_counter()
     decisions = stage18.run_fusion(fusion_args)
+    if timing is not None:
+        timing.add("stage18", time.perf_counter() - started)
     if len(decisions) != 1 or decisions[0].part_id != args.part_id:
         raise RuntimeError("strict fusion did not return exactly the requested physical part")
     decision = decisions[0]
@@ -406,8 +578,8 @@ def _run_strict_fusion(args: argparse.Namespace, output_dir: Path, template_csv:
 def _validate_mode(args: argparse.Namespace) -> None:
     if args.hand != "right":
         raise ValueError("strict eight-view Stage32 supports only hand='right'")
-    if args.fusion_profile != EIGHT_VIEW_COMMISSIONING_FUSION_PROFILE:
-        raise ValueError("strict eight-view Stage32 requires the 24-group commissioning profile")
+    if args.fusion_profile not in COMMISSIONING_FUSION_PROFILES:
+        raise ValueError("strict eight-view Stage32 requires a supported 20/22/24-group commissioning profile")
     if not math.isfinite(args.diagnostic_mask_threshold) or not 0 <= args.diagnostic_mask_threshold <= 1:
         raise ValueError("--diagnostic-mask-threshold must be finite and within [0, 1]")
     if (args.gt_label is None) != (args.split is None):
@@ -503,6 +675,7 @@ def _update_runtime_manifest_after_fusion(output_dir: Path, summary: dict[str, A
     }
     if evidence_is_local:
         fusion_branch["evidence_path"] = str(resolved_fusion_evidence)
+        _update_patchcore_statuses_from_audit(payload, fusion_output)
     for view in CANONICAL_VIEWS:
         payload["views"][view]["branches"]["fusion"] = dict(fusion_branch)
     if evidence_is_local and summary.get("inspection_complete") is True:
@@ -520,6 +693,83 @@ def _update_runtime_manifest_after_fusion(output_dir: Path, summary: dict[str, A
     temporary.replace(path)
 
 
+def _update_patchcore_statuses_from_audit(payload: dict[str, Any], fusion_output: Path) -> None:
+    """Write authoritative Stage18 PatchCore decisions back into dashboard branches."""
+    part_id = str(payload.get("part_id", "")).strip()
+    audit_dir = fusion_output / "audit"
+    preferred = audit_dir / f"{part_id}.json" if part_id else None
+    candidates = [preferred] if preferred is not None and preferred.is_file() else sorted(audit_dir.glob("*.json"))
+    if len(candidates) != 1:
+        return
+    audit = json.loads(candidates[0].read_text(encoding="utf-8"))
+    audit_views = audit.get("views")
+    manifest_views = payload.get("views")
+    if (
+        not isinstance(audit_views, Mapping)
+        or set(audit_views) != set(CANONICAL_VIEWS)
+        or not isinstance(manifest_views, dict)
+    ):
+        return
+    status_by_level = {"CLEAR": "CLEAR", "GRAY": "REVIEW", "STRONG": "NG_ANOMALY"}
+    decisions: dict[str, tuple[str, str, Mapping[str, Any]]] = {}
+    for view in CANONICAL_VIEWS:
+        manifest_view = manifest_views.get(view)
+        if not isinstance(manifest_view, dict):
+            return
+        branches = manifest_view.get("branches")
+        patchcore = branches.get("patchcore") if isinstance(branches, dict) else None
+        if not isinstance(patchcore, dict):
+            return
+        if str(patchcore.get("state", "")).lower() == "skipped":
+            continue
+        rows = audit_views.get(view)
+        if not isinstance(rows, list):
+            return
+        matches = [row for row in rows if isinstance(row, Mapping) and row.get("branch") == f"anomaly_{view}"]
+        if len(matches) != 1:
+            return
+        row = matches[0]
+        level = str(row.get("computed_evidence_level", "")).upper()
+        status = status_by_level.get(level)
+        if status is None:
+            return
+        score = _finite_template_score(row.get("score"))
+        low = _finite_template_score(row.get("low_threshold"))
+        high = _finite_template_score(row.get("high_threshold"))
+        manifest_score = _finite_template_score(patchcore.get("score"))
+        if (
+            score is None
+            or low is None
+            or high is None
+            or manifest_score is None
+            or not math.isclose(score, manifest_score, rel_tol=0, abs_tol=1e-12)
+            or low > high
+            or (level == "CLEAR" and not score < low)
+            or (level == "GRAY" and not low <= score < high)
+            or (level == "STRONG" and not score >= high)
+        ):
+            return
+        reason = (
+            "PatchCore score is below the low threshold"
+            if level == "CLEAR"
+            else "PatchCore score is within the review interval"
+            if level == "GRAY"
+            else "PatchCore score reached or exceeded the high threshold"
+        )
+        decisions[view] = (status, reason, row)
+    for view, (status, reason, row) in decisions.items():
+        patchcore = manifest_views[view]["branches"]["patchcore"]
+        patchcore.update(
+            state="available",
+            status=status,
+            reason=reason,
+            computed_evidence_level=row.get("computed_evidence_level"),
+            low_threshold=row.get("low_threshold"),
+            high_threshold=row.get("high_threshold"),
+            pred_label=row.get("pred_label"),
+        )
+
+
 def _merge_template_results_into_runtime_manifest(
     output_dir: Path,
     results: tuple[dict[str, Any], ...],
@@ -535,6 +785,14 @@ def _merge_template_results_into_runtime_manifest(
     all_available = True
     for view in CANONICAL_VIEWS:
         result = by_view[view]
+        if result.get("status") == "SKIPPED":
+            payload["views"][view]["branches"]["template"] = {
+                "state": "skipped",
+                "status": "SKIPPED",
+                "score": None,
+                "reason": str(result.get("reason")),
+            }
+            continue
         raw_score = result.get("score")
         score = (
             float(raw_score)
@@ -598,12 +856,20 @@ def _publish_diagnostic_contract(
     temporary.replace(path)
 
 
-def main() -> None:
-    """Run the unified template-first inference and optional strict fusion workflow."""
-    args = build_parser().parse_args()
-    _validate_mode(args)
-    _validate_commissioning_source_assets(args)
-    config = load_runtime_config(args.runtime_config)
+def run_argv(argv: Sequence[str] | None = None) -> None:
+    """Run one request, reusing a prepared worker runtime when available."""
+    total_started = time.perf_counter()
+    timing = TimingRecorder("stage32")
+    args = build_parser().parse_args(argv)
+    with timing.measure("runtime_config_load"):
+        _validate_mode(args)
+        _validate_commissioning_source_assets(args)
+        persistent_matches = (
+            _PERSISTENT_RUNTIME is not None
+            and _PERSISTENT_RUNTIME_CONFIG is not None
+            and Path(_PERSISTENT_RUNTIME_CONFIG.path).resolve() == args.runtime_config.expanduser().resolve()
+        )
+        config = _PERSISTENT_RUNTIME_CONFIG if persistent_matches else load_runtime_config(args.runtime_config)
     request = _request_from_args(args)
     output_dir = args.output_dir.expanduser().resolve()
     if output_dir.exists():
@@ -612,29 +878,46 @@ def main() -> None:
     if request.hand not in config.supported_hands:
         msg = f"unsupported hand {request.hand!r}; available weights: {config.supported_hands}"
         raise ValueError(msg)
-    runtime = ZS32ModelRuntime(
-        config,
-        accelerator=args.accelerator,
-        devices=args.devices,
-        yolo_device=args.yolo_device,
-    )
+    if persistent_matches:
+        runtime = _PERSISTENT_RUNTIME
+        assert runtime is not None
+        _attach_runtime_timing(runtime, timing)
+        timing.add("patchcore_models_load", 0.0)
+        timing.add("yolo_model_load", 0.0)
+    else:
+        runtime = ZS32ModelRuntime(
+            config,
+            accelerator=args.accelerator,
+            devices=args.devices,
+            yolo_device=args.yolo_device,
+            timing=timing,
+        )
+    with timing.measure("source_image_decode_shared"):
+        source_images = _load_source_images(request, runtime)
 
     template_results: tuple[dict[str, Any], ...] | None = None
     template_workspace: Path | None = None
     if args.template_model_dir is not None:
         if args.progress_json is not None:
             write_progress(args.progress_json, ProgressRecord(request.part_id, request.capture_session, "running_template", "running template", utc_now()))
-        template_results, template_workspace = _template_gate(
-            request,
-            runtime,
-            args.template_model_dir,
-            output_dir.parent,
-            args.fusion_profile,
-        )
+        with timing.measure("template_model_load_and_six_view_inference"):
+            template_results, template_workspace = _template_gate(
+                request,
+                runtime,
+                args.template_model_dir,
+                output_dir.parent,
+                args.fusion_profile,
+                timing,
+                source_images,
+            )
         if len(template_results) != len(CANONICAL_VIEWS) or any(
             not _template_result_allows_downstream(result, args.fusion_profile) for result in template_results
         ):
             _publish_template_stop(request, output_dir, template_results, template_workspace, args.fusion_profile)
+            total_seconds = time.perf_counter() - total_started
+            payload = timing.payload(total_seconds=total_seconds)
+            timing.write(output_dir / "timing.json", total_seconds=total_seconds)
+            print_timing_summary(payload)
             print(f"machine_status: {json.loads((output_dir / 'runtime_summary.json').read_text())['machine_status']}")
             print("inspection_complete: false")
             print(f"output_dir: {output_dir}")
@@ -649,6 +932,12 @@ def main() -> None:
         gt_label=args.gt_label,
         split=args.split,
         diagnostic_mask_threshold=args.diagnostic_mask_threshold,
+        skip_patchcore_views=(
+            SECONDARY_TEMPLATE_VIEWS
+            if args.fusion_profile == SECONDARY_MODELS_SKIPPED_FUSION_PROFILE
+            else ()
+        ),
+        source_images=source_images,
     )
     template_csv: Path | None = None
     if template_results is not None and template_workspace is not None:
@@ -693,12 +982,16 @@ def main() -> None:
             write_progress(args.progress_json, ProgressRecord(request.part_id, request.capture_session, "running_fusion", "running fusion", utc_now()))
         if template_csv is None:
             raise RuntimeError("template evidence unexpectedly missing")
-        summary = _run_strict_fusion(args, output_dir, template_csv)
+        summary = _run_strict_fusion(args, output_dir, template_csv, timing)
         _update_runtime_manifest_after_fusion(output_dir, summary)
     (output_dir / "runtime_summary.json").write_text(
         json.dumps(summary, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+    total_seconds = time.perf_counter() - total_started
+    payload = timing.payload(total_seconds=total_seconds)
+    timing.write(output_dir / "timing.json", total_seconds=total_seconds)
+    print_timing_summary(payload)
     print(f"machine_status: {summary['machine_status']}")
     print(f"inspection_complete: {str(summary['inspection_complete']).lower()}")
     print(f"patchcore_csv: {result.patchcore_csv}")
@@ -706,6 +999,11 @@ def main() -> None:
     if result.calibration_csv is not None:
         print(f"calibration_csv: {result.calibration_csv}")
     print(f"output_dir: {output_dir}")
+
+
+def main() -> None:
+    """CLI entrypoint for one standalone request."""
+    run_argv()
 
 
 if __name__ == "__main__":

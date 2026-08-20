@@ -161,27 +161,32 @@ def load_patchcore_roi_config(
     return width, height, rois, payload
 
 
-def _filename_view(path: Path, hand: str) -> str:
+def _filename_view(path: Path, hand: str, expected_views: tuple[str, ...] = VIEWS) -> str:
     filename = path.name
     for other_hand in HANDS:
         if other_hand != hand and filename.startswith(f"{other_hand}_"):
             msg = f"Filename hand mismatch for {path}: expected {hand}, found {other_hand}."
             raise ValueError(msg)
-    for view in sorted(VIEWS, key=len, reverse=True):
+    for view in sorted(expected_views, key=len, reverse=True):
         if filename.startswith(f"{hand}_{view}_"):
             return view
     msg = f"Could not parse filename view for {path}; expected prefix {hand}_<view>_."
     raise ValueError(msg)
 
 
-def _source_identity(path: Path, hand_root: Path, hand: str) -> SourceImage:
+def _source_identity(
+    path: Path,
+    hand_root: Path,
+    hand: str,
+    expected_views: tuple[str, ...] = VIEWS,
+) -> SourceImage:
     relative_path = path.relative_to(hand_root)
     parts = relative_path.parts
     if len(parts) < 5:
         msg = f"Invalid PatchCore source hierarchy: {path}"
         raise ValueError(msg)
     source_view, label = parts[:2]
-    if source_view not in VIEWS:
+    if source_view not in expected_views:
         msg = f"Unknown source view for {path}: {source_view}"
         raise ValueError(msg)
     if label == "defect":
@@ -197,7 +202,7 @@ def _source_identity(path: Path, hand_root: Path, hand: str) -> SourceImage:
     else:
         msg = f"Unknown PatchCore label for {path}: {label}"
         raise ValueError(msg)
-    _filename_view(path, hand)  # Validate filename identity without changing directory routing.
+    _filename_view(path, hand, expected_views)  # Validate filename identity without changing directory routing.
     return SourceImage(
         source_path=path,
         hand=hand,
@@ -215,6 +220,7 @@ def discover_patchcore_images(
     dataset_root: Path,
     *,
     hands: tuple[str, ...] = HANDS,
+    expected_views: tuple[str, ...] = VIEWS,
     excluded_session_ids: tuple[str, ...] = (),
 ) -> list[SourceImage]:
     """Discover and validate ZS32 PatchCore images for selected hands.
@@ -242,7 +248,7 @@ def discover_patchcore_images(
         if not hand_root.is_dir():
             msg = f"Missing hand directory: {hand_root}"
             raise FileNotFoundError(msg)
-        for view in VIEWS:
+        for view in expected_views:
             view_root = hand_root / view
             if not view_root.is_dir():
                 msg = f"Missing view directory for {hand}/{view}: {view_root}"
@@ -252,7 +258,7 @@ def discover_patchcore_images(
                 key=lambda path: path.as_posix(),
             )
             for image_path in image_paths:
-                record = _source_identity(image_path, hand_root, hand)
+                record = _source_identity(image_path, hand_root, hand, expected_views)
                 if record.session_id in excluded_sessions:
                     continue
                 destination = (record.hand, record.resolved_view, record.relative_tail)
@@ -264,7 +270,7 @@ def discover_patchcore_images(
                 if record.label == "normal":
                     normal_views.add((record.hand, record.resolved_view))
 
-    missing_normal = [(hand, view) for hand in hands for view in VIEWS if (hand, view) not in normal_views]
+    missing_normal = [(hand, view) for hand in hands for view in expected_views if (hand, view) not in normal_views]
     if missing_normal:
         msg = f"Missing normal image data for hand/view pairs: {missing_normal}"
         raise ValueError(msg)
@@ -280,6 +286,7 @@ def select_patchcore_rois(
     max_window_height: int = 1000,
     hands: tuple[str, ...] = HANDS,
     excluded_session_ids: tuple[str, ...] = (),
+    expected_views: tuple[str, ...] = VIEWS,
 ) -> dict[str, object]:
     """Interactively select and atomically publish selected hand/view ROIs.
 
@@ -302,12 +309,13 @@ def select_patchcore_rois(
     records = discover_patchcore_images(
         dataset_root,
         hands=hands,
+        expected_views=expected_views,
         excluded_session_ids=excluded_session_ids,
     )
     references: dict[tuple[str, str], tuple[SourceImage, object]] = {}
     common_size: tuple[int, int] | None = None
     for hand in hands:
-        for view in VIEWS:
+        for view in expected_views:
             candidates = (
                 record
                 for record in records
@@ -337,7 +345,11 @@ def select_patchcore_rois(
     width, height = common_size
     existing_rois: dict[str, dict[str, ROI]] | None = None
     if config_path.exists():
-        configured_width, configured_height, existing_rois, _ = load_patchcore_roi_config(config_path, hands=hands)
+        configured_width, configured_height, existing_rois, _ = load_patchcore_roi_config(
+            config_path,
+            hands=hands,
+            expected_views=expected_views,
+        )
         if (configured_width, configured_height) != common_size:
             msg = (
                 "Existing ROI config dimensions do not match normal references: "
@@ -348,7 +360,7 @@ def select_patchcore_rois(
     hands_payload: dict[str, object] = {}
     for hand in hands:
         views_payload: dict[str, object] = {}
-        for view in VIEWS:
+        for view in expected_views:
             record, image = references[(hand, view)]
             initial_roi = existing_rois[hand][view] if existing_rois is not None else None
             roi = select_roi(record.source_path, initial_roi, max_window_width, max_window_height)
@@ -476,6 +488,7 @@ def crop_patchcore_dataset(
     overwrite: bool = False,
     hands: tuple[str, ...] = HANDS,
     excluded_session_ids: tuple[str, ...] = (),
+    expected_views: tuple[str, ...] = VIEWS,
 ) -> dict[str, object]:
     """Preflight and crop a PatchCore dataset into a separate transactional output tree.
 
@@ -504,10 +517,15 @@ def crop_patchcore_dataset(
         msg = f"Output already exists; pass overwrite=True to replace it: {output_root}"
         raise FileExistsError(msg)
 
-    width, height, rois, config_payload = load_patchcore_roi_config(roi_config, hands=hands)
+    width, height, rois, config_payload = load_patchcore_roi_config(
+        roi_config,
+        hands=hands,
+        expected_views=expected_views,
+    )
     records = discover_patchcore_images(
         dataset_root,
         hands=hands,
+        expected_views=expected_views,
         excluded_session_ids=excluded_session_ids,
     )
     prepared = _preflight_conversion(records, dataset_root, width, height, rois)
@@ -583,7 +601,7 @@ def crop_patchcore_dataset(
                     "corrected_views": 0,
                     "labels": {},
                 }
-                for view in VIEWS
+                for view in expected_views
             }
             for hand in hands
         }

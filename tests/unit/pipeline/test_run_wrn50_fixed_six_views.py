@@ -22,6 +22,16 @@ VIEWS = (
     "right_back_left",
     "right_back_right",
 )
+EIGHT_VIEWS = (
+    "right_front",
+    "right_front_left",
+    "right_front_right",
+    "right_front_secondary",
+    "right_back",
+    "right_back_left",
+    "right_back_right",
+    "right_back_secondary",
+)
 
 
 def _write_fake_python(path: Path) -> None:
@@ -156,6 +166,25 @@ def test_runner_accepts_opt_in_patchcore_parameter_overrides(tmp_path: Path) -> 
         assert "--patchcore-coreset-ratio 0.05" in call
         assert "--patchcore-precision float32 --patchcore-batch-size 16" in call
         assert "--eval-batch-size 16" in call
+
+
+def test_runner_accepts_eight_view_selection_and_summary_name(tmp_path: Path) -> None:
+    """The reusable serial runner should train and summarize all eight right-hand views."""
+    result, run_base, call_log = _run_runner(
+        tmp_path,
+        env_overrides={
+            "PATCHCORE_VIEWS": " ".join(EIGHT_VIEWS),
+            "PATCHCORE_SUMMARY_NAME": "eight_view_summary.csv",
+        },
+    )
+
+    assert result.returncode == 0, result.stdout
+    calls = call_log.read_text(encoding="utf-8").splitlines()
+    assert [call.split()[call.split().index("--views") + 1] for call in calls] == list(EIGHT_VIEWS)
+    with (run_base / "eight_view_summary.csv").open(newline="", encoding="utf-8") as file:
+        rows = list(csv.DictReader(file))
+    assert [row["view"] for row in rows] == list(EIGHT_VIEWS)
+    assert not (run_base / "six_view_summary.csv").exists()
 
 
 def test_runner_selects_resume_modes_from_existing_artifacts(tmp_path: Path) -> None:

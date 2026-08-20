@@ -1,7 +1,7 @@
 # Copyright (C) 2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
-"""Capture and inspect one right-hand ZS32 part with the eight-view runtime bundle."""
+"""Capture and inspect one right-hand ZS32 part with the editable Demo config."""
 
 from __future__ import annotations
 
@@ -26,11 +26,11 @@ from capture_data.zs32_live_commissioning import (  # noqa: E402
     LiveRunResult,
     run_live_commissioning,
 )
+from capture_data.zs32_demo_config import load_demo_config  # noqa: E402
 
 DEFAULT_CAPTURE_ROOT = Path("/home/yunjing/anomalib/results/zs32_live_capture")
 DEFAULT_OUTPUT_ROOT = Path("/home/yunjing/anomalib/results/zs32_live_runtime")
-DEFAULT_RUNTIME_CONFIG = REPO_ROOT / "results/zs32_runtime_bundle_eight_view_v2/runtime_bundle.json"
-DEFAULT_TOPOLOGY = REPO_ROOT / "configs/zs32/topology/zs32_4cam_double_side_v1.json"
+DEFAULT_DEMO_CONFIG = REPO_ROOT / "configs/zs32/zs32_demo.json"
 
 
 class _Stage35ArgumentParser(argparse.ArgumentParser):
@@ -53,17 +53,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser = _Stage35ArgumentParser(description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--part-id", help="Stable operator identity for the part being captured.")
     parser.add_argument("--list-devices", action="store_true", help="List SDK cameras without capturing or inferring.")
-    parser.add_argument(
-        "--diagnostic-skip-template",
-        action="store_true",
-        help="Skip template matching and run PatchCore/YOLO infer only; never permits production release.",
-    )
     parser.add_argument("--capture-root", type=Path, default=DEFAULT_CAPTURE_ROOT)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
-    parser.add_argument("--runtime-config", type=Path, default=DEFAULT_RUNTIME_CONFIG)
-    parser.add_argument("--topology", type=Path, default=DEFAULT_TOPOLOGY)
+    parser.add_argument("--demo-config", type=Path, default=DEFAULT_DEMO_CONFIG)
     parser.add_argument("--progress-json", type=Path)
     parser.add_argument("--control-json", type=Path)
+    parser.add_argument("--inference-socket", type=Path, help="Optional dashboard-owned persistent Demo worker socket.")
     return parser
 
 
@@ -96,56 +91,33 @@ def _list_devices() -> int:
 
 
 def _config_from_args(args: argparse.Namespace) -> LiveRunConfig:
-    """Map reviewed CLI options onto the locked live core configuration."""
+    """Map CLI options onto the single live Demo configuration."""
     part_id = str(args.part_id)
+    try:
+        demo_config = load_demo_config(args.demo_config)
+    except (OSError, TypeError, ValueError) as error:
+        raise LiveCommissioningError(f"Demo config failed: {error}") from error
     return LiveRunConfig(
         repo_root=REPO_ROOT.resolve(),
         part_id=part_id,
         run_id=_run_id(part_id),
         capture_root=args.capture_root,
         output_root=args.output_root,
-        runtime_config=args.runtime_config,
-        topology_path=args.topology,
-        diagnostic_skip_template=args.diagnostic_skip_template,
+        demo_config=demo_config.path,
+        topology_path=demo_config.topology,
         progress_json=args.progress_json,
         control_json=args.control_json,
+        inference_socket=args.inference_socket,
     )
 
 
 def _print_result(result: LiveRunResult) -> None:
-    """Print the business decision, locked policy, and absolute audit artifacts."""
-    if result.diagnostic_skip_template:
-        patchcore_csv = result.patchcore_csv
-        if patchcore_csv is None:
-            msg = "diagnostic result is missing patchcore_csv"
-            raise LiveCommissioningError(msg)
-        yolo_csv = result.yolo_csv
-        if yolo_csv is None:
-            msg = "diagnostic result is missing yolo_csv"
-            raise LiveCommissioningError(msg)
-        print("template: skipped (diagnostic)")
-        print("stage18_audit: none (diagnostic infer; fusion was not run)")
-        print(f"patchcore_csv: {patchcore_csv.expanduser().resolve()}")
-        print(f"yolo_csv: {yolo_csv.expanduser().resolve()}")
-    else:
-        audit_report = result.audit_report
-        print("audit_report:")
-        if audit_report:
-            print(audit_report)
-        else:
-            print("none (template short-circuit; Stage18 audit was not generated)")
+    """Print the Demo decision and its two operator-facing artifacts."""
     print(f"machine_status: {result.machine_status}")
     print(f"inspection_complete: {str(result.inspection_complete).lower()}")
-    print(f"commissioning_only: {str(result.commissioning_only).lower()}")
-    print(f"production_release_allowed: {str(result.production_release_allowed).lower()}")
+    print(f"errors: {'; '.join(result.errors) if result.errors else 'none'}")
     print(f"capture_manifest: {result.sample.manifest_path.expanduser().resolve()}")
-    print(f"runtime_summary: {result.runtime_summary_path.expanduser().resolve()}")
-    if not result.diagnostic_skip_template:
-        audit_path = result.audit_path
-        if audit_path is None:
-            print("audit: none (template short-circuit; Stage18 audit was not generated)")
-        else:
-            print(f"audit: {Path(audit_path).expanduser().resolve()}")
+    print(f"runtime_manifest: {result.runtime_manifest_path.expanduser().resolve()}")
     print(f"output_dir: {result.output_dir.expanduser().resolve()}")
 
 

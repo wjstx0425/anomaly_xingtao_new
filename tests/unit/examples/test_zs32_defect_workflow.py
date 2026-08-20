@@ -14,6 +14,7 @@ from types import ModuleType
 import cv2
 import numpy as np
 import pandas as pd
+import pytest
 
 
 def load_workflow_module() -> ModuleType:
@@ -196,6 +197,9 @@ def test_iter_raw_images_supports_flat_label_dirs(tmp_path: Path) -> None:
 
     assert images == [image_path]
     assert workflow._raw_sample_id(image_path) == "part001_000001"
+    flat_group = Path("right_front_normal_group001_000001_fused.png")
+    assert workflow._raw_sample_id(flat_group) == "right_front_normal_group001"
+    assert workflow._normal_split_key(flat_group) == "group001"
 
 
 def test_iter_raw_images_supports_no_hand_bottom_dirs(tmp_path: Path) -> None:
@@ -226,7 +230,7 @@ def test_iter_raw_images_supports_left_bottom_alias(tmp_path: Path) -> None:
     ]
 
 
-def test_right_six_view_layout_supports_deep_defect_dirs(tmp_path: Path) -> None:
+def test_right_eight_view_layout_supports_deep_defect_dirs(tmp_path: Path) -> None:
     """Right-side camera views should find defect-type/session nesting."""
     workflow = load_workflow_module()
     image_path = (
@@ -245,9 +249,67 @@ def test_right_six_view_layout_supports_deep_defect_dirs(tmp_path: Path) -> None
     images = list(workflow._iter_raw_images(tmp_path, "right_front_left", "defect"))
 
     assert images == [image_path]
-    assert workflow._raw_sample_id(image_path).endswith("deform_group001")
+    assert workflow._raw_sample_id(image_path) == "session001__group001"
     assert workflow._extract_frame_id(image_path) == "000001"
     assert workflow._defect_type(image_path) == "deform"
+
+
+def test_nested_group_identity_includes_session_and_is_shared_across_views(tmp_path: Path) -> None:
+    """Session plus group identifies one capture without including its camera view."""
+    workflow = load_workflow_module()
+    front = (
+        tmp_path
+        / "right/front/normal/session_a/images/right_front_normal_group001_000001_fused.png"
+    )
+    back = tmp_path / "right/back/normal/session_a/images/right_back_normal_group001_000001_fused.png"
+    other_session = (
+        tmp_path
+        / "right/front/normal/session_b/images/right_front_normal_group001_000001_fused.png"
+    )
+
+    assert workflow._raw_sample_id(front) == "session_a__group001"
+    assert workflow._raw_sample_id(other_session) == "session_b__group001"
+    assert workflow._normal_split_key(front) == workflow._normal_split_key(back) == "session_a__group001"
+    assert workflow._normal_split_key(other_session) == "session_b__group001"
+
+
+def test_right_secondary_views_are_available_to_workflow(tmp_path: Path) -> None:
+    """Both fourth-camera views should resolve through the normal workflow data contract."""
+    workflow = load_workflow_module()
+    for view in ("front_secondary", "back_secondary"):
+        image_path = tmp_path / "right" / view / "normal" / "session001" / "images" / f"right_{view}_001.png"
+        image_path.parent.mkdir(parents=True)
+        image_path.touch()
+
+        assert list(workflow._iter_raw_images(tmp_path, f"right_{view}", "normal")) == [image_path]
+
+
+def test_patchcore_datamodule_accepts_normal_only_secondary_view(tmp_path: Path) -> None:
+    """A secondary view without defect samples must still build a normal-only datamodule."""
+    workflow = load_workflow_module()
+    output_root = tmp_path / "output"
+    view_root = output_root / "preprocessed" / "right_front_secondary"
+    image = np.full((8, 12, 3), 127, dtype=np.uint8)
+    for label in ("normal", "normal_test"):
+        for index in range(4):
+            image_path = view_root / label / f"part{index:03d}" / "images" / f"{index:06d}.png"
+            image_path.parent.mkdir(parents=True, exist_ok=True)
+            assert cv2.imwrite(str(image_path), image)
+    args = Namespace(
+        patchcore_batch_size=2,
+        efficientad_batch_size=1,
+        anomaly_dino_batch_size=1,
+        eval_batch_size=2,
+        num_workers=0,
+        seed=42,
+        train_sampling_ratio=1.0,
+    )
+
+    datamodule = workflow._build_datamodule(output_root, "right_front_secondary", "patchcore", args)
+
+    assert len(datamodule.train_data) == 4
+    assert len(datamodule.test_data) == 4
+    assert set(datamodule.test_data.samples["label"].astype(str)) == {"normal_test"}
 
 
 def test_right_view_can_use_right_directory_as_data_root(tmp_path: Path) -> None:
@@ -312,3 +374,58 @@ def test_preprocess_dataset_clears_stale_view_output(tmp_path: Path) -> None:
     assert not stale_path.exists()
     assert len(manifest) == 1
     assert len(generated_images) == 1
+
+
+def test_preprocess_preserves_same_group_filename_from_different_sessions(tmp_path: Path) -> None:
+    """Different capture sessions must never overwrite one another during preprocessing."""
+    workflow = load_workflow_module()
+    data_root = tmp_path / "data"
+    output_root = tmp_path / "output"
+    filename = "right_front_normal_group001_000001_fused.png"
+    for session, value in (("session_a", 31), ("session_b", 207)):
+        image_path = data_root / "right/front/normal" / session / "images" / filename
+        image_path.parent.mkdir(parents=True)
+        assert cv2.imwrite(str(image_path), np.full((4, 6, 3), value, dtype=np.uint8))
+
+    args = Namespace(
+        data_root=data_root,
+        output_root=output_root,
+        views=["right_front"],
+        roi=None,
+        skip_blue_removal=True,
+        normal_test_ratio=0.0,
+        seed=42,
+    )
+
+    manifest = pd.read_csv(workflow.preprocess_dataset(args))
+    generated_images = sorted((output_root / "preprocessed/right_front").rglob("*.png"))
+
+    assert len(manifest) == manifest["source_path"].nunique() == manifest["processed_path"].nunique() == 2
+    assert len(generated_images) == 2
+    assert set(manifest["processed_path"]) == {str(path.resolve()) for path in generated_images}
+    assert {int(cv2.imread(str(path))[0, 0, 0]) for path in generated_images} == {31, 207}
+
+
+def test_preprocess_rejects_processed_path_collision(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A future identity regression must fail before silently overwriting an image."""
+    workflow = load_workflow_module()
+    data_root = tmp_path / "data"
+    output_root = tmp_path / "output"
+    filename = "right_front_normal_group001_000001_fused.png"
+    for session in ("session_a", "session_b"):
+        image_path = data_root / "right/front/normal" / session / "images" / filename
+        image_path.parent.mkdir(parents=True)
+        assert cv2.imwrite(str(image_path), np.full((4, 6, 3), 127, dtype=np.uint8))
+    monkeypatch.setattr(workflow, "_raw_sample_id", lambda _path: "forced_collision")
+    args = Namespace(
+        data_root=data_root,
+        output_root=output_root,
+        views=["right_front"],
+        roi=None,
+        skip_blue_removal=True,
+        normal_test_ratio=0.0,
+        seed=42,
+    )
+
+    with pytest.raises(ValueError, match="processed path collision"):
+        workflow.preprocess_dataset(args)

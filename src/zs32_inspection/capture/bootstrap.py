@@ -14,14 +14,16 @@ import select
 import sys
 import time
 import uuid
+from contextlib import nullcontext
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from zs32_inspection.runtime.publisher import AtomicDirectoryPublisher
 from zs32_inspection.dashboard.contracts import ConfirmationCommand, ProgressRecord
 from zs32_inspection.dashboard.control import consume_confirmation, write_progress
+from zs32_inspection.runtime.publisher import AtomicDirectoryPublisher
+from zs32_inspection.timing import TimingRecorder
 
 from .contracts import (
     CaptureFrame,
@@ -86,19 +88,20 @@ class BootstrapRoundCoordinator:
     """Fast Enter-based operator confirmation for front/back bootstrap rounds."""
 
     operator_id: str
-    timeout_seconds: float = 120.0
+    timeout_seconds: float | None = None
     manual_load: bool = False
 
     def __post_init__(self) -> None:
         if not self.operator_id or any(character.isspace() for character in self.operator_id):
             raise ValueError("operator_id must be a non-empty identifier without whitespace")
-        if (
+        if self.timeout_seconds is not None and (
             isinstance(self.timeout_seconds, bool)
             or not isinstance(self.timeout_seconds, (int, float))
             or self.timeout_seconds <= 0
         ):
             raise ValueError("round confirmation timeout_seconds must be positive")
-        object.__setattr__(self, "timeout_seconds", float(self.timeout_seconds))
+        if self.timeout_seconds is not None:
+            object.__setattr__(self, "timeout_seconds", float(self.timeout_seconds))
 
     def confirm_round(
         self,
@@ -117,11 +120,16 @@ class BootstrapRoundCoordinator:
             else round_plan.prompt
         )
         prompted_at = utc_now()
+        timeout_text = (
+            "（无时间限制）："
+            if self.timeout_seconds is None
+            else f"（{self.timeout_seconds:g} 秒超时）："
+        )
         print(
             f"\n[{round_index}/{round_count}] part={request.part_instance_id} "
             f"hand={request.hand}: {action}\n"
             "确认位置后按 Enter 开始采集；输入 q 取消"
-            f"（{self.timeout_seconds:g} 秒超时）：",
+            f"{timeout_text}",
             end="",
             flush=True,
         )
@@ -161,7 +169,7 @@ class DashboardRoundCoordinator:
         progress_path: Path,
         control_path: Path,
         *,
-        timeout_seconds: float = 120.0,
+        timeout_seconds: float | None = None,
         poll_interval: float = 0.05,
     ) -> None:
         self.operator_id = operator_id
@@ -211,8 +219,12 @@ class DashboardRoundCoordinator:
         if self._expected is None:
             self.publish_waiting(request, round_plan)
         prompted_at = utc_now()
-        deadline = time.monotonic() + self.timeout_seconds
-        while time.monotonic() < deadline:
+        deadline = (
+            None
+            if self.timeout_seconds is None
+            else time.monotonic() + self.timeout_seconds
+        )
+        while deadline is None or time.monotonic() < deadline:
             if self.consume_current_confirmation(request, round_plan):
                 self._expected = None
                 write_progress(
@@ -334,10 +346,12 @@ class BootstrapCaptureService:
         store: BootstrapCaptureStore,
         *,
         round_coordinator: RoundCoordinator,
+        timing_recorder: TimingRecorder | None = None,
     ) -> None:
         self._source = source
         self._store = store
         self._round_coordinator = round_coordinator
+        self._timing_recorder = timing_recorder
 
     def capture(
         self,
@@ -375,9 +389,15 @@ class BootstrapCaptureService:
                     )
                 confirmations.append(confirmation)
                 try:
-                    round_frames = tuple(
-                        self._source.capture_round(request, round_plan, plan.cameras)
+                    capture_measurement = (
+                        self._timing_recorder.measure(f"{round_plan.round_id}_capture")
+                        if self._timing_recorder is not None
+                        else nullcontext()
                     )
+                    with capture_measurement:
+                        round_frames = tuple(
+                            self._source.capture_round(request, round_plan, plan.cameras)
+                        )
                 except PartialRoundCaptureError as error:
                     frames.extend(error.partial_frames)
                     raise
@@ -429,14 +449,20 @@ class BootstrapCaptureService:
                 str(diagnostic),
             ) from classified
 
-        published = self._store.publish_complete(
-            request,
-            plan,
-            frames,
-            confirmations,
-            metadata,
-            started_at=started_at,
+        write_measurement = (
+            self._timing_recorder.measure("image_write_and_manifest")
+            if self._timing_recorder is not None
+            else nullcontext()
         )
+        with write_measurement:
+            published = self._store.publish_complete(
+                request,
+                plan,
+                frames,
+                confirmations,
+                metadata,
+                started_at=started_at,
+            )
         return CaptureResult(
             request.capture_session,
             request.capture_set_id,

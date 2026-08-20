@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "profile_id": "bmw-4cam-eight-view-hdr-v1",
+  "bootstrap_topology_path": "../../zs32/topology/zs32_4cam_double_side_v1.json",
+  "slots": [
+    {"slot_id": "center", "serial": "DA9805574", "front_view": "front", "back_view": "back"},
+    {"slot_id": "left", "serial": "DA9625347", "front_view": "front_left", "back_view": "back_left"},
+    {"slot_id": "right", "serial": "DB0998274", "front_view": "front_right", "back_view": "back_right"},
+    {"slot_id": "secondary", "serial": "DB0968108", "front_view": "front_secondary", "back_view": "back_secondary"}
+  ],
+  "hdr": {
+    "short_exposure_us": 1500,
+    "long_exposure_us": 6000,
+    "gain": 0,
+    "trigger_interval_s": 0.2,
+    "settle_frames": 1,
+    "timeout_ms": 3000,
+    "align": false,
+    "short_dark_threshold": 70,
+    "long_clip_threshold": 245,
+    "blend_width": 18,
+    "blur_size": 31,
+    "max_retries": 0,
+    "max_clip_pct": 12
+  }
+}

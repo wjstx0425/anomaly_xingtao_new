@@ -240,6 +240,29 @@ def _read_patchcore_summary(path: Path) -> dict[str, dict[str, Any]]:
     return records
 
 
+def _required_branches_by_view(profile: dict[str, Any]) -> dict[str, tuple[str, ...]]:
+    branches = profile.get("required_branches_by_view")
+    if not isinstance(branches, dict) or tuple(branches) != VIEW_ORDER:
+        raise ValueError("fusion profile template must contain exactly the canonical eight views")
+    normalized: dict[str, tuple[str, ...]] = {}
+    for view in VIEW_ORDER:
+        required = tuple(branches[view]) if isinstance(branches[view], list) else ()
+        expected_without_template = (f"anomaly_{view}", "yolo")
+        allowed = {("template_match", *expected_without_template), expected_without_template}
+        if view in {"front_secondary", "back_secondary"}:
+            allowed.add(("yolo",))
+        if required not in allowed:
+            raise ValueError(f"fusion profile template branches for {view} are invalid: {required}")
+        normalized[view] = required
+    return normalized
+
+
+def _profile_branch_order(branches: dict[str, tuple[str, ...]]) -> tuple[str, ...]:
+    required = {branch for view_branches in branches.values() for branch in view_branches}
+    canonical = ("template_match", "yolo", *(f"anomaly_{view}" for view in VIEW_ORDER))
+    return tuple(branch for branch in canonical if branch in required)
+
+
 def _validate_profile_template(profile: dict[str, Any], template_versions: dict[str, str]) -> None:
     if profile.get("commissioning_only") is not True or profile.get("production_release_allowed") is not False:
         raise ValueError("fusion profile template must be commissioning-only and forbid production release")
@@ -250,14 +273,8 @@ def _validate_profile_template(profile: dict[str, Any], template_versions: dict[
         or identity.get("allowed_hands") != ["right"]
     ):
         raise ValueError("fusion profile template must use exact ZS32/right identity")
-    branches = profile.get("required_branches_by_view")
-    if not isinstance(branches, dict) or tuple(branches) != VIEW_ORDER:
-        raise ValueError("fusion profile template must contain exactly the canonical eight views")
-    for view in VIEW_ORDER:
-        expected_branches = ("template_match", f"anomaly_{view}", "yolo")
-        if tuple(branches[view]) != expected_branches:
-            raise ValueError(f"fusion profile template branches for {view} must be exactly {expected_branches}")
-    expected_branch_order = ("template_match", "yolo", *(f"anomaly_{view}" for view in VIEW_ORDER))
+    branches = _required_branches_by_view(profile)
+    expected_branch_order = _profile_branch_order(branches)
     if tuple(profile.get("branch_order", ())) != expected_branch_order:
         raise ValueError(f"fusion profile template branch_order must be exactly {expected_branch_order}")
     rules = profile.get("rules")
@@ -283,6 +300,7 @@ def _expected_versions(
     patchcore: dict[str, dict[str, Any]],
     yolo_version: str,
     template_versions: dict[str, str],
+    required_branches_by_view: dict[str, tuple[str, ...]],
 ) -> list[dict[str, str]]:
     records = []
     for view in VIEW_ORDER:
@@ -293,28 +311,22 @@ def _expected_versions(
             "roi_version": template_versions["roi"],
             "template_version": template_versions["template"],
         }
-        records.extend(
-            (
+        for branch in required_branches_by_view[view]:
+            model_version = (
+                template_versions["model"]
+                if branch == "template_match"
+                else yolo_version
+                if branch == "yolo"
+                else patchcore[view]["model_version"]
+            )
+            records.append(
                 {
                     **common,
-                    "branch": "template_match",
-                    "model_version": template_versions["model"],
+                    "branch": branch,
+                    "model_version": model_version,
                     "threshold_version": template_versions["threshold"],
                 },
-                {
-                    **common,
-                    "branch": f"anomaly_{view}",
-                    "model_version": patchcore[view]["model_version"],
-                    "threshold_version": template_versions["threshold"],
-                },
-                {
-                    **common,
-                    "branch": "yolo",
-                    "model_version": yolo_version,
-                    "threshold_version": template_versions["threshold"],
-                },
-            ),
-        )
+            )
     return records
 
 
@@ -388,6 +400,9 @@ def publish_runtime_assets(source_path: Path, output_dir: Path) -> RuntimeAssets
         raise FileNotFoundError(f"YOLO weights do not exist: {yolo_path}")
     yolo_sha256 = sha256_file(yolo_path)
     yolo_version = f"yolo-{yolo_path.stem}-{yolo_sha256[:12]}"
+    yolo_imgsz = source.get("yolo_imgsz", 640)
+    if isinstance(yolo_imgsz, bool) or not isinstance(yolo_imgsz, int) or yolo_imgsz <= 0:
+        raise ValueError("yolo_imgsz must be a positive integer")
     profile_path = _resolve_source(source.get("fusion_profile_template"), field="fusion_profile_template")
     profile = _read_object(profile_path, "fusion profile template")
     _validate_profile_template(profile, template_versions)
@@ -414,7 +429,7 @@ def publish_runtime_assets(source_path: Path, output_dir: Path) -> RuntimeAssets
             "weights": str(yolo_path),
             "weights_sha256": yolo_sha256,
             "model_version": yolo_version,
-            "imgsz": 640,
+            "imgsz": yolo_imgsz,
             "candidate_conf": 0.001,
             "iou": 0.7,
             "max_det": 300,
@@ -422,7 +437,10 @@ def publish_runtime_assets(source_path: Path, output_dir: Path) -> RuntimeAssets
         },
     }
     generated_profile = dict(profile)
-    generated_profile["expected_versions"] = _expected_versions(patchcore, yolo_version, template_versions)
+    required_branches = _required_branches_by_view(profile)
+    generated_profile["expected_versions"] = _expected_versions(
+        patchcore, yolo_version, template_versions, required_branches,
+    )
 
     asset_set = {
         "schema_version": 1,
@@ -587,7 +605,10 @@ def _validate_assets_manifest(path: Path) -> dict[str, Any]:
     yolo = runtime_payload.get("yolo")
     if not isinstance(yolo, dict):
         raise TypeError("runtime assets yolo must be an object")
-    expected_versions = _expected_versions(patchcore, str(yolo.get("model_version", "")), template_versions)
+    required_branches = _required_branches_by_view(fusion_payload)
+    expected_versions = _expected_versions(
+        patchcore, str(yolo.get("model_version", "")), template_versions, required_branches,
+    )
     if fusion_payload.get("expected_versions") != expected_versions:
         raise ValueError("fusion profile expected_versions differ from the bound runtime and template assets")
     return manifest
@@ -617,12 +638,9 @@ def _validate_threshold_binding(path: Path, assets: dict[str, Any]) -> dict[str,
     fusion_path, fusion_sha256 = _validate_binding(assets.get("fusion_profile"), label="fusion profile")
     profile = _read_object(fusion_path, "fusion profile")
     expected = profile.get("expected_versions")
-    if (
-        not isinstance(expected, list)
-        or len(expected) != 24
-        or not all(isinstance(record, dict) for record in expected)
-    ):
-        raise ValueError("fusion profile must contain exactly 24 expected version records")
+    if not isinstance(expected, list) or not expected or not all(isinstance(record, dict) for record in expected):
+        raise ValueError("fusion profile must contain non-empty expected version records")
+    expected_count = len(expected)
     if threshold.get("profile_sha256") != fusion_sha256 or threshold.get("config_sha256") != fusion_sha256:
         raise ValueError("threshold artifact is not bound to the exact fusion profile SHA-256")
     if threshold.get("required_views") != list(VIEW_ORDER):
@@ -641,22 +659,22 @@ def _validate_threshold_binding(path: Path, assets: dict[str, Any]) -> dict[str,
     expected_by_identity = {
         tuple(str(record.get(field, "")) for field in identity_fields): record for record in expected
     }
-    if len(expected_by_identity) != 24 or any(not all(key) for key in expected_by_identity):
+    if len(expected_by_identity) != expected_count or any(not all(key) for key in expected_by_identity):
         raise ValueError("fusion profile expected versions contain duplicate or incomplete identities")
     required_groups = [list(key) for key in sorted(expected_by_identity)]
     if threshold.get("required_groups") != required_groups:
-        raise ValueError("threshold artifact required_groups do not match the exact 24-group profile")
+        raise ValueError("threshold artifact required_groups do not match the exact profile")
 
     records = threshold.get("thresholds")
-    if not isinstance(records, list) or len(records) != 24 or not all(isinstance(record, dict) for record in records):
-        raise ValueError("threshold artifact must contain exactly 24 threshold records")
+    if not isinstance(records, list) or len(records) != expected_count or not all(isinstance(record, dict) for record in records):
+        raise ValueError(f"threshold artifact must contain exactly {expected_count} threshold records")
     records_by_identity = {tuple(str(record.get(field, "")) for field in identity_fields): record for record in records}
-    if len(records_by_identity) != 24 or set(records_by_identity) != set(expected_by_identity):
-        raise ValueError("threshold artifact must contain the exact 24 unique profile identities")
+    if len(records_by_identity) != expected_count or set(records_by_identity) != set(expected_by_identity):
+        raise ValueError(f"threshold artifact must contain the exact {expected_count} unique profile identities")
     expected_record_order = sorted(expected_by_identity)
     actual_record_order = [tuple(str(record.get(field, "")) for field in identity_fields) for record in records]
     if actual_record_order != expected_record_order:
-        raise ValueError("threshold artifact records must use the exact canonical 24-group order")
+        raise ValueError("threshold artifact records must use the exact canonical profile order")
     expected_threshold_versions = sorted({str(record.get("threshold_version", "")) for record in expected})
     if not all(expected_threshold_versions) or threshold.get("threshold_versions") != expected_threshold_versions:
         raise ValueError("threshold artifact threshold_versions do not match the fusion profile")

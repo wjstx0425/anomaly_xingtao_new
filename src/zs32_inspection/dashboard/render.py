@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
 
@@ -86,6 +87,7 @@ class DashboardState:
     running: bool = False
     inspection_requested: bool = False
     exit_requested: bool = False
+    demo_config_path: Path | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,8 +161,19 @@ def _ellipsize(text: str, limit: int) -> str:
     return clean if len(clean) <= limit else clean[: max(0, limit - 3)] + "..."
 
 
-def inspection_button_label(progress: ProgressRecord | None, running: bool) -> tuple[str, bool]:
+def inspection_button_label(
+    progress: ProgressRecord | None,
+    running: bool,
+    *,
+    live_enabled: bool = True,
+) -> tuple[str, bool]:
     """Return the frozen context label and enabled state for the sole CTA."""
+    if not live_enabled:
+        return "离线结果", False
+    if progress is not None and progress.state == "failed":
+        return "检测失败，按S重试", True
+    if progress is not None and progress.state == "worker_starting":
+        return "模型加载中", False
     if not running:
         return "开始检测 [S]", True
     if progress and progress.state == "waiting_front":
@@ -170,13 +183,23 @@ def inspection_button_label(progress: ProgressRecord | None, running: bool) -> t
     return "检测运行中", False
 
 
-def _view_status(view: ViewResult, layer: EvidenceLayer) -> tuple[str, float | None, str]:
+def _view_status(view: ViewResult, layer: EvidenceLayer) -> tuple[str, float | None, float | None, str]:
     if layer is EvidenceLayer.ORIGINAL:
-        return "", None, ""
+        return "", None, None, ""
     branch = view.branches.get(layer.value)
     if branch is None:
-        return "ERROR", None, "branch missing"
-    return branch.status, branch.score, branch.reason
+        return "ERROR", None, None, "branch missing"
+    return branch.status, branch.score, branch.threshold, branch.reason
+
+
+def _demo_config_label(path: Path | None) -> str:
+    if path is None:
+        return "config=-"
+    try:
+        mtime = datetime.fromtimestamp(path.stat().st_mtime).astimezone().isoformat(timespec="seconds")
+    except OSError:
+        mtime = "missing"
+    return f"config={path}  mtime={mtime}"
 
 
 def _place_image(canvas: np.ndarray, image: np.ndarray, rect: Rect) -> None:
@@ -194,9 +217,16 @@ def _render_header(
 ) -> None:
     result = state.result
     identity = result.identity if result is not None else None
-    status = result.machine_status if result is not None else "READY"
+    failed = state.progress is not None and state.progress.state == "failed"
+    status = "ERROR" if failed else (result.machine_status if result is not None else "READY")
+    reason = (
+        state.progress.error or state.progress.message
+        if failed and state.progress is not None
+        else (result.reason if result is not None else "")
+    )
     texts.extend([
-        _Text("ZS32 / RIGHT  八视角检测", (16, 10), 28, _TEXT, True),
+        _Text("ZS32 八视角检测", (16, 10), 28, _AMBER, True),
+        _Text(_demo_config_label(state.demo_config_path), (570, 18), 12, _MUTED),
         _Text(
             (
                 f"part_id={identity.part_id}  capture_session={identity.capture_session}  group_id={identity.group_id}"
@@ -208,7 +238,7 @@ def _render_header(
             _MUTED,
         ),
         _Text(f"总状态  {status}", (1260, 12), 24, _status_color(status), True),
-        _Text(_ellipsize(result.reason if result is not None else "", 46), (1090, 50), 16, _MUTED),
+        _Text(_ellipsize(reason, 120 if failed else 46), (520 if failed else 1090, 50), 16, _RED if failed else _MUTED),
     ])
     cv2.line(canvas, (16, 92), (1584, 92), _BORDER, 1, cv2.LINE_8)
     for index, (layer, label) in enumerate(_LAYER_LABELS):
@@ -250,11 +280,16 @@ def _render_grid(
         composed = compose_view(view, state.layer)
         image_rect = Rect(rect.x + 1, rect.y + 35, rect.width - 2, 202)
         _place_image(canvas, composed.image, image_rect)
-        status, score, reason = _view_status(view, state.layer)
+        status, score, threshold, reason = _view_status(view, state.layer)
         texts.append(_Text(view.view, (rect.x + 10, rect.y + 7), 18, _TEXT, True))
         if status:
             texts.append(_Text(status, (rect.x + 220, rect.y + 7), 16, _status_color(status), True))
-        score_text = "" if score is None else f"score={score:.6g}"
+        score_parts = []
+        if score is not None:
+            score_parts.append(f"score={score:.6g}")
+        if threshold is not None:
+            score_parts.append(f"threshold={threshold:.6g}")
+        score_text = "  ".join(score_parts)
         if score_text:
             texts.append(_Text(score_text, (rect.x + 10, rect.y + 243), 15, _TEXT))
         detail = composed.notice or reason
@@ -273,12 +308,14 @@ def _render_selected(canvas: np.ndarray, state: DashboardState, texts: list[_Tex
     cv2.rectangle(canvas, (rect.x, rect.y), (rect.x + rect.width - 1, rect.y + rect.height - 1), _SURFACE, -1)
     _outline(canvas, rect, _BORDER)
     _place_image(canvas, composed.image, Rect(rect.x + 1, rect.y + 45, rect.width - 2, rect.height - 92))
-    status, score, reason = _view_status(view, state.layer)
+    status, score, threshold, reason = _view_status(view, state.layer)
     texts.append(_Text(view.view, (rect.x + 14, rect.y + 8), 22, _TEXT, True))
     if status:
         texts.append(_Text(status, (rect.x + 350, rect.y + 9), 18, _status_color(status), True))
     if score is not None:
         texts.append(_Text(f"score={score:.6g}", (rect.x + 530, rect.y + 9), 18, _TEXT))
+    if threshold is not None:
+        texts.append(_Text(f"threshold={threshold:.6g}", (rect.x + 720, rect.y + 9), 18, _TEXT))
     detail = composed.notice or reason
     if detail:
         texts.append(_Text(_ellipsize(detail, 120), (rect.x + 14, rect.y + rect.height - 39), 17, _AMBER))
@@ -305,7 +342,8 @@ def _render_footer(
     texts.append(_Text("退出 [Q]", (quit_rect.x + 21, quit_rect.y + 19), 19, _TEXT, True))
     hits.append(HitRegion(quit_rect, "quit"))
 
-    label, enabled = inspection_button_label(state.progress, state.running)
+    live_enabled = state.result is None or state.result.mode == "live"
+    label, enabled = inspection_button_label(state.progress, state.running, live_enabled=live_enabled)
     rect = Rect(600, 816, 400, 72)
     fill = (42, 78, 55) if enabled else _DISABLED
     cv2.rectangle(canvas, (rect.x, rect.y), (rect.x + rect.width - 1, rect.y + rect.height - 1), fill, -1)

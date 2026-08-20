@@ -47,18 +47,15 @@ def test_parser_uses_topology_order_not_manifest_mapping_order(eight_view_result
     assert tuple(view.view for view in result.views) == VIEW_ORDER
 
 
-def test_parser_maps_task2_direct_view_branch_fields(task2_direct_result_dir: Path) -> None:
-    result = load_inspection_result(task2_direct_result_dir)
+def test_parser_rejects_legacy_direct_branch_fields(eight_view_result_dir: Path) -> None:
+    manifest = load_manifest(eight_view_result_dir)
+    record = manifest["views"]["front"]
+    branches = record.pop("branches")
+    record.update(branches)
+    write_manifest(eight_view_result_dir, manifest)
 
-    assert set(result.views[0].branches) == {"template", "patchcore", "yolo", "fusion"}
-    assert result.views[0].branches["template"].state is BranchState.AVAILABLE
-    assert result.views[0].branches["template"].status == "NG_TEMPLATE"
-    assert result.views[1].branches["template"].state is BranchState.AVAILABLE
-    assert result.views[1].branches["template"].status == "REVIEW"
-    assert result.views[4].branches["patchcore"].state is BranchState.ERROR
-    assert result.views[0].branches["fusion"].state is BranchState.SKIPPED
-    assert result.views[0].branches["fusion"].score == pytest.approx(0.42)
-    assert all(branch.state is BranchState.AVAILABLE for branch in result.views[3].branches.values())
+    with pytest.raises(DashboardResultError, match="branches"):
+        load_inspection_result(eight_view_result_dir)
 
 
 @pytest.mark.parametrize("view", ["front", "front_secondary"])
@@ -212,34 +209,29 @@ def test_parser_wraps_source_path_resolve_failure(
         load_inspection_result(eight_view_result_dir)
 
 
-def test_parser_wraps_source_read_failure(
+def test_parser_does_not_read_or_require_source_sha256(
     eight_view_result_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    source_read_attempts: list[Path] = []
     original_read_bytes = Path.read_bytes
 
-    def fail_source_read(path: Path) -> bytes:
-        if path.name == "front.png" and path.parent.name == "sources":
-            raise PermissionError("source became unreadable")
+    def record_source_read(path: Path) -> bytes:
+        if path.parent.name == "sources":
+            source_read_attempts.append(path)
         return original_read_bytes(path)
 
-    monkeypatch.setattr(Path, "read_bytes", fail_source_read)
+    monkeypatch.setattr(Path, "read_bytes", record_source_read)
 
-    with pytest.raises(DashboardResultError, match="source_path.*read.*source became unreadable"):
-        load_inspection_result(eight_view_result_dir)
+    result = load_inspection_result(eight_view_result_dir)
 
-
-def test_parser_rejects_source_hash_mismatch(eight_view_result_dir: Path) -> None:
-    rewrite_view(eight_view_result_dir, "front", source_sha256="0" * 64)
-
-    with pytest.raises(DashboardResultError, match="source_sha256"):
-        load_inspection_result(eight_view_result_dir)
+    assert len(result.views) == 8
+    assert source_read_attempts == []
 
 
 def test_parser_rejects_invalid_source_image(eight_view_result_dir: Path) -> None:
     source = eight_view_result_dir / "sources" / "front.png"
     source.write_bytes(b"not an image")
-    rewrite_view(eight_view_result_dir, "front", source_sha256=_sha256(source))
 
     with pytest.raises(DashboardResultError, match="decode"):
         load_inspection_result(eight_view_result_dir)
@@ -257,10 +249,39 @@ def test_parser_rejects_one_source_reused_for_two_views(eight_view_result_dir: P
     front = manifest["views"]["front"]  # type: ignore[index]
     back = manifest["views"]["back"]  # type: ignore[index]
     back["source_path"] = front["source_path"]
-    back["source_sha256"] = front["source_sha256"]
     write_manifest(eight_view_result_dir, manifest)
 
     with pytest.raises(DashboardResultError, match="distinct source"):
+        load_inspection_result(eight_view_result_dir)
+
+
+@pytest.mark.parametrize("threshold", ["0.5", None])
+def test_parser_turns_invalid_branch_threshold_into_branch_error(
+    eight_view_result_dir: Path,
+    threshold: object,
+) -> None:
+    manifest = load_manifest(eight_view_result_dir)
+    manifest["views"]["front"]["branches"]["template"]["threshold"] = threshold
+    write_manifest(eight_view_result_dir, manifest)
+
+    result = load_inspection_result(eight_view_result_dir)
+
+    branch = result.views[0].branches["template"]
+    assert branch.state is BranchState.ERROR
+    assert "threshold" in branch.reason
+
+
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+def test_parser_rejects_nonfinite_branch_threshold_json(
+    eight_view_result_dir: Path,
+    constant: str,
+) -> None:
+    manifest = load_manifest(eight_view_result_dir)
+    manifest["views"]["front"]["branches"]["template"]["threshold"] = 999999
+    serialized = json.dumps(manifest).replace("999999", constant, 1)
+    (eight_view_result_dir / "runtime_manifest.json").write_text(serialized, encoding="utf-8")
+
+    with pytest.raises(DashboardResultError, match="non-finite"):
         load_inspection_result(eight_view_result_dir)
 
 

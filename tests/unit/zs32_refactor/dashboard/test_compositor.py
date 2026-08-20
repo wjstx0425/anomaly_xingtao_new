@@ -12,10 +12,12 @@ import cv2
 import numpy as np
 import pytest
 
+from zs32_inspection.dashboard import compositor
 from zs32_inspection.dashboard.compositor import (
     compose_view,
     draw_yolo_detections,
     fit_letterbox,
+    load_source_image,
     overlay_red_mask,
     place_crop_mask,
 )
@@ -203,7 +205,10 @@ def test_compose_available_yolo_draws_valid_and_reports_partial_invalid(
     composed = compose_view(view, layer)
 
     assert "部分检测框无效" in composed.notice
-    assert not np.array_equal(composed.image, original)
+    if layer is EvidenceLayer.YOLO:
+        assert not np.array_equal(composed.image, original)
+    else:
+        assert np.array_equal(composed.image, original)
     assert np.array_equal(cv2.imread(str(source_view.source_path)), original)
 
 
@@ -239,7 +244,10 @@ def test_compose_available_yolo_draws_box_and_reports_invalid_label_metadata(
     composed = compose_view(view, layer)
 
     assert "检测标签数据无效" in composed.notice
-    assert not np.array_equal(composed.image, original)
+    if layer is EvidenceLayer.YOLO:
+        assert not np.array_equal(composed.image, original)
+    else:
+        assert np.array_equal(composed.image, original)
     assert np.array_equal(cv2.imread(str(source_view.source_path)), original)
 
 
@@ -256,7 +264,10 @@ def test_compose_available_yolo_reports_partial_invalid_label_metadata(
     composed = compose_view(view, layer)
 
     assert "部分检测标签无效" in composed.notice
-    assert not np.array_equal(composed.image, original)
+    if layer is EvidenceLayer.YOLO:
+        assert not np.array_equal(composed.image, original)
+    else:
+        assert np.array_equal(composed.image, original)
 
 
 def test_secondary_notice_is_determined_by_branch_state(secondary_view: ViewResult) -> None:
@@ -281,6 +292,36 @@ def test_secondary_original_layer_shows_real_source(secondary_view: ViewResult) 
     assert np.array_equal(composed.image, cv2.imread(str(secondary_view.source_path)))
 
 
+def test_parser_and_compositor_share_detached_source_decodes(
+    eight_view_result_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_reads: list[Path] = []
+    original_imread = cv2.imread
+
+    def record_source_reads(path: str, flags: int = cv2.IMREAD_COLOR) -> np.ndarray | None:
+        candidate = Path(path).resolve()
+        if candidate.parent.name == "sources":
+            source_reads.append(candidate)
+        return original_imread(path, flags)
+
+    monkeypatch.setattr(cv2, "imread", record_source_reads)
+    compositor._decode_source_image.cache_clear()
+
+    first = load_inspection_result(eight_view_result_dir)
+    source = first.views[1].source_path
+    detached = load_source_image(source)
+    detached[:, :] = 0
+    composed = compose_view(first.views[1], EvidenceLayer.ORIGINAL)
+    second = load_inspection_result(eight_view_result_dir)
+    repeated = compose_view(second.views[1], EvidenceLayer.ORIGINAL)
+
+    assert len(source_reads) == 8
+    assert compositor._decode_source_image.cache_info().maxsize == 8
+    assert composed.image[0, 0].tolist() == [20, 20, 20]
+    assert repeated.image[0, 0].tolist() == [20, 20, 20]
+
+
 def test_patchcore_and_fusion_use_available_mask(source_view: ViewResult) -> None:
     mask = np.zeros((10, 20), dtype=np.uint8)
     mask[0, 0] = 255
@@ -296,11 +337,92 @@ def test_patchcore_and_fusion_use_available_mask(source_view: ViewResult) -> Non
     assert fusion_view.image[5, 5, 2] > original[5, 5, 2]
 
 
+def test_fusion_hides_yolo_when_branch_score_is_below_threshold(source_view: ViewResult) -> None:
+    patchcore = replace(
+        source_view.branches["patchcore"],
+        state=BranchState.SKIPPED,
+        status="SKIPPED",
+        reason="not required for this compositor case",
+    )
+    view = replace(source_view, branches={**source_view.branches, "patchcore": patchcore})
+    original = cv2.imread(str(source_view.source_path))
+
+    yolo_view = compose_view(view, EvidenceLayer.YOLO)
+    fusion_view = compose_view(view, EvidenceLayer.FUSION)
+
+    assert not np.array_equal(yolo_view.image, original)
+    assert np.array_equal(fusion_view.image, original)
+
+
+def test_fusion_hides_individual_yolo_candidates_below_threshold(source_view: ViewResult) -> None:
+    patchcore = replace(
+        source_view.branches["patchcore"],
+        state=BranchState.SKIPPED,
+        status="SKIPPED",
+        reason="not required for this compositor case",
+    )
+    yolo = replace(
+        source_view.branches["yolo"],
+        score=0.8,
+        threshold=0.5,
+        detections=(
+            {"xyxy": [1, 1, 5, 5], "class_name": "scratch", "confidence": 0.2},
+            {"xyxy": [10, 1, 14, 5], "class_name": "scratch", "confidence": 0.5},
+        ),
+    )
+    view = replace(
+        source_view,
+        branches={**source_view.branches, "patchcore": patchcore, "yolo": yolo},
+    )
+    original = cv2.imread(str(source_view.source_path))
+
+    fusion_view = compose_view(view, EvidenceLayer.FUSION)
+
+    assert np.array_equal(fusion_view.image[6:10, 6:10], original[6:10, 6:10])
+    assert not np.array_equal(fusion_view.image[6:10, 15:19], original[6:10, 15:19])
+
+
 def test_template_without_mask_keeps_original_pixels_and_reports_status(source_view: ViewResult) -> None:
     composed = compose_view(source_view, EvidenceLayer.TEMPLATE)
 
     assert composed.notice == "REVIEW"
     assert np.array_equal(composed.image, cv2.imread(str(source_view.source_path)))
+
+
+def test_template_short_circuit_fusion_leads_with_per_view_result(source_view: ViewResult) -> None:
+    patchcore = replace(
+        source_view.branches["patchcore"],
+        state=BranchState.SKIPPED,
+        status="SKIPPED",
+        reason="global Template gate stopped PatchCore",
+    )
+    yolo = replace(
+        source_view.branches["yolo"],
+        state=BranchState.SKIPPED,
+        status="SKIPPED",
+        reason="global Template gate stopped YOLO",
+    )
+    fusion = replace(
+        source_view.branches["fusion"],
+        state=BranchState.AVAILABLE,
+        status="NG_TEMPLATE",
+        reason="this view's Template result determined Fusion",
+    )
+    view = replace(
+        source_view,
+        branches={
+            **source_view.branches,
+            "patchcore": patchcore,
+            "yolo": yolo,
+            "fusion": fusion,
+        },
+    )
+
+    composed = compose_view(view, EvidenceLayer.FUSION)
+
+    assert composed.notice.startswith("Fusion: NG_TEMPLATE")
+    assert "PatchCore: 未执行" in composed.notice
+    assert "YOLO: 未执行" in composed.notice
 
 
 @pytest.mark.parametrize(

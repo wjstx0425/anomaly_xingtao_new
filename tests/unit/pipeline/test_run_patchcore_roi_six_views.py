@@ -11,6 +11,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 RUNNER = REPO_ROOT / "pipeline/run_patchcore_roi_six_views.sh"
+EIGHT_VIEW_RUNNER = REPO_ROOT / "pipeline/run_patchcore_roi_eight_views.sh"
 
 
 def test_roi_runner_forwards_strong_configuration_without_training(tmp_path: Path) -> None:
@@ -59,3 +60,61 @@ set -eu
     assert "PATCHCORE_PRECISION=float32" in output
     assert "PATCHCORE_BATCH_SIZE=16" in output
     assert "EVAL_BATCH_SIZE=16" in output
+
+
+def test_eight_view_roi_runner_selects_all_views_without_training(tmp_path: Path) -> None:
+    """The eight-view wrapper should reuse the strong runner with an explicit view contract."""
+    data_root = tmp_path / "cropped"
+    data_root.mkdir()
+    (data_root / "crop_manifest.csv").touch()
+    run_base = tmp_path / "results"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    capture = tmp_path / "capture.txt"
+    fake_bash = fake_bin / "bash"
+    fake_bash.write_text(
+        """#!/usr/bin/env sh
+set -eu
+{
+  printf 'args=%s\n' "$*"
+  env | sort
+} > "$CAPTURE"
+""",
+        encoding="utf-8",
+    )
+    fake_bash.chmod(0o755)
+    env = os.environ.copy()
+    env.update({"PATH": f"{fake_bin}:{env['PATH']}", "CAPTURE": str(capture)})
+
+    result = subprocess.run(
+        ["/usr/bin/bash", str(EIGHT_VIEW_RUNNER), str(data_root), str(run_base), "0"],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout
+    output = capture.read_text(encoding="utf-8")
+    assert "run_patchcore_roi_six_views.sh" in output
+    assert "right_front_secondary" in output
+    assert "right_back_secondary" in output
+    assert "PATCHCORE_SUMMARY_NAME=eight_view_summary.csv" in output
+
+
+def test_custom_model_trainer_accepts_secondary_views() -> None:
+    """The numbered trainer parser should expose both secondary right-hand views."""
+    result = subprocess.run(
+        [str(REPO_ROOT / ".venv/bin/python"), str(REPO_ROOT / "pipeline/8_train_custom_models.py"), "--help"],
+        cwd=REPO_ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout
+    assert "right_front_secondary" in result.stdout
+    assert "right_back_secondary" in result.stdout

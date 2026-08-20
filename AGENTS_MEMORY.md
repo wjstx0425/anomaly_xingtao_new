@@ -1,5 +1,72 @@
 # AGENTS Memory
 
+## BMW right multisource Demo integration lives on the BMW worktree (2026-08-11)
+
+- The newly trained assets under `results/bmw_lab_one_click/bmw_right_multisource_left_yolo_v1` are integrated in
+  `.worktrees/bmw-eight-view-handoff` rather than merged into this dirty ZS32 root branch. The Demo profile there
+  selects the right-hand ROI, eight new Template/EfficientAD models, new YOLO, the newly calibrated 5% whole-part
+  EfficientAD thresholds, and a detector-version-compatible right bright-streak config.
+- EfficientAD threshold evidence separates 41 branch-negative parts (33 true business normals plus 8 no-streak
+  business NG) from the business-normal metric. The tightened asset gives 1/41 branch-negative false NG (2.44%),
+  1/33 business-normal false NG (3.03%), and 7/7 visible-defect detection on the same demo-only selection data.
+  It pins all eight checkpoint SHA-256 values, the Demo pins the threshold artifact SHA, and `back_left` is guarded
+  at `0.001` rather than the former subnormal value. The complete score artifact is
+  `results/bmw_lab_one_click/bmw_right_multisource_left_yolo_v1/efficientad/score_analysis/part_thresholds.json`.
+- The compatible right bright-streak recalibration remains weak (final-test balanced accuracy 0.453); do not claim
+  that branch is accepted until a new right-hand bright ROI/rule is validated. The end-to-end offline smoke sample
+  `bmw_right_normal_group039_000001` passed all 25 checks and produced
+  `results/bmw_eight_view_demo/right_multisource_group039_smoke.png`.
+
+## ZS32 EfficientAD six-view benchmark audit blocker (2026-07-21)
+
+- A post-training same-image runtime candidate benchmark now exists at `results/zs32_efficientad_s_six_view_seed42_v1/runtime_benchmark_same_image_20260721.json`. Six resident EfficientAD-S models on RTX 4090, one warmup plus five formal canonical rounds over `zs32_timing_worker_parallel_v1/run_02/crops/patchcore`, measured six `Engine.predict` calls at 1.717-1.787 s, median 1.748 s. The matching current PatchCore stage median is 3.301 s, so the measured Engine segment saves 1.553 s / 47.0%; holding every other Stage32 cost fixed projects 7.006 -> 5.454 s (-22.2%), but this is not yet an integrated end-to-end EfficientAD result.
+- EfficientAD checkpoint restoration totaled 0.762 s and the first six-view warmup totaled 2.077 s. Do not compare the 0.762 s directly with the full PatchCore worker startup because imports, Engine setup, GPU transfer, and runtime publication boundaries differ.
+- The six artifacts are EfficientAD-small, 256x256, FP32 checkpoints for primary views only. Current Stage32 hardcodes PatchCore loading/manifest names, v10 binds PatchCore model and profile hashes, and EfficientAD reports only one deploy threshold per view rather than the required low/high pair. Never replace v10 paths directly; first build a separate candidate runtime/evidence adapter and benchmark score/map/mask/evidence plus Stage18 under a new bundle.
+- Historical context: the earlier requested EfficientAD-S/M training benchmark stopped after its mandatory read-only audit. The later user-supplied `zs32_efficientad_s_six_view_seed42_v1` checkpoints supersede that no-checkpoint state for speed testing only; they do not resolve the documented split or runtime-publication limitations.
+- Authoritative source/ROI lineage is `dataset/zs32_all_right_patchcore_roi/crop_manifest.csv`: 2456 unique source and output paths. Each primary view has 306 normal and 28 defect crops; model input remains `256x256`. Its `roi_config.json` is byte-identical to `/home/yunjing/anomalib/dataset/zs32_eight_view_roi_config.json`, SHA-256 `9412b2838cdb96f722db356714cf9bbbb5ea01810671ccf92b67323de77ebe65`.
+- Active v10 still binds the historical `results/zs32_patchcore_eight_view_all_seed42` checkpoints. Per primary view that old preprocessing manifest has 334 rows but only 279 unique output paths/files because session identities collided. The six measured checkpoint hashes still match v10 exactly; preserving hash integrity does not make that training lineage valid.
+- `results/zs32_patchcore_eight_view_all_seed42_v2` fixes path identity (334 rows/files per primary view: 245 train normal, 61 `normal_test`, 28 defect), but the legacy datamodule uses `val_split_mode=same_as_test` and its threshold/FPR reporting reuses `normal_test`; it has no independent calibration/final-test partition.
+- The raw ROI manifest has no independently verified physical-part identifier. `session_id__groupNNN` is only a capture-identity proxy, so the required physical `part_id` train/calibration/test non-overlap cannot be proved. Do not launch the 12-model benchmark until an operator supplies or approves a canonical physical-part mapping and immutable three-way split artifact.
+- EfficientAD resources are complete: small teacher SHA-256 `a16ded54719674435576aee641152616a640dfc6dc2b83115dab6e226610ae7d`, medium teacher SHA-256 `f7356663c8e00ada12ae01fb8c8aad0a1de2f800f8eadf252a46d29bbdfdf718`, and ImageNette tree `/home/yunjing/anomalib/.cache/anomalib/imagenette/imagenette2` SHA-256 `820188d384d211ab438e2fd1e6200fe3fea2685ac0756bc53af3b2dcf49d1dc3` (13,394 verified images). The checked-in example config remains unusable because its paths/hashes are placeholders and seed is 43.
+- The strict `zs32-train-anomaly` backend supports small/medium and immutable hash-bound candidates but currently lacks a real EfficientAD recipe plus dataset-release/materialized-export publication. Legacy Stage 8 is not an acceptable substitute without adding model-size selection, explicit three-way physical split, held-out evaluation, resume-safe per-view outputs, requested metrics, and segmented benchmark timing.
+- v10 thresholds remain commissioning-only and explicitly declare `data_leakage=true`, `test_used_for_selection=true`, `fit_split=calibration+test`, `evaluation_split=test_reused_for_selection`, PatchCore model rebinding, and four manual PatchCore overrides. Never use them as EfficientAD thresholds or as clean held-out accuracy evidence.
+
+## ZS32 demo timing and resident inference worker (2026-07-17)
+
+- The 2026-07-21 capture CPU pass runs four independent in-memory HDR fusions and four PNG encodes concurrently after SDK acquisition. Camera/result order and the first canonical error remain topology-ordered; workers return outcomes/timings and only the main thread mutates `TimingRecorder`. Existing grouped SDK reads remain the separately authorized prior optimization.
+- New critical-path fields are `hdr_fusion_parallel_wall` and `image_encoding_parallel_wall`. The old `hdr_fusion`/`image_encoding` fields now sum per-worker CPU time and must not be interpreted as elapsed wall time. A real-size offline four-front-view benchmark using the latest saved 4024x3036 images measured HDR 1.742 -> 0.683 s (2.55x) and PNG 2.290 -> 0.978 s (2.34x), with exact fused pixels and PNG bytes; peak process RSS was about 2.88 GiB. This is not a live-camera benchmark.
+- Capture-parallel verification: 253 directly related adapter/bootstrap/service/live/collector tests passed; targeted `py_compile` and `git diff --check` passed; independent review found no remaining Critical/Important issues. The broader capture-data directory still has 19 unrelated existing failures from topology prompt fixtures and private-file permission expectations.
+- The 2026-07-19 lossless parallel pass decodes the eight independent source PNGs with a bounded four-thread pool and evaluates the six primary prepared Template groups with six threads. Decode results and Template results are still collected in canonical view order; all eight Template crop PNGs are written before evaluation, and `front_secondary/back_secondary` are never submitted to Template in the 20/22-group profiles.
+- The authoritative parallel benchmark is `results/zs32_timing_worker_parallel_v1/run_01..05` after `warmup`: all five runs are `OK` and complete. Median Stage32+Stage18 is 7.006 s (range 6.826-7.296), versus io-v3 median 8.155 s (-14.1%). Source decode falls from 0.896 to 0.299 s (-66.6%); Template aggregate falls from 1.339 to 0.906 s (-32.3%), with the six-view parallel evaluate wall at 0.123 s. CSV semantic projections and every source/crop/evidence PNG byte plus all six raw NPY arrays exactly match io-v3 run_02.
+- Second lossless I/O pass removes eight temporary YOLO ROI PNGs by passing canonical contiguous BGR ndarrays, overlaps PatchCore raw/mask/overlay writers with later view inference, writes YOLO evidence with two bounded workers, reuses the in-memory PatchCore crop for overlays, and computes each archived source SHA once. `sources/` remains an independent `copy2` archive; do not replace it with hardlinks.
+- The authoritative post-I/O benchmark is `results/zs32_timing_worker_io_v3/run_01..03`: complete Stage32+Stage18 totals 8.171/8.155/8.061 s (median 8.155 s), all `OK` and complete. The old 3.798 s I/O critical path is 1.276 s median (0.710 source/crop preparation + 0.136 PatchCore writer residual wait + 0.430 YOLO evidence), a 66.4% reduction; total worker time improves 30.7% from 11.765 s. Per-view async writer seconds are summed CPU work, not wall time.
+- Worker v2 versus all three io-v3 runs match projected manifest fields, PatchCore/YOLO/Template/fusion CSV values, 20-group decisions, source/evidence hashes, six raw NPY arrays, PatchCore mask/overlay pixels, and eight YOLO evidence pixels. `zs32_timing_worker_io_v1` used the wrong default 22-group profile and failed closed; `io_v2` was infer-only; neither is acceptance evidence.
+- The active bundle remains immutable `results/zs32_runtime_bundle_eight_view_20group_patchcore_tuned_v10/runtime_bundle.json`; no v10 model, threshold artifact, or bundle file was overwritten.
+- Real same-image cold Stage32+Stage18 timing was 24.260 s internally (25.49 s external; the pre-instrumentation external baseline was 27.89 s). The top bottleneck was six PatchCore loads at 10.801 s, followed by Template at 2.412 s and YOLO batch at 1.457 s.
+- Live Dashboard now owns an independent serial Unix-socket inference worker. It preloads exactly six primary PatchCore models, one eight-view YOLO, and six primary Template groups. Stage35 keeps capture/result validation/final complete publication and retains the legacy Stage32 subprocess fallback.
+- Worker startup preload measured 10.888 s and runs while the Dashboard/operator capture flow proceeds. The final prepared worker same-image Stage32+Stage18 run measured 11.765 s, a 51.5% reduction from the instrumented 24.260 s cold run.
+- Stage32 decodes the eight originals once and shares them between Template and model ROI generation. Hikvision grouped capture still triggers all four cameras first, then performs one blocking read per distinct camera handle in parallel and restores topology order.
+- Per-generation `timing.json` records front/back capture, HDR short/long, HDR fusion, image encoding/write, Stage35 child/worker wall time, runtime config, Template, PatchCore load/per-view inference, YOLO load/batch inference, evidence writes, Stage18, Dashboard parse/render/display, and click-to-first-frame total.
+- Historical v10, cold instrumented, two initial worker generations, and final prepared-worker generation have identical projected final status, scores, locked thresholds, YOLO detections/boxes, 20 Stage18 identities, and secondary Template/PatchCore SKIPPED states on the saved live group001 images.
+- Precision-sensitive A/B options were not adopted: YOLO 960/640 changed detections; PatchCore autocast FP16 changed scores/maps for only 1.8% aggregate inference gain; reducing Template count changed back_right to NG_TEMPLATE. TensorRT export was blocked by absent ONNX/TensorRT packages. Camera interval/timeout/settle A/B still requires a real operator/hardware run.
+- Detailed report and command: `docs/ZS32_DEMO_SPEED_OPTIMIZATION_20260717.md`. Final headless screenshot: `artifacts/zs32_timing_worker_v2_dashboard.png` (1600x920).
+- Verification at this checkpoint: the second I/O pass has 103 targeted model-runtime/Stage32 tests passing, and the final expanded directly related pipeline/model/live regression is 354 passed. Earlier Dashboard/capture/worker groups remain 135/28/5 passed. Broader unrelated coverage exposed 2 old runtime-bundle CLI import failures, 7 old strict-fusion fixture ROI-id failures, and 1 old compositor pixel-equality failure; these were not modified as part of the timing/worker optimization.
+
+## ZS32 Stage35 live HDR alignment (2026-07-15)
+
+- The operator's authoritative historical Stage1 HDR command uses short/long exposure `1500/5500 us`, gain `0`, capture interval `0.5 s`, one HDR settle frame, and timeout `5000 ms`.
+- Stage35 now locks those explicit values in `build_capture_command` and also locks the referenced Stage1 fusion defaults: dark/clip thresholds `70/245`, blend width `18`, blur size `31`, two HDR retries, max clip `12%`, and no MTB alignment.
+- This fixes acquisition-domain drift only. The previous live run used different bootstrap defaults (`4000/35000`, blend `50`, blur `101`, no retry); its existing fused images are not rewritten because short/long source frames were not saved.
+- Minimal verification: the exact capture-command unit test passed, targeted `py_compile` and `git diff --check` passed. No camera or GPU run was performed.
+
+## ZS32 dashboard minimal UI blockers (2026-07-15)
+
+- Offline `--result-dir` dashboards now render a disabled `离线结果` CTA; keyboard and mouse inspection actions cannot enqueue live work without a live result/controller context.
+- Live `complete` progress no longer reloads, hashes, and decodes the same eight-view result every 50 ms. It reloads only on the first complete record or when the result path changes.
+- The dashboard test fixture now gives available YOLO detections a valid ROI, and the stale secondary-view unsupported assertion was removed because `MODELED_VIEWS == VIEW_ORDER`.
+- Minimal verification: 79 parser/render/app tests passed with the UI-only CUDA gate bypassed via `--confcutdir=tests/unit/zs32_refactor/dashboard`; real group064 headless rendering, targeted `py_compile`, and `git diff --check` passed. In this sandbox, set `UV_CACHE_DIR=/tmp/uv-cache` because the default uv cache is read-only.
+- Current debug screenshot: `artifacts/zs32_dashboard_eight_view_commissioning/debug_dashboard.png`. It remains commissioning evidence only: overall `REVIEW`, Fusion `SKIPPED`, not production acceptance.
+
 ## ZS32 live dashboard progress/control Tasks 6+7 (2026-07-15)
 
 - Bootstrap now supports paired `--progress-json/--control-json` operation without a TTY. Each front/back wait publishes a fresh confirmation token, consumes one exact command, and publishes `capturing_front/back` immediately before camera capture.
@@ -675,6 +742,18 @@
 - Local integration on 2026-07-13 merged `feat/zs32/multimodel-fusion` into `main` after first committing the completed PatchCore ROI workflow and C789 matcher prototype. Backup branch: `backup/main-before-zs32-fusion-20260713`; no GitHub push was performed.
 - The merged PatchCore + fusion target suite reports `333 passed, 1 warning`; production/core-import Ruff, Python compilation, shell syntax, profile JSON, and all five relevant CLI help commands pass.
 
+## BMW eight-view bright-streak and EfficientAD Demo thresholds (2026-08-10)
+
+- Branch/worktree: `agent/bmw-eight-view-handoff` in `.worktrees/bmw-eight-view-handoff`; the public Draft PR is `wjstx0425/anomaly_xingtao_new#1`. Never commit `dataset/`, `results/`, customer images, checkpoints, or the local asset symlinks.
+- Bright-streak detection in `src/bmw_inspection/detector.py` now follows a row-wise center ridge, allowing gradual local drift and width changes instead of requiring one whole connected component. It keeps the existing fixed ROI, presence, continuity, and evidence contracts.
+- Standalone recalibration is `pipeline/bmw_lab_recalibrate_bright_streak.py`. Default mode fits only `split=calibration`; explicit `--bold-continuity` keeps SNR/coverage presence fitting calibration-only but uses calibration plus final-test normals for the three continuity envelopes. It is strictly boolean and records `demo_only=true` and detailed split/leakage flags.
+- Real bold artifact: `results/bmw_lab_one_click/bmw_lab_eight_view_v1/bright_streak_ridge_v3_bold/`. Thresholds are SNR `3.289698`, coverage `0.257749`, longest-run `0.220228`, max-gap ratio `0.393148`, max-gap count `12`. Current-data result is 20/20 calibration and 20/20 final rows correct, including 17/17 normal streaks OK and 3/3 no-streak samples `NG_NO_STREAK`; this is demo tuning, not independent validation. There are still no real broken-but-present streak negatives.
+- Complete EfficientAD scoring uses 20 normal physical parts and 6 defect physical parts, each with all eight views: 208 rows in `efficientad/score_analysis/efficientad_scores.csv`. The defect set is the union of per-view visible-defect part IDs, completed from the canonical per-view ROI crops.
+- Whole-part threshold CLI is `pipeline/bmw_lab_calibrate_efficientad_thresholds.py`. Current thresholds are front `0.680344`, front_left `0.009403`, front_right `0.486333`, front_secondary `0.111191`, back `1.0000000000000002`, back_left `0.457497`, back_right `0.230414`, back_secondary `0.575206`. The `back > 1` threshold intentionally disables a noisy view.
+- Current selected-data EfficientAD result is 1/20 normal whole-part false NG (`5%`, `bmw_normal_group051/back_left`) and 6/6 defect whole-parts detected with 17 defect-view hits. The artifact is explicitly `demo_only=true` and `test_used_for_selection=true`; it must be validated on new untouched physical parts before any acceptance claim.
+- Demo configuration requires explicit `bright_streak.config` and `efficientad.threshold_artifact` assets and fails closed on missing/invalid files. Runtime EfficientAD status is solely `score >= per-view threshold`; checkpoint `pred_label` is diagnostic only. Heatmaps use a fixed 0-1 scale.
+- Fresh final offline smoke `bmw_normal_group072_000001` produced 25 PASS, final OK, 3430.967 ms with RTX 4090 CUDA inference. Screenshot: `artifacts/bmw_eight_view_threshold_demo/group072_bold_efficientad_5pct.png`; this single-sample smoke is not a throughput benchmark.
+
 ### ZS32 right-hand offline calibration commissioning (2026-07-14)
 
 - Stage 33 is `pipeline/33_run_zs32_offline_calibration.py`; its core is `capture_data/zs32_offline_calibration.py`. It is explicitly commissioning-only, keeps six PatchCore models plus YOLO resident in one process, supports case-level resume, and recomputes all six template scores without applying the online short-circuit.
@@ -797,6 +876,7 @@
 - Prepared output is `dataset/zs32_eight_view_yolo_reconciled_20260715_v3`: 2104 source images -> 1664 canonical images, 440 duplicate images across 55 renamed group aliases, 248 historical positive labels reused, 864 normal-directory empty labels confirmed, 526 missing labels, 26 exact-duplicate label conflicts, and 552 Label Studio review tasks. Perceptual candidates are audit-only and never auto-reused; the current data has zero proven horizontal-flip reuse rows. The earlier unsuffixed target existed as an empty directory, so it was not overwritten.
 - The draft is deliberately blocked from training: it has `yolo_draft/DO_NOT_TRAIN_UNTIL_LABEL_STUDIO_REVIEW_COMPLETE.txt` and intentionally has no `data.yaml`. Import `label_studio/tasks_all.json` to see every reused prediction and filter on `needs_human_annotation`; use `tasks_review.json` only for the 552 unresolved/conflicting tasks. After review, export Label Studio JSON and run Stage 36 `finalize` to produce the only standard train/val/test dataset and a refreshed final mapping.
 - The operator later narrowed labeling scope to all 840 raw defect images only. Use `pipeline/36_reconcile_zs32_yolo_labels.py prepare-defect-840` and `dataset/zs32_eight_view_yolo_reconciled_20260715/defect_label_studio_840/tasks_defect_840.json`; it contains exactly 105 tasks per view, no normal images, 253 safe preannotations, 52 conflict-review tasks across 26 exact-duplicate clusters, and 535 missing-label tasks. The 40 duplicate aliases remain independent tasks while retaining alias-bound splits.
+- On 2026-07-15 the operator explicitly confirmed that all 439 Label Studio tasks marked skipped/cancelled had been manually inspected and contained no visible defect. Stage 36 now exposes `finalize-defect-840-yolo`, which requires `--confirm-skipped-empty`, converts those omissions to audited empty YOLO txt files, rejects orphan/invalid labels and exact-pixel leakage, and uses a fixed whole-session split that binds the 40 cross-session duplicate clusters. The generated independent dataset is `dataset/zs32_defect_840_yolo_final_20260715`: 840 images/labels, 400 positive images, 440 empty images, 448 boxes; train 616/275 positive, val 88/51 positive, test 136/74 positive. The source Label Studio YOLO export remains unchanged.
 
 ### ZS32 strict eight-view Stage33 real commissioning attempt (2026-07-15)
 
@@ -810,3 +890,688 @@
 
 - Stage33 reuse validates every case against the active runtime, ROI, model, source, and evidence contract; preflight performs the same available read-only checks before GPU initialization.
 - Stage31's four reports and Stage33 sidecar are one atomic no-replace generation. Task2 is consumed through its public manifest loader and binds the asset-set SHA, ROI bytes, and Template bytes; regenerate stale immutable generations instead of editing them.
+
+## ZS32 Task 8 minimal eight-view commissioning acceptance (2026-07-15)
+
+- Reused real same-identity Stage33 v4 case `results/zs32_stage33_eight_view_commissioning_v4/cases/right_normal_group064-b1959d15`; no GPU model rerun. Strict dashboard parsing returns canonical eight-view order, all `model_supported=true`, and exact Template/PatchCore/YOLO/Fusion branches. The case stays `REVIEW` because Fusion is `SKIPPED`.
+- Headless Stage36 screenshot: `artifacts/zs32_dashboard_eight_view_commissioning/group064_stage33_v4_dashboard_1600x920.png` (1600x920, SHA-256 `2356905b70ac0859864764f600412fdb536890f6455ac421b642567b2f615f43`). No HighGUI mode was used.
+- Fresh v2 bundle/topology preflight passed for `results/zs32_runtime_bundle_eight_view_v2/runtime_bundle.json`; bundle ID `zs32-right-eight-view-commissioning-v1`, asset-set SHA `dda14d6b3379a186bf791ad5873bee8019cb0e407ba89d8eaae75784e9fcdcfa`.
+- Stage35 device-list preflight found all four topology serials: `DA9805574`, `DA9625347`, `DB0998274`, `DB0968108`. No operator capture was run; hardware capture remains incomplete.
+- Acceptance remains commissioning-only/non-production. v2 thresholds contain authorized Stage33 v4 test leakage; existing Stage18 group064 replay is known `NG_YOLO` from back; finite zero-area post-clip YOLO candidates are warning/excluded while malformed or nonfinite candidates fail closed.
+
+### ZS32 positive-defect + trusted PatchCore-normal YOLO rebuild (2026-07-15)
+
+- Use `dataset/zs32_defect_positive_patchcore_normal_yolo_20260715_v2` for the minimal clean retraining route. The unsuffixed directory is an incomplete failed build and must not be trained.
+- The v2 dataset contains 779 images: 379 exact-pixel-unique Label Studio positive defect images with 425 boxes, plus 400 empty-label normal ROI images selected as 50 complete eight-view groups from `/home/yunjing/anomalib/dataset/zs32_eight_view_patchcore_roi/right`.
+- All 440 defect tasks without a non-empty exported YOLO label are excluded rather than treated as negatives. The audit is `excluded_uncertain_defects.csv`. Another 21 exact-pixel positive aliases are excluded and recorded in `deduplicated_positive_aliases.csv`.
+- The split is physical-group bound with exact-pixel alias binding and seed 42: train 539 (267 positive/272 normal), val 113 (49/64), test 127 (63/64). Every split contains both hands, all three defect types, all eight positive views, and all eight normal views; no sample group or exact pixel SHA crosses splits.
+- Whole-session isolation is intentionally relaxed because the available `less` and `others` positive sessions cannot populate train/val/test simultaneously. Do not describe this dataset as session-isolated; it is group-isolated.
+- Stage 36 `build-balanced-defect-normal` now accepts the PatchCore `crop_manifest.csv` directly and `--max-normal-groups`. It resolves the existing ROI paths, computes decoded-pixel SHA256, creates empty txt files, and refuses to overwrite an existing output.
+
+### ZS32 Stage 37 small-defect tiled YOLO workflow (2026-07-15)
+
+- Stage 37 entrypoint is `pipeline/37_tile_zs32_yolo_dataset.py`; its implementation is `capture_data/tile_zs32_yolo_dataset.py`. Focused regression coverage is in `tests/unit/capture_data/test_tile_zs32_yolo_dataset.py`.
+- The generated independent dataset is `dataset/zs32_defect_positive_patchcore_normal_tile1280_s960_20260715`: 817 tiles and 425 boxes. Train has 559 tiles (287 positive, 272 trusted-normal empty, 292 boxes), val has 125 (61 positive, 64 empty, 64 boxes), and test has 133 (69 positive, 64 empty, 69 boxes).
+- The fixed geometry is `1280 x 1280`, stride `960`, overlap `320`, and padding value `114`. Every source box is assigned once to the center-containing tile with maximum visibility; the measured minimum retained visibility is `0.954962`.
+- Tiles inherit the v2 grouped split. Validation found no cross-split leakage across 139 physical groups or all 779 exact pixel SHA identities; the 440 uncertain defect images remain excluded.
+- Real tiled inference smoke output is `results/yolo/zs32_stage37_tiled_infer_smoke_20260715`: one real ROI image produced 12 tiles, 27 raw tile detections, and 14 source-coordinate detections after global merge.
+
+### ZS32 strict 22-group live commissioning v3 (2026-07-15)
+
+- New immutable commissioning bundle: `results/zs32_runtime_bundle_eight_view_22group_v3/runtime_bundle.json`; do not overwrite or reinterpret the existing eight-view v2 bundle.
+- The display/runtime contract remains exact eight-view. `front_secondary` and `back_secondary` Template are fixed `SKIPPED` with null numeric evidence, while PatchCore and YOLO remain required for both views. Stage18 therefore requires exactly 22 groups: six Template, eight PatchCore, and eight YOLO.
+- Six primary Template highs are temporary fixture-commissioning values: front `.034`, front_left `.037`, front_right `.036`, back `.036`, back_left `.035`, back_right `.036`; all lows are unchanged. The independent model is `results/zs32_template_gate_right_eight_view_22group_v3`.
+- Stage35 now derives the 22/24 alias from the bundle, validates Template stop status by aggregate priority instead of the obsolete final-row rule, and accepts SKIPPED only for the two secondary views. Stage18 treats bundle-generated ZS32 commissioning configs as strict and validates the bound threshold artifact.
+- CPU Template smoke on fixed-fixture generation `20260715_193411_917807_live_part_001` produced REVIEW on all six primary views and no NG_TEMPLATE; secondary Template is covered by the SKIPPED contract. The v3 bundle remains `commissioning_only=true`, `production_release_allowed=false`, and retains the authorized YOLO test-leakage warning.
+- Before freezing production thresholds, collect 10-20 known-normal fixture groups and evaluate the six primary score distributions. Do not promote the temporary highs or current UI result as production acceptance.
+
+### ZS32 Stage 30 eight-view ROI crop compatibility fix (2026-07-15)
+
+- Stage 30 must pass `CANONICAL_VIEWS` explicitly through ROI loading, source discovery, selection, conversion, and summary generation. The lower-level `VIEWS` default remains the historical six-view tuple for compatibility with legacy callers.
+- The right-hand source root is `dataset/zs32_all` (the command adds `/right` itself). The reused ROI is `/home/yunjing/anomalib/dataset/zs32_eight_view_roi_config.json`, image size `4024x3036`, SHA-256 `9412b2838cdb96f722db356714cf9bbbb5ea01810671ccf92b67323de77ebe65`.
+- Real read-only preflight after the fix finds all eight canonical views and 2456 images: 334 each for the six primary views and 226 each for `front_secondary` and `back_secondary`. The focused ROI dataset suite passes 55 tests.
+
+### ZS32 multi-session PatchCore preprocessing identity fix (2026-07-16)
+
+- Nested `.../<session>/images/*_groupNNN_*` PatchCore sources must use `sample_id=<session>__groupNNN`; the same value is the normal split key. Flat legacy inputs and nested non-group inputs keep their historical identities.
+- This prevents different capture sessions that reuse `group001` and the same basename from overwriting one another. Preprocessing also keeps an in-memory `processed_path -> source_path` registry and fails before a second source can overwrite the first; the final manifest asserts `processed_path` uniqueness.
+- The old `results/zs32_patchcore_eight_view_all_seed42` checkpoints were trained after 55 collisions per view and must not be reused: primary views had 334 manifest rows but only 279 files, secondary views 226 rows but only 171 files. Use a new run root and retrain.
+- Real identity preflight on `dataset/zs32_all_right_patchcore_roi` now produces 2456 unique targets from 2456 sources: 334 per primary view and 226 per secondary view. The workflow and runner regression set passes 29 tests.
+- Separate known limitation: because each view independently samples 20% of its own normal-key population, the current primary and secondary populations produce 67 shared session/group keys with mixed train/normal_test assignments. This does not reintroduce path collisions, but strict fusion-level group isolation requires a separate stable cross-population split change.
+
+### ZS32 two-session normal-only Template model v7 (2026-07-15)
+
+- The useful Template source is restricted to the right-hand ROI data from sessions `20260715_204149_641124` and `20260715_214625_447032`. The filtered manifest is `dataset/zs32_all_right_patchcore_roi/crop_manifest_normal_20260715_two_sessions.csv`: 968 rows, all `normal`, with 148 images for each primary view and 40 for each secondary view.
+- `pipeline/train_zs32_template_gate.py --normal-only` now explicitly ignores defect rows and calibrates a binary PASS/NG gate using only held-out normal risks. It publishes `low_threshold == high_threshold == nextafter(normal_quantile cutoff)`, so the demo has no REVIEW interval while preserving the old normal+defect behavior unless the flag is used.
+- The trained model is `results/zs32_template_gate_right_20260715_two_sessions_normal_only_v7/model.json`, using `normal_quantile=1.0` and `evaluation_fraction=0`. Every group records `calibration_defect_count=0`.
+- Latest fixed-fixture smoke input `20260715_231954_656011_live_part_001` passes all six primary Template views. The immutable 22-group commissioning bundle is `results/zs32_runtime_bundle_eight_view_20260715_template_normal_only_v7/runtime_bundle.json`; secondary Template remains `SKIPPED`, while PatchCore and YOLO remain required.
+- This bundle is demo/commissioning only: `production_release_allowed=false`. Its PatchCore and YOLO thresholds retain the explicitly acknowledged demo model-rebind/test-leakage warnings.
+
+### ZS32 20-group YOLO 0.07 and secondary PatchCore skip v8 (2026-07-16)
+
+- The immutable demo bundle is `results/zs32_runtime_bundle_eight_view_20group_yolo007_secondary_skip_v8/runtime_bundle.json`; it does not replace v7. Its exact contract is 20 groups: six primary Template, six primary PatchCore, and eight-view YOLO.
+- `front_secondary` and `back_secondary` now require only `yolo`. Their Template and PatchCore branches are both published as `SKIPPED`; the model runtime does not crop, load, execute, or emit PatchCore CSV rows for those two views. YOLO still executes all eight views.
+- Every YOLO record uses `low_threshold=high_threshold=0.07`, so score `<0.07` is CLEAR/OK evidence and score `>=0.07` is STRONG/NG_YOLO. Runtime `candidate_conf` remains `0.001` so low-score candidates are retained for audit rather than discarded before thresholding.
+- Dashboard display contract: the standalone YOLO evidence page retains every `candidate_conf` candidate for diagnostics, while the Fusion page draws only boxes whose individual `confidence >=` that view's final YOLO threshold. If the branch score is below the threshold, Fusion draws no YOLO box, preventing sub-threshold candidates from being presented as defects.
+- The reusable profile is `config/fusion/zs32_right_eight_view_20_group_commissioning.json`. Stage18, Stage32, Stage35, runtime bundle validation, audit formatting, and dashboard manifests accept the exact 20-group identity; unsupported group counts remain fail-closed.
+- Stage34 exposes the explicit demo-only `--yolo-threshold-override` option. The v8 threshold artifact is `results/zs32_20group_yolo007_secondary_skip_commissioning_v8/thresholds.json` and records `commissioning_source=manual_demo_override` for YOLO.
+- Focused regression across runtime, bundle, Stage18/32/35, orchestrator, and dashboard passed 389 tests. The bundle remains `commissioning_only=true`, `production_release_allowed=false`, with the existing YOLO test-leakage and model-rebind warnings.
+
+### Stage18 PatchCore decision writeback for dashboard (2026-07-16)
+
+- After successful Stage18 fusion, `pipeline/32_run_zs32_multimodel_inference.py` now reads the per-part audit and atomically rewrites each executed PatchCore dashboard branch status from `computed_evidence_level`: `CLEAR -> CLEAR`, `GRAY -> REVIEW`, and `STRONG -> NG_ANOMALY`.
+- PatchCore `state=available` continues to mean its heatmap/mask evidence exists; the user-facing `status` now carries the actual decision. Existing score and evidence/mask/ROI paths are preserved. The two secondary PatchCore branches in the 20-group profile remain `state=skipped,status=SKIPPED` and are never overwritten from the global result.
+- The writeback validates all active views, exact audit score equality, finite ordered thresholds, and score/level boundary consistency before modifying any branch, preventing partial status updates.
+- Read-only verification against real generation `20260716_082357_361244_live_part_001` maps `back_right` score `0.499255895614624` over high `0.4606882333755493` to `NG_ANOMALY/STRONG`; the other primary views map to `CLEAR`, and both secondary views stay `SKIPPED`.
+- Focused Stage32/runtime/dashboard regression passed 161 tests. Ruff was not available in the current uv environment; `py_compile` and `git diff --check` are the fallback source checks.
+
+### ZS32 per-view PatchCore threshold tuning v9 (2026-07-16)
+
+- The immutable tuned bundle is `results/zs32_runtime_bundle_eight_view_20group_patchcore_tuned_v9/runtime_bundle.json`; v8 is unchanged.
+- `front_right` PatchCore is now `low=0.5`, `high=0.6661418676376343` (high preserved). `back_right` PatchCore is now `low=0.5`, `high=0.55`. All other Template/PatchCore records are unchanged, all eight YOLO records remain `low=high=0.07`, and both secondary PatchCore branches remain skipped by the 20-group profile.
+- Stage34 now supports repeatable demo-only `--patchcore-threshold-override VIEW:LOW:HIGH`, records `commissioning_source=manual_demo_override`, validates required PatchCore views and finite ordered bounds, and includes the canonical override map in the signed artifact.
+- The v9 threshold artifact is `results/zs32_20group_patchcore_tuned_commissioning_v9/thresholds.json`. Bundle loading, exact record comparison, `py_compile`, `git diff --check`, and 76 Stage34/bundle-related tests passed.
+
+### ZS32 front PatchCore threshold tuning v10 (2026-07-16)
+
+- The immutable bundle is `results/zs32_runtime_bundle_eight_view_20group_patchcore_tuned_v10/runtime_bundle.json`; v9 remains unchanged.
+- Relative to v9, only two PatchCore records changed: `front` from `0.4493589401245117/0.5248668193817139` to `low=0.5/high=0.55`, and `front_left` from `0.3332592248916626/0.492424875497818` to `low=0.5/high=0.55`.
+- Prior overrides are retained: `front_right=0.5/0.6661418676376343` and `back_right=0.5/0.55`. `back` and `back_left` remain calibrated, both secondary PatchCore branches remain skipped, and all eight YOLO records remain `0.07/0.07`.
+
+### ZS32 EfficientAD-S/M six-primary-view training runner (2026-07-21)
+
+- `pipeline/run_efficientad_s_m_six_views.sh` serially trains 12 independent models: EfficientAD small then medium for `right_front`, `right_front_left`, `right_front_right`, `right_back`, `right_back_left`, and `right_back_right`. It never includes either secondary view.
+- The runner uses `uv run --no-sync python pipeline/8_train_custom_models.py`, 256-square input, batch size 1, 100 epochs, FP32 workflow defaults, seed 42, GPU 0 by default, and the verified local ImageNette tree. Its default roots are new `results/zs32_efficientad_{s,m}_six_view_seed42_v1` directories.
+- `--efficientad-model-size small|medium` now passes from Stage 8 into `zs32_defect_workflow.py`; the default stays `medium` for backward compatibility. Completed summary+checkpoint pairs are skipped, checkpoint-only runs evaluate, and manifest-only runs reuse preprocessing.
+- Each family writes `six_view_summary.csv` with checkpoint path and SHA256. This runner is a training/evaluation candidate workflow only; it does not alter the v10 runtime bundle or integrate EfficientAD into Stage32.
+
+### ZS32 0723 eight-view retraining preparation v2 (2026-07-26)
+
+- Use `dataset/zs32_all_plus_0723_retraining_release_v2`; never train from `release_v1`, which predates strict Template
+  role separation.
+- The source session has 106 user-confirmed distinct parts and 848 right-normal images. Seed 42 partitions physical parts
+  as train/model_val/calibration/final_test = 64/16/13/13.
+- PatchCore primary views use legacy + 0723, while both secondary views use only 0723. Template uses only 0723 for all
+  eight views. YOLO preserves legacy double-hand bbox labels and adds 0723 normal images with strict empty labels.
+- Template training now natively supports the four explicit roles: train selects templates, calibration determines
+  thresholds, and model_val/final_test are scoring-only. Legacy calibration/test manifests retain old behavior.
+- Commands and evidence are in `docs/ZS32_0723_RETRAINING_PREPARATION_20260726.md`. Current environment has no usable
+  NVIDIA device, so no formal Template/PatchCore/YOLO training was started.
+
+### ZS32 0723 normal-only secondary PatchCore resume fix (2026-07-26)
+
+- The first v11 run completed all six primary views but both secondary views failed before training because their
+  preprocessed data correctly had no `defect/` directory while `_build_datamodule` always passed
+  `abnormal_dir="defect"`.
+- `examples/api/03_models/zs32_defect_workflow.py` now passes `abnormal_dir=None` when a view has no real defect
+  directory. This keeps secondary detection enabled without fabricating defect samples.
+- Rerun the same eight-view runner command against
+  `results/zs32_patchcore_eight_view_all_plus_0723_seed42_v11`; six completed summaries are skipped and both secondary
+  views reuse their preprocessing manifests.
+
+### ZS32 0723 v11 24-group platform bundle (2026-07-26)
+
+- The default commissioning bundle is now
+  `results/zs32_runtime_bundle_eight_view_v11/runtime_bundle.json`; it binds the v11 0723 Template, eight PatchCore
+  checkpoints, n1280 YOLO weights, and release-v2 ROI into exactly 24 required groups.
+- Both `front_secondary` and `back_secondary` require Template, PatchCore, and YOLO; neither secondary branch may be
+  published or displayed as skipped. The v10 20-group bundle remains available as an explicit rollback path.
+- Stage34 supports an explicit ROI-version rebind only with `--allow-roi-version-rebind --source-roi-config PATH`.
+  It verifies the signed Stage33 run contract, its source runtime path/SHA and ROI versions, both source-runtime ROI
+  files, and both new-runtime ROI files before rebind; all bindings are recorded in the signed threshold artifact.
+- v11 commissioning uses online Template normal-only thresholds, YOLO `0.07/0.07`, and each PatchCore summary deploy
+  threshold as equal low/high. It remains non-production and records YOLO test leakage plus model rebind warnings.
+- Template threshold records use the v11 model calibration counts. Model-rebound PatchCore/YOLO records never inherit
+  old Stage33 counts; they use `0/0` with `count_provenance=unavailable_for_rebound_model`.
+- There is no GT mask: pixel AUROC/AUPRO/F1/IoU are N/A. Secondary PatchCore has normal-only evidence, and current YOLO
+  validation recall is low, so hardware smoke acceptance must emphasize missed defects.
+
+### ZS32 0727 Template v12 candidate bundle (2026-07-27)
+
+- `dataset/zs32_0727_template_release_v1` contains only the 19 user-confirmed distinct normal parts: 152 unique
+  eight-view images, seed 42, and fixed train/model_val/calibration/final_test roles 11/3/3/2.
+- The model is `results/zs32_template_gate_right_0727_eight_view_v12`; model SHA256 is
+  `5b071bcfb8a603f5bbf20ecf284f590e88e3e65e114f434fbde1eaf81692ff6e`. It has eight groups and 40 templates.
+- Full scoring is in `evaluation.csv/json`: train 88 PASS, model_val 24 PASS, calibration 24 PASS, final_test
+  12 PASS/4 NG_TEMPLATE. The false rejects are group001 back/back_left/back_right and group004 back. Do not tune from
+  final_test without explicit user approval.
+- The candidate bundle is
+  `results/zs32_runtime_bundle_eight_view_template_0727_v12/runtime_bundle.json`, canonical SHA
+  `1b3341ca05ac7e786733690534c8a75ee6c5a493927145cc39860c4448c29133`. It is strict 24-group and preserves v11
+  PatchCore, YOLO, and ROI bytes; both secondary views remain required.
+- The user reviewed the final-test overview and current/template/difference visualization, accepted the measured
+  4/16 final-test normal false rejects, and authorized the default switch. Stage35 and Dashboard now default to v12;
+  pass the v11 runtime bundle explicitly for rollback. Commands and limits are in
+  `docs/ZS32_0727_TEMPLATE_V12_REPLACEMENT_20260727.md`.
+
+### ZS32 0727 Template v13 manual-threshold release (2026-07-27)
+
+- v13 isolates the three confirmed Template threshold changes from the restored immutable v12 model:
+  `front=0.024885842800140383`, `front_left=0.029833445549011234`, and
+  `front_secondary=0.216357362270355228` (low=high). Its model SHA256 is
+  `eac211cab4ee1d27adda9933c3cb9c6fde71c4a7eb50fae138201a600fa17ab5`.
+- The finalized strict 24-group bundle is
+  `results/zs32_runtime_bundle_eight_view_template_0727_v13/runtime_bundle.json`, with canonical identity
+  `94b025f85bb2f529fc36a0f62a941eafe30cbd71b1c2298431c24b539a29e2bf`.
+  Both secondary views require Template/PatchCore/YOLO; PatchCore, YOLO, and ROI bindings remain the v12 values.
+- Stage35 and Dashboard now default to v13. v13, v12, v11, and v10 were separately fresh-loaded successfully; select
+  any rollback bundle explicitly through `--runtime-config`. This remains commissioning-only/non-production because
+  the existing YOLO test-leakage and model/ROI rebind warnings are unchanged.
+- Exact hashes, all manual Template/PatchCore/YOLO thresholds, the Hikvision-SDK live command, and rollback commands
+  are appended to `docs/ZS32_0727_TEMPLATE_V12_REPLACEMENT_20260727.md`.
+
+### ZS32 fast Demo platform clean-runtime handoff (2026-07-27)
+
+- The user no longer wants the online platform to retain a strict/runtime-bundle mode. The target is one clean Demo
+  path driven by a single editable JSON, with Template/PatchCore/YOLO on all eight views and threshold changes taking
+  effect on the next part without SHA regeneration or GPU model reload.
+- Keep only low-cost operational checks: exact eight views and four-camera topology, decodable inputs, valid ROI/model
+  paths, finite thresholds, missing evidence never yielding OK, unique outputs, and visible Dashboard errors/DEMO label.
+- The copy-ready new-session task brief is
+  `docs/ZS32_FAST_DEMO_PLATFORM_NEW_SESSION_PROMPT_20260727.md`. It defines the target architecture, removals,
+  phased implementation, minimal tests, and final command. No runtime refactor was performed when this brief was added.
+
+### ZS32 fast Demo platform implementation (2026-07-27)
+
+- The clean Demo path is now implemented. The only operator config is `configs/zs32/zs32_demo.json`; the only online
+  entry is `pipeline/36_zs32_inspection_dashboard.py --live --demo-config ... --part-id ...`.
+- `capture_data/zs32_demo_config.py` validates exact four-camera/eight-view topology, ROI bounds, all real model paths,
+  and finite branch thresholds without loading or comparing any SHA. Thresholds reload before every part.
+- `capture_data/zs32_demo_runtime.py` directly retains eight Template groups, eight PatchCore models, and one YOLO
+  model. Its initial implementation ran all 24 branches even after Template NG; this behavior was later superseded by
+  the global Template gate recorded below. Model/ROI/topology/inference-setting changes require a Dashboard restart.
+- Fusion is local and fail-closed: ERROR, then NG_TEMPLATE, NG_ANOMALY, NG_YOLO, otherwise OK. The unified
+  `runtime_manifest.json` contains source/evidence paths, score, threshold, status, and no bundle/SHA fields.
+- Dashboard -> Stage35 -> resident worker -> Demo runtime no longer imports or calls runtime bundle, Stage18,
+  threshold artifact, fusion profile, or SHA validation. Dashboard shows `DEMO / 非生产`, config path/mtime, branch
+  score/threshold, worker log path, and the real first error.
+- Saved eight-view `group004` completed an actual CPU inference smoke: 24 model branches, 65 files, zero execution
+  errors, `NG_TEMPLATE` only on `back_secondary`. Dashboard parser loaded the emitted manifest successfully.
+- Focused validation passed: 38 Demo config/runtime/CLI tests, 28 live-core tests, 6 Stage35 CLI tests, 123 Dashboard
+  tests, 11 Dashboard CLI tests, and all 7 Unix-socket worker tests. Real four-camera capture is still pending.
+- Historical Stage18/34/37 scripts, bundle configs, and results were not physically deleted. They are retained only
+  for history/replay; do not use the earlier v13 `--runtime-config` guidance for online operation.
+
+### ZS32 Demo global Template gate restored (2026-07-27)
+
+- The user explicitly replaced the earlier all-24-branches-on-NG behavior with a global Template gate.
+- Every part first evaluates all eight Template views. If any Template is `NG_TEMPLATE`, the part ends conclusively as
+  `NG_TEMPLATE`; PatchCore and YOLO are not executed and remain score-free `SKIPPED` branches. Fusion is published
+  as available per view, mirroring that view's Template `NG_TEMPLATE` or `PASS`, with a real evidence image.
+- A Template-gated NG remains `inspection_complete=true` because it is a valid business decision, not an execution
+  error. Template execution errors remain `ERROR/inspection_complete=false` and also skip downstream models.
+- Only when all eight Template views PASS may the runtime execute all eight PatchCore and eight YOLO branches and apply
+  normal fusion. Do not restore unconditional downstream execution without fresh user approval.
+- Dashboard main title is exactly `ZS32 八视角检测`; `DEMO / 非生产` remains a separate visible badge rather than part
+  of the title.
+
+### ZS32 bootstrap operator confirmation has no default deadline (2026-07-27)
+
+- `pipeline/zs32_bootstrap_capture.py` now waits indefinitely by default for both terminal Enter confirmation and
+  Dashboard round confirmation. The former 120-second default was removed.
+- `--round-confirmation-timeout SECONDS` remains available when a positive explicit deadline is wanted.
+- `--timeout-ms` is unchanged and still controls individual camera-frame retrieval only; it does not limit manual
+  loading or front/back positioning time.
+- Regression evidence: all 13 bootstrap CLI tests and both live progress/coordinator tests passed on CPU. The bootstrap
+  suite needed `--confcutdir=tests/unit/zs32_refactor/capture_data` because its parent conftest otherwise skips every
+  test when CUDA is unavailable.
+
+### ZS32 0727 two-session right-normal merged manifest (2026-07-27)
+
+- The two raw sessions under `dataset/zs32_0727` remain unchanged. Their training-ready combined inventory is
+  `dataset/zs32_0727/manifests/zs32_0727_right_normal_merged.csv`; use this manifest instead of copying the 5.6 GB
+  image tree.
+- The merged manifest preserves the original session identities and contains 104 complete physical samples and 832
+  unique images: 20 samples from `zs32_4cam_accept_20260727_183107_567838700` and 84 from
+  `zs32_4cam_accept_20260727_184011_699976351`.
+- The cancelled second-session `group085` is excluded. Verification found 104/104 exact eight-view sets, 0 duplicate
+  `(session_id, sample_id, view)` keys, 0 duplicate paths, 0 missing files, and 0 invalid PNG signatures.
+
+### ZS32 0727 normal plus unique defect Template/PatchCore v14 preparation (2026-07-27)
+
+- The user confirmed the two 0727 sessions contain 104 different physical parts. Their 832 raw images were cropped
+  with the established eight-view ROI into `dataset/zs32_0727_right_normal_roi_104part_v1`; ROI SHA256 remains
+  `9412b2838cdb96f722db356714cf9bbbb5ea01810671ccf92b67323de77ebe65`.
+- The training release is `dataset/zs32_0727_plus_zs32_all_unique_defect_release_v1`. It combines 104 normal parts
+  with 23 unique `zs32_all/right` defect parts by file-level symlink and preserves all eight views including both
+  secondary views.
+- Exclude `zs32_right_deform_20260714_201404_438451409`: its five parts are byte-identical duplicates of another
+  defect session. Retained defect identities are deform 12, less 2, others 9; no source files were deleted.
+- Seed-42 normal roles are 62 train, 16 model_val, 13 calibration, 13 final_test. Defect roles are 11 calibration,
+  6 model_val, 6 final_test, stratified by type. No defect enters Template selection or the PatchCore Memory Bank.
+- `template_manifest.csv` has 1016 rows. PatchCore's active trainer surface has 688 rows: per view 62 normal train,
+  13 normal_test, and 11 calibration defects. All model_val/final_test parts remain in release holdout paths.
+- Reusable builder: `pipeline/prepare_zs32_0727_template_patchcore.py`; commands and limitations:
+  `docs/ZS32_0727_TEMPLATE_PATCHCORE_V14_TRAINING.md`. Candidate results must use new v14 roots and are not
+  automatically integrated into `configs/zs32/zs32_demo.json`.
+- The builder rejects unsafe session path segments, removes a newly published release if post-publish validation
+  fails, and cross-checks every split, Template route, PatchCore route, active trainer row, symlink, and content hash.
+  It also proves Template and PatchCore use the same source image for every physical-part/view key and recomputes the
+  release summary from the manifests. The release uses absolute symlinks, so its two source ROI directories must
+  remain in place and unchanged through training.
+
+### ZS32 top front/back-only incremental PatchCore v15 (2026-07-27)
+
+- The user confirmed `dataset/zs32_top` groups 001-028 are 28 distinct normal parts; cancelled group029 is excluded.
+  Only `front` and `back` are used. The other six captured views remain untouched and are never routed into training.
+- Reproducible builder: `pipeline/prepare_zs32_top_patchcore.py`; release:
+  `dataset/zs32_top_front_back_patchcore_release_v1`. Seed 42 assigns new parts 20 train, 4 calibration, 4 final_test.
+  Per view the active surface is 82 normal train, 17 normal calibration, and 11 reused v14 calibration defects.
+- Candidate result: `results/zs32_patchcore_front_back_top_incremental_seed42_v15`. Exactly two checkpoints exist:
+  front SHA256 `7c005651ee3756416a9deeb37c23089d5bf6f062e3fc53113f5186401d503e03`, back SHA256
+  `d187724a5d889e696644e5f703d302be6935f62c307a92c08238b191a1b54e13`.
+- Candidate thresholds are front `0.3681967556476593`, back `0.4843376576900482`. Independent holdout detects all
+  24 old defects, but normal part-level front-or-back false rejects are 4/33. New-normal holdout is front 3/4 and
+  back 4/4 PASS.
+- The prior saved live normal probe remains front `1.0` and back `0.9134062` under v15, so this candidate is not
+  integrated into `configs/zs32/zs32_demo.json`. Keep active v14 weights until the user explicitly approves otherwise.
+
+### ZS32 live HDR matches top-data acquisition (2026-07-27)
+
+- Stage35 online capture now matches the actual `dataset/zs32_top` acquisition command: 1500/5500 us exposures,
+  gain 0, interval 0.2 s, settle 1, timeout 2000 ms, short-dark threshold 80, long-clip threshold 245,
+  blend width 50, blur size 101, zero HDR retries, max clip 5%, and HDR alignment disabled.
+- Keep these image-formation parameters aligned when collecting PatchCore training data; changing the HDR thresholds,
+  blend width, or blur size changes the fused PNG distribution even when exposure and lighting remain fixed.
+## BMW DA9625347 bright-streak customer Demo design (2026-08-05)
+
+- The approved Demo is isolated from ZS32 and uses exactly one Hikvision camera bound by serial `DA9625347`.
+- The fixture, light, camera, and part position are fixed. The UI performs one software-triggered Mono8 capture per
+  button click and intentionally has no live preview.
+- `dataset/bmw/Image_20260805160156065.bmp` is the approved `OK` reference with a continuous central bright streak;
+  `dataset/bmw/Image_20260805160207779.bmp` is `NG_NO_STREAK` with no streak.
+- The pure OpenCV detector uses a user-selected fixed ROI, local background suppression/white top-hat response,
+  robust thresholding, component filtering, and an along-streak one-dimensional presence sequence.
+- Stable decisions are `OK`, `NG_NO_STREAK`, `NG_BROKEN`, and `ERROR`; capture/image-quality/configuration failures
+  must never be presented as part NG.
+- The approved design is `docs/designs/2026-08-05-bmw-bright-streak-demo-design.md`. Implementation order is ROI
+  selector, offline detector, then serial-bound live camera and local OpenCV UI.
+
+## BMW DA9625347 bright-streak Demo implementation (2026-08-05)
+
+- The implementation lives in `src/bmw_inspection` and is intentionally independent of ZS32 product decisions.
+  Editable runtime settings and the seed half-open ROI `[1825, 1290, 1870, 1405]` are in
+  `configs/bmw/bright_streak_demo.json`.
+- Select an exact ROI with `uv run --no-sync python pipeline/bmw_select_bright_streak_roi.py --image <bmp>`; Enter
+  atomically updates only `roi_xyxy` in the JSON. Start the live customer Demo with
+  `uv run --no-sync python pipeline/bmw_bright_streak_demo.py`; it binds only serial `DA9625347`, discards one
+  warm-up frame, and captures one software-triggered frame for each Capture/Retry action.
+- Offline replay uses the same detector and publisher: add `--image <bmp> --no-gui`. Every run is atomically
+  published below `results/bmw_bright_streak_demo/YYYYMMDD/<timestamp>` with `source.png`, `roi.png`,
+  `response.png`, `mask.png`, `evidence.png`, and finite `result.json`.
+- The focused acceptance suite is `tests/unit/bmw_inspection`. At implementation time it passed 32 tests; offline
+  smoke classified `Image_20260805160156065.bmp` as `OK`, `Image_20260805160207779.bmp` as `NG_NO_STREAK`, and
+  the deterministic synthetic interrupted line as `NG_BROKEN`. Real-camera USB/MVS smoke remains a site step.
+- The ROI selector must not pass the 4024x3036 source directly to `cv2.selectROI`. It now fits the selection image
+  inside 1280x720 by default and maps display-space XYWH back to half-open source coordinates using independent X/Y
+  ratios. Smaller screens can override `--max-display-width` and `--max-display-height`.
+- The original two root-level BMW BMP references were replaced on 2026-08-05 by 6 OK images under
+  `dataset/bmw/OK` and 7 no-bright-streak NG images under `dataset/bmw/NG`; all are 4024x3036 Mono8. The selector
+  default is now `OK/Image_20260805172921398.bmp`.
+- The operator-confirmed shared ROI for the new dataset is half-open `[1872, 1180, 1953, 1793]`. The fixed-light
+  OK streak is saturated across nearly the full ROI height, while every labeled no-streak NG has zero saturated
+  support. The detector therefore accepts a centered, narrow saturated-line mask before falling back to the original
+  white-top-hat/component path, and coverage/longest-run ratios are normalized by the full ROI height so a short NG
+  reflection cannot appear 100% continuous.
+- Batch acceptance on the new dataset passed exactly 6/6 OK as `OK` and 7/7 NG as `NG_NO_STREAK`; the synthetic
+  interrupted-line regression remains `NG_BROKEN`. The focused BMW suite passed 34 tests. The shared config uses
+  `max_dark_clip_ratio=0.55` because the confirmed ROI intentionally includes a fixed dark background corridor.
+- Live `DA9625347` evidence later showed valid continuous streaks with 97.6%-98.4% full-ROI coverage and zero gaps,
+  but contrast SNR varied from 3.52 to 4.31 and the original `min_contrast_snr=4.0` caused unstable false NG. The
+  threshold is now 3.0, leaving at least 0.5 observed normal margin; labeled no-streak NG remains separated by
+  coverage (0 saturated support in the 7-image dataset, and at most 1.2% in recorded live no-streak results).
+- The customer Demo UI is a 1600x900 fully Chinese dark industrial dashboard titled `BMW 零件亮痕检测演示系统`.
+  It uses `/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc` (override with `BMW_DEMO_FONT`), flat bordered
+  cards, a semantic result rail, Chinese metric rows, and hover feedback on the existing buttons. Offline screenshots
+  truthfully show `离线图像回放`; only a successful live session shows `相机已连接`. Raw English reasons and result
+  paths remain in artifacts but are intentionally absent from the presentation surface. For no-streak NG, maximum
+  gap displays `不可用` rather than the misleading `0 像素 · 合格`.
+- The narrow ROI evidence is rotated 90 degrees clockwise only in the dashboard, then proportionally fitted into the
+  566x200 evidence viewport. Do not restore the former non-uniform 250x192 stretch. Detector coordinates, masks,
+  `roi.png`, `evidence.png`, and decision metrics remain in the original camera orientation.
+- The live Demo opens in a connected `等待检测` state and must not acquire, detect, publish, or reuse a prior result
+  until the operator clicks `开始检测` or presses Space. Before the first result, `重新检测`/R is disabled and Quit
+  returns successfully without a result; after a result, Start/Retry each acquire exactly one new frame. The focused
+  GUI regression explicitly proves zero startup acquisitions and one acquisition for Space followed by Quit.
+
+## BMW six-view laboratory inspection plan (2026-08-05)
+
+- The confirmed lab target uses three fixed Hikvision cameras and two manual rounds on the same physical part:
+  centre `DA9805574`, left `DA9625347`, and right `DB0968108`; front then operator flip then back produces canonical
+  views `front`, `front_left`, `front_right`, `back`, `back_left`, and `back_right`.
+- Keep the customer bright-streak Demo intact. Add an isolated `bmw_inspection.lab` package rather than adapting the
+  ZS32 eight-view release/runtime contracts. Models remain resident; thresholds reload between parts.
+- Template is a six-view wrong-part/pose/large-structure gate. Any Template NG stops bright-streak, YOLO, and
+  PatchCore. If Template passes, final OK requires every configured required downstream branch to execute and pass.
+- YOLO is one global single-class (`defect`) model with bounding-box labels and candidate/final thresholds separated.
+  PatchCore uses one model and threshold per view. Bright-streak routing is config-driven; the initial mapping reuses
+  the approved ROI `[1872, 1180, 1953, 1793]` on `front_left` only until other view ROIs are explicitly selected.
+- The existing 6 OK and 7 no-streak NG images represent 13 distinct physical parts but remain single-view regression
+  evidence. Complete six-view data and YOLO boxes still need collection before training/evaluating the full system.
+- Final statuses distinguish product NG, RETAKE, REVIEW, and ERROR. Disabled/missing required branches never produce
+  OK, and Template/image/model failures remain truthful. Experiment mode and Presentation mode share one Chinese UI.
+- The executable task plan is `docs/superpowers/plans/2026-08-05-bmw-six-view-lab-inspection-plan.md`; it covers
+  contracts/config, six-view capture, structured bright-streak evidence, Template, manifests, YOLO, PatchCore,
+  Template-first fusion, publishing, batch evaluation, UI, and minimum acceptance checks.
+
+## BMW six-view laboratory implementation progress (2026-08-05)
+
+- Tasks 1-3 are implemented under `src/bmw_inspection/lab`: strict six-view contracts/config, fixed three-camera
+  two-round capture, strict offline six-view loading, and a structured adapter for the existing bright-streak rule.
+- The shipped topology enforces the exact binding centre `DA9805574`, left `DA9625347`, right `DB0968108`; a unique
+  but incorrect serial, swapped slot, wrong view mapping, or wrong topology ID is rejected.
+- Learned branches are initially disabled because BMW-specific assets do not exist. The profile still marks all four
+  branches required, so a partial profile cannot yield OK. YOLO candidate/final thresholds are separate and validated.
+- Template and PatchCore settings are per view. Bright-streak is initially configured only on `front_left`; the other
+  five views emit non-required `SKIPPED` evidence rather than incorrectly forcing REVIEW.
+- `CaptureSet` copies all six uint8 images and marks them read-only; it rejects incomplete, mixed-size, or mutable
+  aliasing inputs. The CLI remains idle until an explicit front capture and explicit back capture after the flip.
+- Bright-streak decisions now carry the actual response, decision mask, runs, gaps, and measured acquisition/processing
+  timings. Published evidence is taken from the exact decision object and is never recomputed independently.
+- Independent review caught and fixed a 0/255-mask width inflation bug, contradictory publisher fallback, missing
+  Python 3.10 enum compatibility, weak topology identity, invalid YOLO threshold relationships, and mutable captures.
+- Root verification after these fixes passed all 93 BMW tests with `--import-mode=importlib`; the only warning is the
+  environment's Torch NVML initialization warning. Template and dataset-manifest Tasks 4-5 are now in progress.
+- Tasks 4-5 are now implemented and independently reviewed. Template publishes six independent groups, selects 3-5
+  medoid/farthest-point references, searches bounded XY translation, fits thresholds from calibration only, reports
+  final-test metrics without feeding them into selection, verifies model/template hashes, and refuses overwrite.
+- Template manifest, one-view training, and six-view training all reject one physical `part_id` crossing splits.
+  The ROI selector maps scaled display coordinates back to half-open 4024x3036 source coordinates.
+- The BMW dataset builder requires complete six-view samples and explicit part/session IDs, assigns deterministic
+  60/20/20 part splits, rejects content/view/split leakage, and needs at least 30 parts unless explicitly experimental.
+- The current 6 OK/7 NG files are emitted only in a separate bright-streak regression manifest with expected statuses
+  `OK` and `NG_NO_STREAK`; they never enter YOLO or PatchCore exports.
+- YOLO export is one class `defect`, requires valid in-bounds boxes, and its `data.yaml` omits `path` so Ultralytics
+  resolves train/val/test relative to the YAML directory from any working directory. PatchCore exports only normal
+  train images to each per-view memory bank and keeps calibration/final-test good/defect directories separate.
+- Root verification after Task 4-5 review fixes passed all 78 BMW lab tests. YOLO and PatchCore Tasks 6-7 are next.
+
+## BMW six-view laboratory implementation completion boundary (2026-08-05)
+
+- Tasks 6-10 are implemented under `src/bmw_inspection/lab` and `pipeline/bmw_lab_*.py`. The current local unit
+  acceptance is `217 passed` for `tests/unit/bmw_inspection`; the only warning is Torch NVML initialization in this
+  environment. `compileall`, `git diff --check`, CLI `--help`, `uv lock --check`, and an offline 1600x900 screenshot
+  smoke also passed. Ruff is not installed in the current environment, so no lint-pass claim is allowed.
+- `pyproject.toml` declares `bmw-lab = ["ultralytics==8.4.89"]`; `uv.lock` contains the same package and extra, and
+  `uv sync --extra bmw-lab --frozen --dry-run` recognizes it. Do not rely on the separate
+  `/home/yunjing/ultralytics-c789` checkout as the dependency contract.
+- YOLO training and runtime now share the same spatial contract: Task 5 exports each view's configured part-ROI crop,
+  clips/re-normalizes `defect` boxes to that crop, and calibration reads the original full frame then applies the ROI
+  exactly once. The resident single model is inference-locked. Candidate boxes remain diagnostic; only boxes meeting
+  the final threshold are red/business NG. Training reads calibration only, uses `trainer.best`, persists actual
+  Ultralytics args/version, validates in staging, and atomically publishes without overwrite.
+- PatchCore trains six independent view models and verifies one identical calibration image through the training and
+  independently loaded runtime paths before publication. The receipt binds the checkpoint SHA and raw score/map at
+  `atol=1e-6`. Raw anomaly-map dtype is preserved; display normalization is separate. A view without calibration
+  defect data remains REVIEW and cannot form an OK profile.
+- Runtime order is quality -> all six Template -> global Template gate -> configured bright-streak -> six-view YOLO ->
+  six-view PatchCore -> fusion -> atomic evidence publication. Template non-PASS invokes no downstream model. Fusion
+  priority is `RETAKE > ERROR > confirmed NG > REVIEW`; an explicit product NG is never hidden by simultaneous
+  incomplete evidence. Cold changes (checkpoint/config content, Template image dependencies, ROI, preprocessing,
+  candidate floor, capture/topology) require reload; final business thresholds and enabled/required flags are hot.
+- Publications live under `<result_root>/<experiment_id>/runs/YYYYMMDD/<run_id>`. They bind the config digest, model
+  path/version/SHA, source images, branch crops, Template difference/overlay, bright-streak ROI/response/masks/overlay,
+  YOLO candidates plus final-only overlay, raw PatchCore map plus true overlay, timings, and per-view fusion overlays.
+- Batch evaluation is physical-part-level and accepts only calibration/final_test. Final-test threshold writes are
+  rejected before manifest reads. Complete fused metrics require a trusted config-derived profile contract plus exact
+  archived result/config/evidence agreement; generic self-reported runtimes remain experimental-only. Sample IDs bind
+  one part, six paths and six hashes must be distinct, current image SHA values must match, and all public branch
+  metrics aggregate once per part. Threshold writes use snapshot/restore rollback around publication.
+- The new 1600x900 laboratory UI uses a light Swiss grid and fully Chinese business labels. Presentation mode selects
+  only actual triggered evidence; missing artifacts display `当前视角没有该项目证据` instead of substituting an original
+  or PASS view. Experiment mode adds scores, thresholds, timings, model identity, view/branch keys, amber diagnostic
+  YOLO candidates, red final boxes, and explicit model reload. Only the published bright-streak ROI bitmap is rotated
+  90 degrees clockwise; detector coordinates and archived evidence remain unchanged. Startup performs zero captures,
+  processing is painted before synchronous inference, and live camera sessions are context-owned and reopened after
+  cold reload.
+- Operator and training commands are documented in `pipeline/README.md`. The final offline UI smoke used one existing
+  OK bright-streak image copied into six temporary view names only to exercise control/render/publication paths; it
+  truthfully returned REVIEW because Template/YOLO/PatchCore assets are disabled. It is not accuracy or six-view data
+  evidence.
+- Remaining site/data work is explicit: collect at least 30 complete physical parts with six distinct real views and
+  actual `defect` boxes, train/publish six Template groups, one YOLO model, and six PatchCore models, activate a new
+  experiment profile, run independent final-test evaluation, then perform the foreground three-camera/two-round live
+  smoke with `DA9805574`, `DA9625347`, and `DB0968108`. No such real training or hardware acceptance was performed in
+  this implementation session, so the four-branch profile must not yet be described as performance-complete.
+
+## BMW four-camera eight-view minimal HDR collection (2026-08-06)
+
+- The user replaced the BMW acquisition topology with four fixed cameras: centre `DA9805574`, left `DA9625347`,
+  right `DB0998274`, and secondary/front-mounted `DB0968108`. Front/back rounds produce canonical views
+  `front/front_left/front_right/front_secondary` and `back/back_left/back_right/back_secondary`.
+- The user explicitly requested the smallest fast implementation. The immediate entrypoint is
+  `pipeline/bmw_lab_collect_data.py`; its versioned profile is
+  `configs/bmw/capture/bmw_4cam_eight_view_hdr_v1.json`. It is a thin BMW wrapper over the already-tested
+  topology-driven four-camera bootstrap collector and does not modify the legacy three-camera collector.
+- The fixed acquisition identity is HDR short/long `1500/6000 us`, gain `0`, interval `0.2 s`, settle `1`, timeout
+  `3000 ms`, no alignment, dark/clip `70/245`, blend width `18`, blur size `31`, zero retries, and max clip `12%`.
+  The minimal path saves fused PNGs only and writes the legacy eight-image plus one-sample session manifest.
+- The existing `bmw_inspection.lab` runtime, model configs, dataset builder, evaluation, and UI remain the older
+  three-camera/six-view/single-exposure contract. Do not feed the new eight-view HDR set into that runtime or claim
+  model readiness until the next explicit full-system upgrade.
+- The first live wrapper run reached the front round but failed before enumeration with
+  `MvCameraControl_class is unavailable`. Root cause: the reused topology-driven adapter intentionally does not
+  mutate `sys.path`, while the older collector automatically exposes `/opt/MVS/Samples/64/Python/MvImport`.
+  `pipeline/bmw_lab_collect_data.py` now validates that SDK file and prepends the directory before device listing or
+  capture. A subprocess import probe resolves the module to the installed vendor file after the fix.
+
+## BMW eight-view HDR canonical data preparer (2026-08-06)
+
+- Entrypoint: `pipeline/bmw_lab_prepare_eight_view_data.py`; core implementation:
+  `src/bmw_inspection/lab/eight_view_dataset.py`. It is deliberately independent from the legacy six-view BMW
+  `ViewId` and runtime.
+- It reads the frozen 25-column append-only capture manifests, keeps only explicit complete samples with exact eight
+  HDR fused views, validates round/view/camera bindings and image dimensions, and excludes incomplete samples.
+- Physical identity follows the capture-native part instance: strip the final six-digit image index from `sample_id`
+  (for example `bmw_edge_group003_000001 -> bmw_edge_group003`). Splits are deterministic and stratified by capture
+  class; all views and repeat samples for one identity remain in one split.
+- Branch labels remain truthful: `no_streak` is business NG but EfficientAD/Template normal, YOLO negative, and
+  `front_left` bright-streak `NG_NO_STREAK`. `deform/edge/others` are `review_required` per view until visibility and
+  boxes are manually confirmed.
+- The immutable reference-only release contains `dataset_manifest.csv`, `part_splits.csv`, four branch manifests, and
+  `report.json`; it does not copy images, crop ROI, invent boxes, train models, or feed the old six-view runtime.
+- Focused implementation acceptance: 19 tests passed across the new preparer and legacy BMW dataset builder; CLI help
+  and compileall passed.
+- The hashed real-data release is `dataset/bmw_lab_prepared/bmw_hdr_eight_view_v1`: 5 input manifests, 132 complete
+  physical-part captures, 5 incomplete samples excluded, 1056 images (132 per view), and exact class counts normal 85,
+  deform 10, edge 17, others 4, no_streak 16. Seed 42 produced 79 train, 26 calibration, and 27 final-test parts.
+  `report.json` records full source-image SHA-256 verification and hashes for all six published CSV manifests.
+
+## BMW eight-view ROI selector and branch data materializer (2026-08-06)
+
+- ROI entrypoint: `pipeline/bmw_lab_select_eight_view_rois.py`; typed contract:
+  `src/bmw_inspection/lab/eight_view_roi.py`. It selects one complete `normal/train` sample, preflights all eight source
+  hashes/dimensions before opening GUI, maps scaled display XYWH to source half-open XYXY, and writes a manifest-bound
+  eight-view ROI JSON. Existing ROI configs are refused unless `--force` is explicit.
+- Materializer entrypoint: `pipeline/bmw_lab_materialize_training_data.py`; implementation:
+  `src/bmw_inspection/lab/eight_view_training_data.py`. It writes one lossless canonical PNG crop per source image,
+  validates round-trip pixels and hashes, then uses relative symlinks for EfficientAD, Template, and YOLO adapters.
+- EfficientAD treats `normal/no_streak` as branch-good and keeps final_test under `efficientad/held_out`. Template train
+  references use source normal only; no_streak remains normal in calibration/final_test. Review-required defect views
+  never become anomaly/Template defects unless a reviewed non-empty YOLO label proves visible local defect evidence.
+- Current release has 808 confirmed YOLO negatives and 248 review-required defect views. Without a reviewed txt for
+  every one of those 248 rows, materialization publishes `yolo/annotation_queue.csv` but deliberately omits
+  `yolo/data.yaml`. Empty reviewed txt means human-confirmed invisible/negative; non-empty labels must use class 0
+  `defect` and valid normalized crop coordinates.
+- The selector/materializer preserve the old six-view runtime and do not train models. Synthetic focused tests cover
+  exact pixels, labels, symlinks, manifest binding, and no-overwrite behavior.
+- The operator-selected ROI asset is `configs/bmw/rois/bmw_hdr_eight_view_v1.json`, bound to prepared manifest SHA256
+  `6391b456653867bca413cd6f826ddd7b96f3b55cbaf85a585c4e7625189d77c6`; its own SHA256 is
+  `414957f7a8d1d7156cd25ebdd01e16d7c3568dc1e697b42fec20ac0645fba1ca`.
+- The real immutable ROI release is `dataset/bmw_lab_training/bmw_hdr_roi_training_v1`: 1056 canonical PNG crops,
+  132 per view, 728 Template manifest rows, 808 YOLO negative labels, and 248 pending defect-view annotations.
+  `yolo_training_ready=false` and no `data.yaml` is intentionally published until all pending rows have reviewed txt.
+
+## BMW portable YOLO labeling handoff (2026-08-07)
+
+- Entrypoint: `pipeline/bmw_lab_prepare_labeling_package.py`; implementation:
+  `src/bmw_inspection/lab/labeling_package.py`. It consumes only the immutable training release's
+  `yolo/annotation_queue.csv`, refuses normal/no_streak rows, and publishes without overwriting an existing package.
+- Current handoff is `dataset/bmw_lab_labeling/bmw_hdr_roi_yolo_248_v1`: 248 real copied ROI PNGs (not symlinks), one
+  flat collision-safe image namespace, eight views with 31 tasks each, and source classes deform 80, edge 136,
+  others 32. Total image payload is 821,622,396 bytes.
+- The handoff includes `annotation_tasks.csv`, `SHA256SUMS`, Chinese `标注说明.md`, Label Studio `tasks.json`, and a
+  single-class `defect` interface with required visible/invisible review choice. The annotator must return both JSON
+  and YOLO exports so completed empty views remain distinguishable from unfinished tasks.
+- Superseding handoff `dataset/bmw_lab_labeling/bmw_hdr_roi_yolo_248_refs8_v2` keeps the same 248 annotation tasks and
+  adds 64 real normal-train reference PNGs under `normal_references/<view>/`: eight complete normal physical parts and
+  exactly eight references per canonical view. References have their own manifest and never enter Label Studio tasks.
+
+## BMW Label Studio API review project (2026-08-10)
+
+- The original-account Label Studio database is `/home/yunjing/.local/share/label-studio/label_studio.sqlite3`.
+  Project `BMW八视图标签复核_248` was created through the local API as project ID `14`; its review page is
+  `http://127.0.0.1:8080/projects/14/data`.
+- The imported source is `dataset/bmw_lab_labeling/bmw_label_review_248_linux.json`: 248 tasks, 247 existing
+  annotations, and one intentionally unfinished task. API verification returned the same 248/247/247
+  task/annotation/finished counts.
+- Local image storage ID `8` points at
+  `dataset/bmw_lab_labeling/bmw_hdr_roi_yolo_248_refs8/images`. It is deliberately non-synchronizable so it only
+  authorizes image reads and cannot duplicate the JSON-imported tasks. Local PNG access was verified with HTTP 200.
+- The unfinished task is
+  `20260806_180848_928560__bmw_others_group003_000001__back_left.png` (task ID `2314`). The known choice/box review
+  target is `20260806_175121_541680__bmw_deform_group008_000001__back_right.png` (task ID `2139`).
+- Start the service with the original database and the labeling package as document root:
+  `DEBUG=false LABEL_STUDIO_LOCAL_FILES_SERVING_ENABLED=true LABEL_STUDIO_LOCAL_FILES_DOCUMENT_ROOT=/home/yunjing/anomaly_xingtao_new/dataset/bmw_lab_labeling/bmw_hdr_roi_yolo_248_refs8 conda run --no-capture-output -n label-studio label-studio start --data-dir /home/yunjing/.local/share/label-studio --port 8080 --no-browser`.
+
+## BMW Label Studio reviewed export attempt (2026-08-10)
+
+- Project 14 reached 248 tasks, 248 annotations, and 248 finished tasks. The API export is preserved under
+  `dataset/bmw_lab_labeling/exports/bmw_label_review_project14_20260810_030838` as raw Label Studio JSON plus raw
+  YOLO ZIP; the ZIP passes integrity testing and contains all 248 expected label files.
+- This export is not yet final training truth. Validation found one remaining semantic contradiction on task ID 2139,
+  `20260806_175121_541680__bmw_deform_group008_000001__back_right.png`: the choice is `无可见缺陷` while one
+  `defect` rectangle remains. Do not silently choose which side is correct; fix it in Label Studio and re-export.
+- The built-in Label Studio YOLO exporter lists the two review-choice strings in `classes.txt` in addition to
+  `defect`, although every emitted box line currently uses valid class ID 0. Preserve the raw ZIP for audit and use
+  a BMW-specific normalized label directory for the immutable training-data materializer only after the semantic
+  contradiction is resolved.
+
+## BMW Label Studio final reviewed export (2026-08-10)
+
+- The user confirmed task ID 2139 is genuinely `无可见缺陷`. Annotation ID 1740 was updated through the local API by
+  deleting its single stale `defect` rectangle while preserving the `无可见缺陷` choice.
+- The immutable final export is
+  `dataset/bmw_lab_labeling/exports/bmw_label_review_project14_final_20260810_032057`. It contains the raw Label
+  Studio JSON, raw Label Studio YOLO ZIP, extracted raw export, a normalized `reviewed_yolo_labels` directory, an
+  export manifest, and a validation report. Do not use the earlier `...030838` review-required export for training.
+- Final validation is clean: 248 tasks and annotations, 248 expected/actual label files, 131 images with boxes, 117
+  empty labels, 170 total class-0 boxes, no invalid YOLO rows, and no review-choice/box contradictions. The normalized
+  label root contains exactly the 248 expected per-image txt files, with no extra `classes.txt`, and is the direct
+  input for the strict `--yolo-label-root` materializer.
+- Final raw artifact identities: Label Studio JSON SHA256
+  `7758a3e8ef1b29190fa4c73d89704e68446e2614802ebf7442c0e52b8a3c50ea`; YOLO ZIP SHA256
+  `712884ec289c9b2cb31155fe46df3e9dbfabb7e8b90dcd7ea9406bce0dce67a1`.
+
+## BMW eight-view laboratory one-click training (2026-08-10)
+
+- Entrypoint: `pipeline/bmw_lab_train_all.py`; implementation:
+  `src/bmw_inspection/lab/eight_view_train_all.py`. It is an experimental-only, fail-fast sequence of final-label
+  materialization, eight Template groups, `front_left` bright-streak calibration, eight serial EfficientAD-S models,
+  and one global YOLO26n model. It does not activate assets in the legacy six-view runtime.
+- Confirmed defaults are EfficientAD-S `256x256`, 30 epochs and framework-required train batch 1; YOLO26n `640`,
+  100 epochs and batch 32 on GPU 0. The canonical reviewed labels are the 248-file normalized directory under the
+  final project-14 export; the immutable training target is `bmw_hdr_roi_training_reviewed_v1`.
+- Bright-streak fitting uses calibration only. Current HDR data cleanly separates calibration normal/no_streak;
+  fitted presence thresholds are contrast SNR `3.289477...` and coverage `0.190048...`. Because no interrupted-streak
+  defect examples exist, continuity remains an explicit rule fitted as the strict calibration-normal envelope
+  (`min_longest_run_ratio=0.331158...`, `max_gap_ratio=0.070146...`, `max_gap_count=2`). The held-out result is reported,
+  not used to tune.
+- Recommended run: `uv run --no-sync python pipeline/bmw_lab_train_all.py --run-id bmw_lab_eight_view_v1`.
+  Preflight-only command: append `--dry-run`. Focused acceptance is 7 unit tests plus CLI compile/help and real-data
+  dry-run; no GPU training was started during implementation.
+
+## BMW eight-view trained-model assessment and independent Demo (2026-08-10)
+
+- Trained run `results/bmw_lab_one_click/bmw_lab_eight_view_v1` is complete. Held-out Template balanced accuracy is
+  0.925-1.000 across the eight views with no defect false accepts; the calibrated bright-streak rule has final-test
+  balanced accuracy 0.8824 with 4 false rejects and 0 false accepts. YOLO's independent test is the weak branch:
+  precision 0.557, recall 0.279, mAP50 0.219, mAP50-95 0.091. EfficientAD held-out AUROC ranges 0.7375-1.0, with
+  `back_right` and `back_secondary` needing the most future threshold/data work. This is suitable for a lab Demo and
+  rapid iteration, not an industrial acceptance claim.
+- Independent entrypoint: `pipeline/bmw_lab_eight_view_demo.py`; config:
+  `configs/bmw/experiments/bmw_eight_view_demo_v1.json`. It leaves the legacy six-view UI untouched and supports
+  default live four-camera/two-round HDR capture, `--sample-id`, exact-name `--capture-set`, `--experiment-mode`,
+  `--no-gui`, and `--save-screenshot`.
+- Runtime modules are `src/bmw_inspection/lab/eight_view_demo.py`, `eight_view_demo_capture.py`,
+  `eight_view_demo_models.py`, and `eight_view_demo_ui.py`. Every completed part runs all 25 checks: 8 Template,
+  `front_left` bright streak, 8 YOLO, and 8 resident EfficientAD. Fusion is ERROR on any model error, otherwise NG on
+  any NG, otherwise OK. Startup is a blank waiting state; the Chinese 4x2 dashboard has presentation/experiment
+  modes, switchable evidence, and a clockwise-rotated bright-streak evidence image.
+- Real GPU smoke used held-out normal sample `bmw_normal_group072_000001`: 25 PASS, final OK, 3478.956 ms total on
+  RTX 4090. Screenshot: `results/bmw_eight_view_demo/bmw_normal_group072_demo.png`. Focused verification passed 13
+  tests plus compileall. Hardware camera acquisition is wired to the approved HDR profile but was not live-triggered
+  during this implementation turn.
+- The eight-view Demo typography was sharpened without changing layout: body text uses installed
+  `/usr/share/fonts/opentype/noto/NotoSansCJK-Medium.ttc`, while titles, final status, branch names, and branch states
+  use `NotoSansCJK-Bold.ttc`. Small copy is 16-18 px and muted text uses a darker neutral grey. Overrides are
+  `BMW_DEMO_FONT_MEDIUM`, `BMW_DEMO_FONT_BOLD`, or the shared `BMW_DEMO_FONT`. The real normal-sample screenshot was
+  regenerated at the same path and visually checked for clipping; the smoke remained 25 PASS and final OK.
+
+## BMW eight-view GitHub handoff (2026-08-10)
+
+- The public handoff branch is `agent/bmw-eight-view-handoff` in
+  `wjstx0425/anomaly_xingtao_new`; published commit `6ed45cbb34a91064c2cdc57b9fef66bba9a98ccd` is reviewed through Draft PR
+  `https://github.com/wjstx0425/anomaly_xingtao_new/pull/1` against `main`.
+- `BMW_EIGHT_VIEW_HANDOFF_README.md` is the primary Chinese transfer document. It covers the four-camera HDR capture,
+  eight-view preparation and ROI, Label Studio review, final materialization, one-click Template/bright-streak/
+  EfficientAD/YOLO training, model interpretation, offline/live Demo, asset migration, troubleshooting, and takeover
+  checklist. The documented extra YOLO dependency is pinned to `ultralytics==8.4.89`.
+- The branch intentionally includes the current eight-view entrypoints, required BMW and four-camera capture code,
+  canonical `bmw_hdr_eight_view_v1` ROI/configs, and focused tests. It intentionally excludes datasets, results,
+  checkpoints, customer images, Label Studio state, credentials, MVS SDK, the later unreferenced `bmw_right` ROI, and
+  legacy standalone BMW commands.
+- Fresh handoff verification passed 48 core eight-view tests plus 5 asset-independent Demo-model tests, seven CLI
+  help checks, compileall, and a real-data one-click `--dry-run` preflight with eight views, 248 reviewed labels, and
+  YOLO batch 32. Two Demo-model tests remain asset-dependent by design; the live camera was not retriggered during
+  publication, and low-level camera tests were skipped in the sandbox because CUDA/NVML was unavailable.
+- Follow-up commit `a08b18278fb70f9a258e6aa86d8f2cfc15ad2d7b` expands README section 12 with per-view Template
+  thresholds/confusion counts, bright-streak calibration populations and continuity limits, per-view EfficientAD
+  AUROC/F1 interpretation, YOLO split/box counts and metric meanings, plus the 25-check fusion-level false-reject
+  caveat. The key handoff conclusion is that Template is conservative, no-streak detection has no final-test false
+  accepts, interrupted-streak behavior lacks real negative samples, EfficientAD `back_right` has F1 0 at its current
+  threshold, and YOLO recall 0.279 is unsuitable as a reliable defect backstop.
+
+## BMW model-score visualization and decision-boundary audit (2026-08-10)
+
+- Published commit `45e3909f56ae015002e3af004b70570cef0e9d70` on `agent/bmw-eight-view-handoff` adds
+  `pipeline/bmw_lab_visualize_efficientad_scores.py`, dataset-level EfficientAD score analysis utilities/tests, and
+  the corresponding README instructions. GitHub Draft PR #1 points to that exact commit. Generated customer-data
+  reports remain local and ignored under
+  `results/bmw_lab_one_click/bmw_lab_eight_view_v1/efficientad/score_analysis`.
+- The real held-out report contains 183 image rows, one fixed-scale 0-1 distribution chart, eight hard-example sheets,
+  and `report.json`. Metrics are recomputed from the exact runtime `predict` outputs used by the Demo. The original
+  Anomalib `image_F1Score` is not authoritative because rerunning `Engine.test` emitted TorchMetrics warnings that
+  `compute` was called before `update`; per-view AUROC was independently reproduced, but runtime F1/confusion counts
+  from the new report supersede the logged F1 values.
+- Runtime EfficientAD audit by view (AUROC/F1/normal FP/defect FN): front `.9625/.8000/2/0`, front_left
+  `.8250/.8000/0/1`, front_right `.8333/.8000/0/1`, front_secondary `1.0000/.8000/0/1`, back
+  `.9125/.5714/3/0`, back_left `.9750/.8000/1/0`, back_right `.7375/.6667/0/1`, and back_secondary
+  `.8875/.6667/2/1`. Scores are Anomalib-normalized 0-1 and comparable within one view/model, not as a universal
+  cross-view defect-severity scale.
+- Template accepted none of the 31 visible-defect image rows in final test, but those rows represent only six distinct
+  defective physical parts and three coarse types (`deform`, `edge`, `others`). This does not prove Template can detect
+  every defect; it remains sensitive to alignment/illumination and can miss small local or texture anomalies.
+- Bright-streak final test rejected all three `no_streak` parts but also rejected 4/17 normal parts (23.5% normal false
+  reject). Two failures were continuity-related (`NG_BROKEN`), while two normal samples had presence metrics that
+  overlap the no-streak population (`NG_NO_STREAK`). Therefore the current rule is conservative, but blindly lowering
+  thresholds can admit real no-streak defects; improve the ROI/segmentation and collect real interrupted-streak
+  negatives before retuning continuity thresholds.
+
+## BMW right-side incremental ROI batch (2026-08-10)
+
+- `pipeline/bmw_lab_prepare_eight_view_data.py` now accepts repeatable `--session-id` arguments. The filter is applied
+  before manifest/image validation, rejects duplicate, malformed, or missing session IDs, and records the selected IDs
+  in `report.json`. Use it for incremental releases instead of reprocessing older right-side sessions.
+- The five new right-side sessions are `20260810_210030_527506`, `20260810_213407_600611`,
+  `20260810_213852_756399`, `20260810_214505_826120`, and `20260810_214747_085800`. Their immutable prepared release
+  is `dataset/bmw_lab_prepared/bmw_right_batch_20260810_21_v1`: 133 complete parts, 5 incomplete attempts excluded,
+  and 1064 SHA-256-verified HDR images. Part counts are normal 83, deform 9, edge 18, others 3, and no_streak 20.
+- The corresponding ROI release is `dataset/bmw_lab_training/bmw_right_batch_20260810_21_roi_v1`. It was generated
+  from the exact user-selected config
+  `dataset/bmw_lab_training/bmw_right_complete_roi_v1/roi_config.json` (SHA-256
+  `0dab057714cd51eee937297550afdcfd8c3290440dbfe40086a9c320382c6a53`, fixed_setup/right). It contains 1064
+  canonical PNG crops, 133 per view, no broken symlinks, and 240 visible-defect ROI images still pending YOLO labels.
+- Focused verification after publication: all 9 tests in
+  `tests/unit/bmw_inspection/lab/test_eight_view_dataset.py` passed. Both releases are no-overwrite versioned outputs;
+  do not append later captures into them—select new session IDs and publish a new dataset/training ID.

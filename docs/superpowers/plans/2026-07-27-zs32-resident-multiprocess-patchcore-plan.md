@@ -29,10 +29,10 @@
 - Produces: `ResidentMultiprocessPatchcoreBackend(specs, views, process_count, ..., worker_target=None)`.
 - Produces: `predict_all(...)`, `close()`, deterministic `view_shards(...)`.
 
-- [ ] Write failing tests for 1/2/4/8 sharding, READY gating, eight-result aggregation, stale/duplicate/missing responses, timeout/EOF/death, PID reuse, and idempotent bounded close.
-- [ ] Run the focused suite and confirm failures are caused by the missing backend.
-- [ ] Implement pure-data envelopes, per-child Pipes, `connection.wait`, fail-closed reconstruction, and `spawn` lifecycle.
-- [ ] Re-run the suite and confirm it passes.
+- [x] Write failing tests for 1/2/4/8 sharding, READY gating, eight-result aggregation, stale/duplicate/missing responses, timeout/EOF/death, PID reuse, and idempotent bounded close.
+- [x] Run the focused suite and confirm failures are caused by the missing backend.
+- [x] Implement pure-data envelopes, per-child Pipes, `connection.wait`, fail-closed reconstruction, and `spawn` lifecycle.
+- [x] Re-run the suite and confirm it passes.
 
 ### Task 2: Runtime and worker integration
 
@@ -49,10 +49,10 @@
 - Consumes: `ResidentMultiprocessPatchcoreBackend`.
 - Produces: validated process count in `{1,2,4,8}` and `ZS32DemoRuntime.close()`.
 
-- [ ] Write failing tests for configuration, backend selection, zero calls on Template NG, and `finally` cleanup.
-- [ ] Run focused tests and verify the expected failures.
-- [ ] Integrate the backend without changing Template, YOLO, or publication semantics.
-- [ ] Re-run focused tests and confirm they pass.
+- [x] Write failing tests for configuration, backend selection, zero calls on Template NG, and `finally` cleanup.
+- [x] Run focused tests and verify the expected failures.
+- [x] Integrate the backend without changing Template, YOLO, or publication semantics.
+- [x] Re-run focused tests and confirm they pass.
 
 ### Task 3: Reproducible GPU selection gate
 
@@ -64,10 +64,10 @@
 - Consumes: production serial and multiprocess backends.
 - Produces: strict 1/2/4/8 timing, stability, equivalence, memory, and acceptance records.
 
-- [ ] Add parser/unit tests for acceptance calculations and incomplete-result rejection.
-- [ ] Implement two warmups, five formal rounds, twenty stability rounds, median/p95, PID stability, and exact artifact comparison.
-- [ ] Run serial then 2/4/8 on the real saved crops with fresh pools.
-- [ ] Select the fastest qualified count; update production config only when all gates pass.
+- [x] Add parser/unit tests for acceptance calculations and incomplete-result rejection.
+- [x] Implement two warmups, five formal rounds, twenty stability rounds, median/p95, PID stability, and exact artifact comparison.
+- [x] Run serial then 2/4/8 on the real saved crops with fresh pools.
+- [x] Select the fastest qualified count; update production config only when all gates pass.
 
 ### Task 4: Final verification and memory
 
@@ -75,7 +75,7 @@
 - Modify: `pipeline/AGENTS_MEMORY.md`
 - Modify: `capture_data/AGENTS_MEMORY.md`
 
-- [ ] Run all focused multiprocessing, Demo, worker, parser, and capture tests.
-- [ ] Run `py_compile` and `git diff --check`.
-- [ ] Replay Template-NG and all-PASS paths.
-- [ ] Record exact selected/rejected timings, VRAM/RSS, limitations, and rollback value `1`.
+- [x] Run all focused multiprocessing, Demo, worker, parser, and capture tests.
+- [x] Run `py_compile` and `git diff --check`.
+- [x] Replay Template-NG and all-PASS paths.
+- [x] Record exact selected/rejected timings, VRAM/RSS, limitations, and rollback value `1`.

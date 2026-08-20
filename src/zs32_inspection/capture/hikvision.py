@@ -17,9 +17,13 @@ import importlib
 import math
 import time
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from dataclasses import dataclass
 from types import TracebackType
 from typing import Any
+
+from zs32_inspection.timing import TimingRecorder
 
 from .contracts import (
     CameraBinding,
@@ -32,6 +36,7 @@ from .service import PartialRoundCaptureError
 
 
 DEFAULT_FRAME_BUFFER_SIZE = 50 * 1024 * 1024
+CAPTURE_CPU_WORKERS = 4
 HIKVISION_CONFIG_FIELDS = (
     "exposure",
     "gain",
@@ -183,6 +188,23 @@ class _CapturedImage:
     binding: CameraBinding
     device_index: int
     image: Any
+
+
+@dataclass(frozen=True, slots=True)
+class _HdrFusionOutcome:
+    image: Any | None
+    clip_percentage: float | None
+    seconds: float
+    error: BaseException | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _EncodedImageOutcome:
+    image_bytes: bytes | None
+    width: int | None
+    height: int | None
+    seconds: float | None
+    error: BaseException | None = None
 
 
 class _GroupedReadError(HikvisionCaptureError):
@@ -512,11 +534,13 @@ class HikvisionCameraAdapter:
         config: HikvisionCaptureConfig,
         *,
         dependency_loader: Callable[[], _RuntimeDependencies] = _load_runtime_dependencies,
+        timing_recorder: TimingRecorder | None = None,
     ) -> None:
         if not isinstance(config, HikvisionCaptureConfig):
             raise TypeError("config must be HikvisionCaptureConfig")
         self.config = config
         self._dependency_loader = dependency_loader
+        self.timing_recorder = timing_recorder
         self._dependencies: _RuntimeDependencies | None = None
         self._sdk_adapter: _MvsSdkAdapter | None = None
         self._handles: tuple[_CameraHandle, ...] = ()
@@ -608,16 +632,20 @@ class HikvisionCameraAdapter:
         for handle in self._handles:
             adapter.trigger(handle)
         images: list[_CapturedImage] = []
-        for binding, handle in zip(self._bindings, self._handles, strict=True):
-            try:
-                image = adapter.read(handle, self.config.timeout_ms)
-            except BaseException as error:  # noqa: BLE001 - retain partial grouped-read evidence
-                raise _GroupedReadError(
-                    f"grouped read failed for slot={binding.slot_id} "
-                    f"serial={binding.serial}: {error}",
-                    images,
-                ) from error
-            images.append(_CapturedImage(binding, handle.device.index, image))
+        # MVS calls remain isolated to one camera handle per thread. Triggers are
+        # intentionally completed for every camera before any blocking read.
+        with ThreadPoolExecutor(max_workers=len(self._handles), thread_name_prefix="zs32-camera-read") as executor:
+            futures = [executor.submit(adapter.read, handle, self.config.timeout_ms) for handle in self._handles]
+            for binding, handle, future in zip(self._bindings, self._handles, futures, strict=True):
+                try:
+                    image = future.result()
+                except BaseException as error:  # noqa: BLE001 - retain deterministic prefix evidence
+                    raise _GroupedReadError(
+                        f"grouped read failed for slot={binding.slot_id} "
+                        f"serial={binding.serial}: {error}",
+                        images,
+                    ) from error
+                images.append(_CapturedImage(binding, handle.device.index, image))
         return tuple(images)
 
     def _capture_exposure_pass(self, exposure: float) -> tuple[_CapturedImage, ...]:
@@ -641,21 +669,72 @@ class HikvisionCameraAdapter:
         final_images: tuple[_CapturedImage, ...] = ()
         final_clips: tuple[float, ...] = ()
         for attempt in range(1, self.config.hdr_max_retries + 2):
-            short_images = self._capture_exposure_pass(self.config.short_exposure)
-            long_images = self._capture_exposure_pass(self.config.long_exposure)
-            fused: list[_CapturedImage] = []
-            clips: list[float] = []
-            for short, long in zip(short_images, long_images, strict=True):
+            short_measurement = (
+                self.timing_recorder.measure("hdr_short_exposure")
+                if self.timing_recorder is not None
+                else nullcontext()
+            )
+            with short_measurement:
+                short_images = self._capture_exposure_pass(self.config.short_exposure)
+            long_measurement = (
+                self.timing_recorder.measure("hdr_long_exposure")
+                if self.timing_recorder is not None
+                else nullcontext()
+            )
+            with long_measurement:
+                long_images = self._capture_exposure_pass(self.config.long_exposure)
+            pairs = tuple(zip(short_images, long_images, strict=True))
+            for short, long in pairs:
                 if short.binding != long.binding or short.device_index != long.device_index:
                     raise HikvisionCaptureError("HDR exposure passes changed camera identity/order")
-                image = self._fuse_exposures(short.image, long.image)
-                fused.append(_CapturedImage(short.binding, short.device_index, image))
-                clips.append(self._image_clip_pct(image))
+            if not pairs:
+                final_images = ()
+                final_clips = ()
+                return final_images, attempt, final_clips
+            fused: list[_CapturedImage] = []
+            clips: list[float] = []
+            wall_started = time.perf_counter()
+            try:
+                with ThreadPoolExecutor(
+                    max_workers=min(CAPTURE_CPU_WORKERS, len(pairs)),
+                    thread_name_prefix="zs32-hdr-fusion",
+                ) as executor:
+                    futures = [
+                        executor.submit(self._fuse_hdr_pair, short.image, long.image)
+                        for short, long in pairs
+                    ]
+                    for (short, _long), future in zip(pairs, futures, strict=True):
+                        outcome = future.result()
+                        if self.timing_recorder is not None:
+                            self.timing_recorder.add("hdr_fusion", outcome.seconds)
+                        if outcome.error is not None:
+                            raise outcome.error
+                        if outcome.image is None or outcome.clip_percentage is None:
+                            raise RuntimeError("HDR fusion worker returned an incomplete result")
+                        fused.append(_CapturedImage(short.binding, short.device_index, outcome.image))
+                        clips.append(outcome.clip_percentage)
+            finally:
+                if self.timing_recorder is not None:
+                    self.timing_recorder.add("hdr_fusion_parallel_wall", time.perf_counter() - wall_started)
             final_images = tuple(fused)
             final_clips = tuple(clips)
             if all(value <= self.config.hdr_max_clip_pct for value in final_clips):
                 return final_images, attempt, final_clips
         return final_images, self.config.hdr_max_retries + 1, final_clips
+
+    def _fuse_hdr_pair(self, short_image: Any, long_image: Any) -> _HdrFusionOutcome:
+        """Fuse one independent camera pair without mutating shared timing state."""
+        started = time.perf_counter()
+        try:
+            image = self._fuse_exposures(short_image, long_image)
+        except BaseException as error:  # noqa: BLE001 - main thread preserves canonical failure order
+            return _HdrFusionOutcome(None, None, time.perf_counter() - started, error)
+        seconds = time.perf_counter() - started
+        try:
+            clip_percentage = self._image_clip_pct(image)
+        except BaseException as error:  # noqa: BLE001 - main thread preserves canonical failure order
+            return _HdrFusionOutcome(image, None, seconds, error)
+        return _HdrFusionOutcome(image, clip_percentage, seconds)
 
     def _fuse_exposures(self, short_image: Any, long_image: Any) -> Any:
         if self._dependencies is None:
@@ -712,32 +791,86 @@ class HikvisionCameraAdapter:
         exposure: float | None,
         parameters: dict[str, str | int | float | bool | None],
     ) -> CaptureFrame:
+        """Encode one frame synchronously, retaining the legacy helper contract."""
+        outcome = self._encode_image(captured)
+        if self.timing_recorder is not None and outcome.seconds is not None:
+            self.timing_recorder.add("image_encoding", outcome.seconds)
+        return self._capture_frame_from_outcome(
+            captured,
+            round_plan,
+            capture_mode=capture_mode,
+            exposure=exposure,
+            parameters=parameters,
+            outcome=outcome,
+        )
+
+    def _encode_image(self, captured: _CapturedImage) -> _EncodedImageOutcome:
+        """Encode one independent image without mutating shared timing state."""
         if self._dependencies is None:
-            raise HikvisionCaptureError("capture runtime dependencies are not loaded")
+            return _EncodedImageOutcome(
+                None,
+                None,
+                None,
+                None,
+                HikvisionCaptureError("capture runtime dependencies are not loaded"),
+            )
         image = captured.image
         if getattr(image, "ndim", None) != 3 or image.shape[2] != 3:
-            raise HikvisionCaptureError(
-                f"canonical camera image must be HxWx3 BGR, got {getattr(image, 'shape', None)!r}"
+            return _EncodedImageOutcome(
+                None,
+                None,
+                None,
+                None,
+                HikvisionCaptureError(
+                    f"canonical camera image must be HxWx3 BGR, got {getattr(image, 'shape', None)!r}"
+                ),
             )
         cv2 = self._dependencies.cv2
-        success, encoded = cv2.imencode(
-            ".png",
-            image,
-            [cv2.IMWRITE_PNG_COMPRESSION, self.config.png_compression],
-        )
-        if not success:
-            raise HikvisionCaptureError(
-                f"PNG encoding failed for camera slot={captured.binding.slot_id}"
+        started = time.perf_counter()
+        try:
+            success, encoded = cv2.imencode(
+                ".png",
+                image,
+                [cv2.IMWRITE_PNG_COMPRESSION, self.config.png_compression],
             )
+            if not success:
+                raise HikvisionCaptureError(
+                    f"PNG encoding failed for camera slot={captured.binding.slot_id}"
+                )
+            image_bytes = encoded.tobytes()
+        except BaseException as error:  # noqa: BLE001 - main thread preserves canonical failure order
+            return _EncodedImageOutcome(None, None, None, time.perf_counter() - started, error)
+        return _EncodedImageOutcome(
+            image_bytes,
+            int(image.shape[1]),
+            int(image.shape[0]),
+            time.perf_counter() - started,
+        )
+
+    def _capture_frame_from_outcome(
+        self,
+        captured: _CapturedImage,
+        round_plan: CaptureRoundPlan,
+        *,
+        capture_mode: str,
+        exposure: float | None,
+        parameters: dict[str, str | int | float | bool | None],
+        outcome: _EncodedImageOutcome,
+    ) -> CaptureFrame:
+        """Build one canonical frame on the main thread from an encoding outcome."""
+        if outcome.error is not None:
+            raise outcome.error
+        if outcome.image_bytes is None or outcome.width is None or outcome.height is None:
+            raise RuntimeError("PNG encoding worker returned an incomplete result")
         return CaptureFrame(
             round_id=round_plan.round_id,
             view_id=captured.binding.views[round_plan.round_id],
             camera_slot_id=captured.binding.slot_id,
             camera_serial=captured.binding.serial,
             device_index=captured.device_index,
-            image_bytes=encoded.tobytes(),
-            width=int(image.shape[1]),
-            height=int(image.shape[0]),
+            image_bytes=outcome.image_bytes,
+            width=outcome.width,
+            height=outcome.height,
             capture_mode=capture_mode,
             exposure=exposure,
             gain=self.config.gain,
@@ -775,36 +908,44 @@ class HikvisionCameraAdapter:
                     f"{round_plan.round_id!r}"
                 )
         encoded: list[CaptureFrame] = []
+        encode_jobs: list[
+            tuple[
+                _CapturedImage,
+                str,
+                float | None,
+                dict[str, str | int | float | bool | None],
+            ]
+        ] = []
         try:
             self._ensure_open(bindings)
             if self.config.hdr:
                 images, attempt, clip_percentages = self._capture_hdr()
                 for captured, clip_pct in zip(images, clip_percentages, strict=True):
-                    frame = self._encode_frame(
-                        captured,
-                        round_plan,
-                        capture_mode="hdr_fused",
-                        exposure=None,
-                        parameters={
-                            **self._common_parameters(),
-                            "short_exposure": self.config.short_exposure,
-                            "long_exposure": self.config.long_exposure,
-                            "hdr_settle_frames": self.config.hdr_settle_frames,
-                            "hdr_attempt": attempt,
-                            "align_hdr": self.config.align_hdr,
-                            "short_dark_threshold": self.config.short_dark_threshold,
-                            "long_clip_threshold": self.config.long_clip_threshold,
-                            "blend_width": self.config.blend_width,
-                            "blur_size": self.config.blur_size,
-                            "hdr_max_retries": self.config.hdr_max_retries,
-                            "hdr_max_clip_pct": self.config.hdr_max_clip_pct,
-                            "fused_clip_pct": clip_pct,
-                            "hdr_clip_limit_exceeded": (
-                                clip_pct > self.config.hdr_max_clip_pct
-                            ),
-                        },
+                    encode_jobs.append(
+                        (
+                            captured,
+                            "hdr_fused",
+                            None,
+                            {
+                                **self._common_parameters(),
+                                "short_exposure": self.config.short_exposure,
+                                "long_exposure": self.config.long_exposure,
+                                "hdr_settle_frames": self.config.hdr_settle_frames,
+                                "hdr_attempt": attempt,
+                                "align_hdr": self.config.align_hdr,
+                                "short_dark_threshold": self.config.short_dark_threshold,
+                                "long_clip_threshold": self.config.long_clip_threshold,
+                                "blend_width": self.config.blend_width,
+                                "blur_size": self.config.blur_size,
+                                "hdr_max_retries": self.config.hdr_max_retries,
+                                "hdr_max_clip_pct": self.config.hdr_max_clip_pct,
+                                "fused_clip_pct": clip_pct,
+                                "hdr_clip_limit_exceeded": (
+                                    clip_pct > self.config.hdr_max_clip_pct
+                                ),
+                            },
+                        ),
                     )
-                    encoded.append(frame)
             else:
                 try:
                     images = self._capture_single()
@@ -824,18 +965,50 @@ class HikvisionCameraAdapter:
                         )
                     raise PartialRoundCaptureError(str(error), tuple(encoded)) from error
                 for captured in images:
-                    encoded.append(
-                        self._encode_frame(
+                    encode_jobs.append(
+                        (
                             captured,
-                            round_plan,
-                            capture_mode="single",
-                            exposure=self.config.exposure,
-                            parameters={
+                            "single",
+                            self.config.exposure,
+                            {
                                 **self._common_parameters(),
                                 "exposure": self.config.exposure,
                             },
-                        )
+                        ),
                     )
+            if not encode_jobs:
+                return tuple(encoded)
+            wall_started = time.perf_counter()
+            try:
+                with ThreadPoolExecutor(
+                    max_workers=min(CAPTURE_CPU_WORKERS, len(encode_jobs)),
+                    thread_name_prefix="zs32-png-encode",
+                ) as executor:
+                    futures = [
+                        executor.submit(self._encode_image, captured)
+                        for captured, *_rest in encode_jobs
+                    ]
+                    for (captured, capture_mode, exposure, parameters), future in zip(
+                        encode_jobs,
+                        futures,
+                        strict=True,
+                    ):
+                        outcome = future.result()
+                        if self.timing_recorder is not None and outcome.seconds is not None:
+                            self.timing_recorder.add("image_encoding", outcome.seconds)
+                        encoded.append(
+                            self._capture_frame_from_outcome(
+                                captured,
+                                round_plan,
+                                capture_mode=capture_mode,
+                                exposure=exposure,
+                                parameters=parameters,
+                                outcome=outcome,
+                            )
+                        )
+            finally:
+                if self.timing_recorder is not None:
+                    self.timing_recorder.add("image_encoding_parallel_wall", time.perf_counter() - wall_started)
             return tuple(encoded)
         except BaseException as error:  # noqa: BLE001 - always release exclusive camera handles
             failure: BaseException = error

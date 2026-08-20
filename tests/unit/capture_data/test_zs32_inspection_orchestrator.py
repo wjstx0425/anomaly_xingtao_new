@@ -120,6 +120,48 @@ def test_all_template_views_pass_before_downstream_runs_once(tmp_path: Path) -> 
     assert rows[0]["evidence_hash"] == audit["template_results"][0]["best_template_sha256"]
 
 
+
+@pytest.mark.parametrize(
+    "profile",
+    ["zs32-right-22-commissioning", "zs32_right_eight_view_22_group_commissioning_v1"],
+)
+def test_22_group_profile_omits_skipped_secondary_template_rows(tmp_path: Path, profile: str) -> None:
+    request = _request(tmp_path)
+    audit = ZS32InspectionOrchestrator(SequenceGate(), Mock(return_value={"machine_status": "OK", "inspection_complete": True})).run(request)
+    results = list(audit["template_results"])
+    for result in results:
+        if result["view"] in {"front_secondary", "back_secondary"}:
+            result["status"] = "SKIPPED"
+    rows = template_results_to_branch_rows(request, tuple(results), profile=profile)
+    assert [row["view"] for row in rows] == [view for view in VIEWS if "secondary" not in view]
+
+@pytest.mark.parametrize("invalid_score", ["0.02", True, float("nan"), float("inf")])
+def test_non_strict_template_score_stops_orchestrator_downstream(
+    tmp_path: Path,
+    invalid_score: object,
+) -> None:
+    """The orchestrator must reject coerced and non-finite continuous evidence."""
+    gate = SequenceGate()
+    original_evaluate = gate.evaluate
+
+    def evaluate(image_path: Path, hand: str, view: str) -> dict[str, object]:
+        result = original_evaluate(image_path, hand, view)
+        if view == "front":
+            result["risk_score"] = invalid_score
+        return result
+
+    gate.evaluate = evaluate  # type: ignore[method-assign]
+    downstream = Mock()
+
+    audit = ZS32InspectionOrchestrator(gate, downstream).run(_request(tmp_path))
+
+    downstream.assert_not_called()
+    assert audit["machine_status"] == "REVIEW"
+    assert audit["inspection_complete"] is False
+    assert audit["evaluated_views"] == list(VIEWS)
+    assert audit["template_results"][0]["status"] == "REVIEW"
+
+
 @pytest.mark.parametrize(
     ("gate_status", "machine_status"),
     [("REVIEW", "REVIEW"), ("NG_TEMPLATE", "NG_TEMPLATE"), ("FAIL", "NG_TEMPLATE")],

@@ -59,6 +59,90 @@ def test_start_confirm_and_close_owned_process_group(tmp_path: Path, monkeypatch
     assert signals == [(1234, signal.SIGTERM), (1234, signal.SIGKILL)]
 
 
+def test_start_passes_demo_config_to_stage35(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process = _Process()
+    popen_calls: list[list[str]] = []
+
+    def popen(command, **_kwargs):
+        popen_calls.append(list(command))
+        return process
+
+    monkeypatch.setattr("subprocess.Popen", popen)
+    controller = Stage35Controller(
+        tmp_path / "work",
+        demo_config=Path("configs/zs32/custom_demo.json"),
+    )
+
+    controller.start("part-22")
+
+    command = popen_calls[0]
+    assert command[command.index("--demo-config") + 1] == "configs/zs32/custom_demo.json"
+    assert "--runtime-config" not in command
+    process.returncode = 0
+    controller.close()
+
+
+def test_dashboard_worker_starts_once_and_stage35_receives_socket(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker = _Process()
+    worker.pid = 2001
+    stage35 = _Process()
+    stage35.pid = 2002
+    processes = iter((worker, stage35))
+    popen_calls: list[list[str]] = []
+
+    def popen(command, **_kwargs):
+        popen_calls.append(list(command))
+        return next(processes)
+
+    monkeypatch.setattr("subprocess.Popen", popen)
+    controller = Stage35Controller(tmp_path, demo_config=Path("configs/zs32/custom_demo.json"))
+
+    controller.start_worker()
+    controller.start_worker()
+    controller.worker_socket_path.touch()
+    controller.start("part-1")
+
+    assert len(popen_calls) == 2
+    assert popen_calls[0][1].endswith("pipeline/zs32_inference_worker.py")
+    assert popen_calls[0][popen_calls[0].index("--demo-config") + 1] == "configs/zs32/custom_demo.json"
+    assert "--runtime-bundle" not in popen_calls[0]
+    assert popen_calls[1][popen_calls[1].index("--inference-socket") + 1] == str(controller.worker_socket_path)
+    worker.returncode = 0
+    stage35.returncode = 0
+    controller.close()
+
+
+def test_dashboard_worker_uses_demo_config_by_default(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker = _Process()
+    popen_calls: list[list[str]] = []
+
+    def popen(command, **_kwargs):
+        popen_calls.append(list(command))
+        return worker
+
+    monkeypatch.setattr("subprocess.Popen", popen)
+    controller = Stage35Controller(tmp_path, repo_root=tmp_path / "repo")
+
+    controller.start_worker()
+
+    command = popen_calls[0]
+    assert command[command.index("--demo-config") + 1] == str(
+        tmp_path / "repo/configs/zs32/zs32_demo.json",
+    )
+    assert "--runtime-bundle" not in command
+    worker.returncode = 0
+    controller.close()
+
+
 def test_poll_returns_failed_progress(tmp_path: Path) -> None:
     controller = Stage35Controller(tmp_path)
     write_progress(
@@ -76,9 +160,48 @@ def test_poll_translates_nonzero_exit_without_progress(tmp_path: Path) -> None:
     process.returncode = 7
     controller.process = process  # type: ignore[assignment]
     controller._part_id = "part-1"
+    controller.log_path.parent.mkdir(parents=True, exist_ok=True)
+    controller.log_path.write_text("camera open failed: device busy\n", encoding="utf-8")
 
     progress = controller.poll()
 
     assert progress is not None
     assert progress.state == "failed"
-    assert progress.error == "Stage35 exited with return code 7"
+    assert progress.error is not None
+    assert "return code 7" in progress.error
+    assert "camera open failed: device busy" in progress.error
+    assert str(controller.log_path) in progress.error
+
+
+def test_poll_surfaces_worker_exit_log_without_starting_stage35(tmp_path: Path) -> None:
+    controller = Stage35Controller(tmp_path)
+    worker = _Process()
+    worker.returncode = 9
+    controller.worker_process = worker  # type: ignore[assignment]
+    controller.worker_log_path.parent.mkdir(parents=True, exist_ok=True)
+    controller.worker_log_path.write_text("loading model\nCUDA out of memory\n", encoding="utf-8")
+
+    progress = controller.poll()
+
+    assert progress is not None
+    assert progress.state == "failed"
+    assert progress.error is not None
+    assert "CUDA out of memory" in progress.error
+    assert str(controller.worker_log_path) in progress.error
+
+
+def test_worker_loading_is_reported_until_socket_is_ready(tmp_path: Path) -> None:
+    controller = Stage35Controller(tmp_path)
+    worker = _Process()
+    controller.worker_process = worker  # type: ignore[assignment]
+
+    progress = controller.poll()
+
+    assert progress is not None
+    assert progress.state == "worker_starting"
+    assert controller.running is True
+
+    controller.worker_socket_path.parent.mkdir(parents=True, exist_ok=True)
+    controller.worker_socket_path.touch()
+    assert controller.poll() is None
+    assert controller.running is False

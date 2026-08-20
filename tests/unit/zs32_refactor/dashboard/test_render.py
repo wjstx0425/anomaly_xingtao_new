@@ -50,7 +50,7 @@ def test_enlarged_view_keeps_identity_status_and_notice(state: DashboardState) -
     frame = render_dashboard(state)
 
     assert frame.selected_view == "front_secondary"
-    assert frame.notice == "暂未接入模型"
+    assert frame.notice == ""
     assert frame.canvas.shape == (920, 1600, 3)
     assert not [hit for hit in frame.hit_regions if hit.action == "select_view"]
 
@@ -62,7 +62,13 @@ def test_enlarged_view_keeps_identity_status_and_notice(state: DashboardState) -
         (ProgressRecord("p", None, "waiting_front", "front", "now"), True, ("确认正面并拍摄 [S]", True)),
         (ProgressRecord("p", None, "waiting_back", "back", "now"), True, ("确认背面并拍摄 [S]", True)),
         (ProgressRecord("p", None, "inference", "running", "now"), True, ("检测运行中", False)),
+        (ProgressRecord("p", None, "worker_starting", "loading", "now"), True, ("模型加载中", False)),
         (None, True, ("检测运行中", False)),
+        (
+            ProgressRecord("p", None, "failed", "failed", "now", error="GPU unavailable"),
+            False,
+            ("检测失败，按S重试", True),
+        ),
     ],
 )
 def test_inspection_button_label_is_contextual(
@@ -87,6 +93,70 @@ def test_running_non_waiting_button_has_clear_disabled_region(state: DashboardSt
     assert frame.inspection_button.rect.height >= 48
 
 
+def test_demo_header_shows_non_production_config_mtime_and_real_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from zs32_inspection.dashboard import render as subject
+
+    demo_config = tmp_path / "zs32_demo.json"
+    demo_config.write_text("{}\n", encoding="utf-8")
+    painted: list[str] = []
+
+    def capture_text(_canvas: np.ndarray, items: list[object]) -> None:
+        painted.extend(getattr(item, "text") for item in items)
+
+    monkeypatch.setattr(subject, "_paint_text", capture_text)
+    state = DashboardState(
+        result=None,
+        demo_config_path=demo_config,
+        progress=ProgressRecord(
+            "part-1",
+            None,
+            "failed",
+            "worker failed",
+            "now",
+            error="CUDA out of memory; log=/tmp/inference_worker.log",
+        ),
+    )
+
+    frame = render_dashboard(state)
+
+    assert "ZS32 八视角检测" in painted
+    assert any("DEMO / 非生产" in text for text in painted)
+    assert any(str(demo_config) in text and "mtime=" in text for text in painted)
+    assert any("CUDA out of memory" in text for text in painted)
+    assert frame.inspection_button.label == "检测失败，按S重试"
+
+
+def test_branch_score_text_includes_threshold(
+    state: DashboardState,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from zs32_inspection.dashboard import render as subject
+
+    painted: list[str] = []
+
+    def capture_text(_canvas: np.ndarray, items: list[object]) -> None:
+        painted.extend(getattr(item, "text") for item in items)
+
+    monkeypatch.setattr(subject, "_paint_text", capture_text)
+    render_dashboard(replace(state, layer=EvidenceLayer.TEMPLATE))
+
+    assert any("score=0.25" in text and "threshold=0.5" in text for text in painted)
+
+
+def test_offline_result_disables_live_inspection_action(
+    state: DashboardState,
+) -> None:
+    frame = render_dashboard(state)
+
+    assert frame.inspection_button.label == "离线结果"
+    assert frame.inspection_button.enabled is False
+    action = next(hit for hit in frame.hit_regions if hit.action == "inspection_action")
+    assert action.enabled is False
+
+
 def test_active_layer_and_inspection_cta_use_exactly_one_pixel_borders(
     state: DashboardState,
     monkeypatch: pytest.MonkeyPatch,
@@ -106,7 +176,7 @@ def test_active_layer_and_inspection_cta_use_exactly_one_pixel_borders(
         original_outline(canvas, rect, color, thickness)
 
     monkeypatch.setattr(subject, "_outline", record_outline)
-    frame = render_dashboard(state)
+    frame = render_dashboard(replace(state, result=None))
     active_layer = next(hit for hit in frame.hit_regions if hit.action == "select_layer" and hit.value == "fusion").rect
     cta = frame.inspection_button.rect
 

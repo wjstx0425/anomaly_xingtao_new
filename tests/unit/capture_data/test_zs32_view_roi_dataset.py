@@ -1,7 +1,7 @@
 # Copyright (C) 2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for the fixed six-view ZS32 ROI dataset converter."""
+"""Tests for the fixed eight-view ZS32 ROI dataset converter."""
 
 from __future__ import annotations
 
@@ -30,6 +30,23 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
 
 
+EXPECTED_VIEWS = (
+    "front",
+    "front_left",
+    "front_right",
+    "front_secondary",
+    "back",
+    "back_left",
+    "back_right",
+    "back_secondary",
+)
+
+
+def test_roi_dataset_keeps_historical_six_view_default() -> None:
+    """The legacy converter API must retain the historical six-view default."""
+    assert VIEWS == LEGACY_VIEWS
+
+
 def test_stage29_parser_exposes_select_and_convert_commands() -> None:
     """The numbered entrypoint offers the two steps required by the operator."""
     script = Path(__file__).resolve().parents[3] / "pipeline" / "29_zs32_fixed_roi.py"
@@ -39,12 +56,14 @@ def test_stage29_parser_exposes_select_and_convert_commands() -> None:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
 
-    select_args = module.build_parser().parse_args(["select"])
-    convert_args = module.build_parser().parse_args(["convert"])
+    select_args = module.build_parser().parse_args(["select", "--repo-root", "/tmp/data-repo"])
+    convert_args = module.build_parser().parse_args(["convert", "--repo-root", "/tmp/data-repo"])
 
     assert select_args.command == "select"
+    assert select_args.repo_root == Path("/tmp/data-repo")
     assert convert_args.command == "convert"
-    assert convert_args.output_root.name == "zs32_six_view_roi_yolo"
+    assert convert_args.repo_root == Path("/tmp/data-repo")
+    assert convert_args.output_root.name == "zs32_eight_view_roi_yolo"
 
 
 def test_transform_yolo_labels_rejects_box_crossing_roi() -> None:
@@ -57,6 +76,24 @@ def test_transform_yolo_labels_rejects_box_crossing_roi() -> None:
             roi=(10, 10, 90, 70),
             source="crossing.txt",
         )
+
+
+def test_secondary_mirror_uses_horizontally_flipped_source_roi() -> None:
+    """A secondary mirrored normal must flip its own asymmetric ROI."""
+    rois = {view: (0, 0, 100, 80) for view in VIEWS}
+    rois["front_secondary"] = (10, 12, 60, 72)
+
+    roi = roi_module._roi_for_row(  # noqa: SLF001
+        {
+            "kind": "normal_mirror",
+            "view": "front_secondary",
+            "source_view": "front_secondary",
+        },
+        rois,
+        image_width=100,
+    )
+
+    assert roi == (40, 12, 90, 72)
 
 
 def test_transform_yolo_labels_can_clip_and_report_partial_boxes() -> None:
@@ -269,8 +306,6 @@ def test_crop_dataset_preserves_split_and_empty_labels(
     assert output_rows[0]["output_image"] == "dataset/output/images/train/defect.png"
     assert [output_rows[2][key] for key in ("roi_x1", "roi_y1", "roi_x2", "roi_y2")] == ["40", "10", "90", "70"]
     assert progress_calls == [("Preflight", 3), ("Cropping", 3)]
-
-
 def test_legacy_six_view_yolo_roi_config_replays_by_default(tmp_path: Path) -> None:
     path = tmp_path / "legacy-six.json"
     path.write_text(
@@ -283,7 +318,9 @@ def test_legacy_six_view_yolo_roi_config_replays_by_default(tmp_path: Path) -> N
         ),
         encoding="utf-8",
     )
+
     _, _, rois, _ = load_roi_config(path)
+
     assert VIEWS == LEGACY_VIEWS
     assert tuple(rois) == LEGACY_VIEWS
 
@@ -300,7 +337,9 @@ def test_yolo_strict_eight_mode_requires_exact_canonical_set(tmp_path: Path) -> 
         ),
         encoding="utf-8",
     )
+
     _, _, rois, _ = load_roi_config(path, expected_views=CANONICAL_VIEWS)
+
     assert tuple(rois) == CANONICAL_VIEWS
 
 
@@ -320,6 +359,7 @@ def test_yolo_roi_config_rejects_non_integer_image_size(tmp_path: Path, bad_size
         ),
         encoding="utf-8",
     )
+
     with pytest.raises(ValueError, match="positive integer"):
         load_roi_config(path)
 
@@ -339,5 +379,6 @@ def test_yolo_roi_config_rejects_non_integer_coordinate(tmp_path: Path, bad_coor
         ),
         encoding="utf-8",
     )
+
     with pytest.raises(ValueError, match="four non-bool integers"):
         load_roi_config(path)

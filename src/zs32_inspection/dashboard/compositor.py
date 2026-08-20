@@ -8,7 +8,9 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from functools import lru_cache
 from numbers import Real
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -18,6 +20,23 @@ from .contracts import BranchEvidence, BranchState, EvidenceLayer, ViewResult
 _MASK_ALPHA = 0.45
 _BOX_ALPHA = 0.25
 _RED = (0, 0, 255)
+
+
+@lru_cache(maxsize=8)
+def _decode_source_image(resolved_path: str) -> np.ndarray:
+    image = cv2.imread(resolved_path, cv2.IMREAD_UNCHANGED)
+    if image is None:
+        raise ValueError(f"source image could not be decoded: {resolved_path}")
+    return image
+
+
+def load_source_image(path: Path) -> np.ndarray:
+    """Decode an immutable source path once and return a detached image copy."""
+    try:
+        resolved_path = path.expanduser().resolve()
+    except (OSError, RuntimeError) as error:
+        raise ValueError(f"source image path could not be resolved: {path}") from error
+    return _decode_source_image(str(resolved_path)).copy()
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,11 +211,8 @@ def _coerce_box(
     return source_x1, source_y1, source_x2, source_y2
 
 
-def _detection_label(detection: Mapping[str, object]) -> str | None:
-    class_name = detection.get("class_name")
+def _detection_confidence(detection: Mapping[str, object]) -> float | None:
     confidence = detection.get("confidence")
-    if not isinstance(class_name, str) or not class_name.strip():
-        return None
     if isinstance(confidence, bool) or not isinstance(confidence, Real):
         return None
     try:
@@ -205,7 +221,15 @@ def _detection_label(detection: Mapping[str, object]) -> str | None:
         return None
     if not math.isfinite(value) or not 0 <= value <= 1:
         return None
-    return f"{class_name.strip()} {value:.2f}"
+    return value
+
+
+def _detection_label(detection: Mapping[str, object]) -> str | None:
+    class_name = detection.get("class_name")
+    confidence = _detection_confidence(detection)
+    if not isinstance(class_name, str) or not class_name.strip() or confidence is None:
+        return None
+    return f"{class_name.strip()} {confidence:.2f}"
 
 
 def _draw_yolo_detections(
@@ -277,9 +301,7 @@ def _branch_notice(branch: BranchEvidence, label: str) -> str:
 
 
 def _load_source(view: ViewResult) -> np.ndarray:
-    image = cv2.imread(str(view.source_path), cv2.IMREAD_UNCHANGED)
-    if image is None:
-        raise ValueError(f"source image could not be decoded: {view.source_path}")
+    image = load_source_image(view.source_path)
     source = _as_bgr(image)
     if source.shape[:2] != view.source_shape:
         raise ValueError("decoded source shape does not match ViewResult.source_shape")
@@ -304,31 +326,85 @@ def _apply_patchcore(image: np.ndarray, branch: BranchEvidence) -> tuple[np.ndar
     return rendered, notice
 
 
-def _apply_yolo(image: np.ndarray, branch: BranchEvidence) -> tuple[np.ndarray, str]:
+def _apply_yolo(
+    image: np.ndarray,
+    branch: BranchEvidence,
+    *,
+    minimum_confidence: float | None = None,
+) -> tuple[np.ndarray, str]:
     unavailable = _branch_notice(branch, "YOLO")
     if unavailable:
         return image.copy(), unavailable
-    if not branch.detections:
+    detections = branch.detections
+    if minimum_confidence is not None:
+        detections = tuple(
+            detection
+            for detection in detections
+            if (confidence := _detection_confidence(detection)) is not None
+            and confidence >= minimum_confidence
+        )
+    if not detections:
         return image.copy(), ""
     if not _valid_roi(branch.roi_xyxy, image.shape[:2]):
         return image.copy(), "YOLO: 证据错误：缺少或非法 ROI"
     assert branch.roi_xyxy is not None
     rendered, invalid_box_count, invalid_label_count = _draw_yolo_detections(
         image,
-        branch.detections,
+        detections,
         branch.roi_xyxy,
     )
     notices: list[str] = []
-    if invalid_box_count == len(branch.detections):
+    if invalid_box_count == len(detections):
         notices.append("YOLO: 检测框数据无效")
     elif invalid_box_count:
         notices.append("YOLO: 部分检测框无效")
-    valid_box_count = len(branch.detections) - invalid_box_count
+    valid_box_count = len(detections) - invalid_box_count
     if valid_box_count and invalid_label_count == valid_box_count:
         notices.append("YOLO: 检测标签数据无效")
     elif invalid_label_count:
         notices.append("YOLO: 部分检测标签无效")
     return rendered, "; ".join(notices)
+
+
+def _inspect_yolo_detections(image: np.ndarray, branch: BranchEvidence) -> str:
+    """Validate all retained YOLO candidates without rendering them."""
+    detections = branch.detections
+    if not detections:
+        return ""
+    if not _valid_roi(branch.roi_xyxy, image.shape[:2]):
+        return "YOLO: 证据错误：缺少或非法 ROI"
+    assert branch.roi_xyxy is not None
+    invalid_box_count = 0
+    invalid_label_count = 0
+    for detection in detections:
+        if not isinstance(detection, Mapping) or _coerce_box(detection, branch.roi_xyxy) is None:
+            invalid_box_count += 1
+            continue
+        if _detection_label(detection) is None:
+            invalid_label_count += 1
+    notices: list[str] = []
+    if invalid_box_count == len(detections):
+        notices.append("YOLO: 检测框数据无效")
+    elif invalid_box_count:
+        notices.append("YOLO: 部分检测框无效")
+    valid_box_count = len(detections) - invalid_box_count
+    if valid_box_count and invalid_label_count == valid_box_count:
+        notices.append("YOLO: 检测标签数据无效")
+    elif invalid_label_count:
+        notices.append("YOLO: 部分检测标签无效")
+    return "; ".join(notices)
+
+
+def _apply_yolo_for_fusion(image: np.ndarray, branch: BranchEvidence) -> tuple[np.ndarray, str]:
+    if branch.state is not BranchState.AVAILABLE:
+        return _apply_yolo(image, branch)
+    if branch.score is None or branch.threshold is None:
+        return image.copy(), "YOLO: 证据错误：缺少 score 或 threshold"
+    inspection_notice = _inspect_yolo_detections(image, branch)
+    if branch.score < branch.threshold:
+        return image.copy(), inspection_notice
+    rendered, _ = _apply_yolo(image, branch, minimum_confidence=branch.threshold)
+    return rendered, inspection_notice
 
 
 def _required_branch(view: ViewResult, name: str) -> BranchEvidence:
@@ -356,14 +432,20 @@ def compose_view(view: ViewResult, layer: EvidenceLayer) -> ComposedView:
         return ComposedView(source, notice)
     if layer is EvidenceLayer.FUSION:
         notices: list[str] = []
-        image, patchcore_notice = _apply_patchcore(source, _required_branch(view, "patchcore"))
-        if patchcore_notice:
-            notices.append(patchcore_notice)
-        image, yolo_notice = _apply_yolo(image, _required_branch(view, "yolo"))
-        if yolo_notice:
-            notices.append(yolo_notice)
-        fusion_notice = _branch_notice(_required_branch(view, "fusion"), "Fusion")
+        patchcore = _required_branch(view, "patchcore")
+        yolo = _required_branch(view, "yolo")
+        fusion = _required_branch(view, "fusion")
+        fusion_notice = _branch_notice(fusion, "Fusion")
         if fusion_notice:
             notices.append(fusion_notice)
+        elif patchcore.state is BranchState.SKIPPED or yolo.state is BranchState.SKIPPED:
+            detail = f"：{fusion.reason}" if fusion.reason else ""
+            notices.append(f"Fusion: {fusion.status}{detail}")
+        image, patchcore_notice = _apply_patchcore(source, patchcore)
+        if patchcore_notice:
+            notices.append(patchcore_notice)
+        image, yolo_notice = _apply_yolo_for_fusion(image, yolo)
+        if yolo_notice:
+            notices.append(yolo_notice)
         return ComposedView(image, "; ".join(notices))
     raise ValueError(f"unsupported evidence layer: {layer!r}")

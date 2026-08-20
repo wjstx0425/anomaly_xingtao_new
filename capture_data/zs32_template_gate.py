@@ -212,7 +212,7 @@ def _label_and_split(row: Mapping[str, str], row_number: int) -> tuple[str, str]
     split = row.get("split", "").strip().lower()
     if not split:
         split = "test" if raw_label == "normal_test" else "calibration"
-    if split not in {"calibration", "test"}:
+    if split not in {"train", "model_val", "calibration", "final_test", "test"}:
         raise _error("MANIFEST_INVALID", f"row {row_number} has unsupported split: {split!r}")
     return label, split
 
@@ -223,7 +223,19 @@ def load_training_rows(
     path_root: Path | None = None,
     evaluation_fraction: float = 0.2,
 ) -> list[_Row]:
-    """Load a generic or ZS32 crop manifest and enforce part-level split isolation."""
+    """Load a generic or ZS32 crop manifest and enforce part-level split isolation.
+
+    Args:
+        manifest (Path): CSV containing image paths, identities, labels, and optional explicit roles.
+        path_root (Path | None): Optional base directory for relative image paths.
+        evaluation_fraction (float): Legacy deterministic test fraction when explicit roles are absent.
+
+    Returns:
+        list[_Row]: Validated rows in deterministic group and path order.
+
+    Raises:
+        TemplateGateError: If the manifest is missing, malformed, leaking identities, or has invalid roles.
+    """
     if not manifest.is_file():
         raise _error("MANIFEST_MISSING", f"manifest does not exist: {manifest}", path=str(manifest))
     if not math.isfinite(evaluation_fraction) or not 0 <= evaluation_fraction < 1:
@@ -355,13 +367,43 @@ def train_template_gate(
     templates_per_group: int = 5,
     max_train_per_group: int = 120,
     normal_quantile: float = 0.995,
+    normal_only: bool = False,
     evaluation_fraction: float = 0.2,
     model_version: str,
     threshold_version: str,
     roi_version: str,
     template_version: str,
 ) -> dict[str, Any]:
-    """Train all required ``(hand, view)`` groups and atomically publish a model."""
+    """Train all required ``(hand, view)`` groups and atomically publish a model.
+
+    Explicit four-role manifests use ``train`` only for template selection, ``calibration`` only for thresholds, and
+    reserve ``model_val`` and ``final_test`` for scoring. Legacy ``calibration/test`` manifests retain their original
+    deterministic internal partition.
+
+    Args:
+        manifest (Path): Template training manifest.
+        output_dir (Path): New immutable model directory.
+        path_root (Path | None): Optional base directory for relative image paths.
+        required_hands (Sequence[str]): Hands for which all eight view groups are required.
+        width (int): Aspect-preserving grayscale resize width.
+        gaussian_kernel (int): Fixed Gaussian kernel size.
+        max_shift (int): Maximum translation searched during matching.
+        templates_per_group (int): Maximum templates selected for each hand/view group.
+        max_train_per_group (int): Maximum training candidates considered per group.
+        normal_quantile (float): Normal-risk quantile used to place the threshold.
+        normal_only (bool): Ignore defect rows and publish a binary normal-only gate.
+        evaluation_fraction (float): Legacy held-out fraction when explicit roles are absent.
+        model_version (str): Model version recorded in the artifact.
+        threshold_version (str): Threshold version recorded in the artifact.
+        roi_version (str): ROI version recorded in the artifact.
+        template_version (str): Template version recorded in the artifact.
+
+    Returns:
+        dict[str, Any]: Published model contract.
+
+    Raises:
+        TemplateGateError: If arguments, data roles, calibration, or publication are invalid.
+    """
     if width <= 0 or gaussian_kernel != 3 or max_shift < 0 or templates_per_group <= 0 or max_train_per_group <= 0:
         raise _error("ARGUMENT_INVALID", "invalid preprocessing or template-selection argument")
     if not math.isfinite(normal_quantile) or not 0 < normal_quantile <= 1:
@@ -373,6 +415,9 @@ def train_template_gate(
         {"model": model_version, "threshold": threshold_version, "roi": roi_version, "template": template_version},
     )
     rows = load_training_rows(manifest, path_root=path_root, evaluation_fraction=evaluation_fraction)
+    explicit_four_role = any(row.split in {"train", "model_val", "final_test"} for row in rows)
+    if explicit_four_role and any(row.split == "test" for row in rows):
+        raise _error("MANIFEST_INVALID", "explicit four-role manifests cannot mix final_test with legacy test")
     grouped: dict[tuple[str, str], list[_Row]] = defaultdict(list)
     for row in rows:
         grouped[row.hand, row.view].append(row)
@@ -400,7 +445,10 @@ def train_template_gate(
             "review": "low_threshold <= risk < high_threshold",
             "ng_template": "risk >= high_threshold",
             "normal_quantile": normal_quantile,
+            "calibration_mode": "normal_only" if normal_only else "normal_and_defect",
+            "normal_only_binary_gate": normal_only,
             "evaluation_fraction": evaluation_fraction,
+            "role_policy": "explicit_four_role" if explicit_four_role else "legacy_calibration_test",
         },
         "required_hands": list(hands),
         "required_views": list(ZS32_VIEWS),
@@ -414,17 +462,36 @@ def train_template_gate(
                 group_rows = grouped.get(key, [])
                 calibration = [row for row in group_rows if row.split == "calibration"]
                 normals = [row for row in calibration if row.label == "normal"]
-                defects = [row for row in calibration if row.label == "defect"]
-                if not normals or not defects:
-                    missing = "normal" if not normals else "defect"
+                defects = [] if normal_only else [row for row in calibration if row.label == "defect"]
+                if explicit_four_role:
+                    template_normals = [
+                        row for row in group_rows if row.split == "train" and row.label == "normal"
+                    ]
+                    threshold_normals = normals
+                else:
+                    if not normals:
+                        raise _error(
+                            "CALIBRATION_INSUFFICIENT",
+                            f"group {hand}/{view} has no normal calibration data",
+                            hand=hand,
+                            view=view,
+                            missing_class="normal",
+                        )
+                    template_normals, threshold_normals = _partition_normal_rows(normals)
+                if not template_normals or not threshold_normals or (not normal_only and not defects):
+                    if not template_normals:
+                        missing = "normal training"
+                    elif not threshold_normals:
+                        missing = "normal calibration"
+                    else:
+                        missing = "defect calibration"
                     raise _error(
                         "CALIBRATION_INSUFFICIENT",
-                        f"group {hand}/{view} has no {missing} calibration data",
+                        f"group {hand}/{view} has no {missing} data",
                         hand=hand,
                         view=view,
                         missing_class=missing,
                     )
-                template_normals, threshold_normals = _partition_normal_rows(normals)
                 selected = _choose_templates(
                     template_normals,
                     width=width,
@@ -457,8 +524,19 @@ def train_template_gate(
                     1.0 - _best_match(load_gray(row.image_path, width), loaded_templates, max_shift)[0]
                     for row in defects
                 ]
-                low_threshold = min(defect_risks)
-                high_threshold = max(low_threshold, _nearest_rank(normal_risks, normal_quantile))
+                normal_threshold = _nearest_rank(normal_risks, normal_quantile)
+                if normal_only:
+                    if normal_threshold >= 2:
+                        raise _error(
+                            "CALIBRATION_INVALID",
+                            f"group {hand}/{view} normal-only threshold cannot be placed above observed normal risk",
+                            normal_threshold=normal_threshold,
+                        )
+                    low_threshold = math.nextafter(normal_threshold, 2.0)
+                    high_threshold = low_threshold
+                else:
+                    low_threshold = min(defect_risks)
+                    high_threshold = max(low_threshold, normal_threshold)
                 if not all(math.isfinite(value) for value in (*normal_risks, *defect_risks)):
                     raise _error("CALIBRATION_INVALID", f"group {hand}/{view} produced a non-finite risk")
                 if not 0 <= low_threshold <= high_threshold <= 2:
@@ -468,7 +546,12 @@ def train_template_gate(
                         low_threshold=low_threshold,
                         high_threshold=high_threshold,
                     )
-                test_rows = [row for row in group_rows if row.split == "test"]
+                evaluation_splits = {"model_val", "final_test"} if explicit_four_role else {"test"}
+                test_rows = [
+                    row
+                    for row in group_rows
+                    if row.split in evaluation_splits and (not normal_only or row.label == "normal")
+                ]
                 scored_rows = [
                     *((row, risk, 0, "calibration") for row, risk in zip(threshold_normals, normal_risks, strict=True)),
                     *((row, risk, 1, "calibration") for row, risk in zip(defects, defect_risks, strict=True)),
@@ -477,7 +560,7 @@ def train_template_gate(
                             row,
                             1.0 - _best_match(load_gray(row.image_path, width), loaded_templates, max_shift)[0],
                             int(row.label == "defect"),
-                            "test",
+                            row.split,
                         )
                         for row in test_rows
                     ),
@@ -507,6 +590,8 @@ def train_template_gate(
                     "calibration_normal_count": len(normals),
                     "calibration_defect_count": len(defects),
                     "test_count": len(test_rows),
+                    "model_val_count": sum(row.split == "model_val" for row in test_rows),
+                    "final_test_count": sum(row.split == "final_test" for row in test_rows),
                 }
         model_path = staging / MODEL_FILENAME
         model_path.write_text(
@@ -583,20 +668,14 @@ def _load_group(model: Mapping[str, Any], hand: str, view: str) -> tuple[Mapping
     return group, low, high
 
 
-def predict_template_gate(model_dir: Path, image_path: Path, *, hand: str, view: str) -> TemplateGateResult:
-    """Run one whole-view gate and preserve all decision evidence."""
-    hand = hand.strip().lower()
-    view = view.strip().lower()
-    if view not in ZS32_VIEWS:
-        raise _error("VIEW_INVALID", f"unsupported ZS32 view: {view!r}", view=view)
-    model = load_model(model_dir)
+def _prepare_template_group(
+    model_dir: Path,
+    model: Mapping[str, Any],
+    hand: str,
+    view: str,
+) -> tuple[Mapping[str, Any], float, float, list[tuple[str, np.ndarray]], dict[str, str]]:
+    """Validate and decode one immutable template group once."""
     group, low, high = _load_group(model, hand, view)
-    preprocessing = model["preprocessing"]
-    try:
-        width = int(preprocessing["width"])
-        max_shift = int(preprocessing["max_shift"])
-    except (KeyError, TypeError, ValueError) as exc:
-        raise _error("MODEL_INVALID", "model preprocessing width/max_shift is invalid") from exc
     templates_field = group.get("templates")
     if not isinstance(templates_field, list) or not templates_field:
         raise _error("MODEL_INVALID", f"template group {hand}/{view} has no templates")
@@ -634,6 +713,26 @@ def predict_template_gate(model_dir: Path, image_path: Path, *, hand: str, view:
             )
         templates.append((relative, template))
         template_hashes[relative] = actual_hash
+    return group, low, high, templates, template_hashes
+
+
+def _predict_prepared_template_gate(
+    model_dir: Path,
+    model: Mapping[str, Any],
+    prepared: tuple[Mapping[str, Any], float, float, list[tuple[str, np.ndarray]], dict[str, str]],
+    image_path: Path,
+    *,
+    hand: str,
+    view: str,
+) -> TemplateGateResult:
+    """Evaluate one image against already-validated template arrays."""
+    _group, low, high, templates, template_hashes = prepared
+    preprocessing = model["preprocessing"]
+    try:
+        width = int(preprocessing["width"])
+        max_shift = int(preprocessing["max_shift"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise _error("MODEL_INVALID", "model preprocessing width/max_shift is invalid") from exc
     image = load_gray(image_path, width)
     similarity, best_template, offset = _best_match(image, templates, max_shift)
     risk = 1.0 - similarity
@@ -667,3 +766,49 @@ def predict_template_gate(model_dir: Path, image_path: Path, *, hand: str, view:
         offset=offset,
         versions=versions,
     )
+
+
+class PreparedTemplateGate:
+    """Template gate with model JSON, hashes, and selected groups loaded once."""
+
+    def __init__(self, model_dir: Path, *, hand: str, views: Sequence[str]) -> None:
+        self.model_dir = model_dir.expanduser().resolve()
+        self.hand = hand.strip().lower()
+        self.model = load_model(self.model_dir)
+        normalized = tuple(view.strip().lower() for view in views)
+        if (
+            not normalized
+            or any(view not in ZS32_VIEWS for view in normalized)
+            or len(set(normalized)) != len(normalized)
+        ):
+            raise _error("VIEW_INVALID", "prepared template views must be a unique non-empty canonical subset")
+        self.groups = {
+            view: _prepare_template_group(self.model_dir, self.model, self.hand, view)
+            for view in normalized
+        }
+
+    def evaluate(self, image_path: Path, hand: str, view: str) -> TemplateGateResult:
+        """Evaluate one prepared view without repeating model/template I/O."""
+        normalized_hand = hand.strip().lower()
+        normalized_view = view.strip().lower()
+        if normalized_hand != self.hand or normalized_view not in self.groups:
+            raise _error("GROUP_NOT_FOUND", f"template group was not prepared: {normalized_hand}/{normalized_view}")
+        return _predict_prepared_template_gate(
+            self.model_dir,
+            self.model,
+            self.groups[normalized_view],
+            image_path,
+            hand=normalized_hand,
+            view=normalized_view,
+        )
+
+
+def predict_template_gate(model_dir: Path, image_path: Path, *, hand: str, view: str) -> TemplateGateResult:
+    """Run one whole-view gate and preserve all decision evidence."""
+    hand = hand.strip().lower()
+    view = view.strip().lower()
+    if view not in ZS32_VIEWS:
+        raise _error("VIEW_INVALID", f"unsupported ZS32 view: {view!r}", view=view)
+    model = load_model(model_dir)
+    prepared = _prepare_template_group(model_dir, model, hand, view)
+    return _predict_prepared_template_gate(model_dir, model, prepared, image_path, hand=hand, view=view)

@@ -58,6 +58,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-train-per-group", type=_positive_int, default=120)
     parser.add_argument("--normal-quantile", type=_probability, default=0.995)
     parser.add_argument(
+        "--normal-only",
+        action="store_true",
+        help="Build templates and a single PASS/NG threshold exclusively from normal rows; defect rows are ignored.",
+    )
+    parser.add_argument(
         "--evaluation-fraction",
         type=float,
         default=0.2,
@@ -84,6 +89,7 @@ def main(argv: list[str] | None = None) -> int:
             templates_per_group=args.templates_per_group,
             max_train_per_group=args.max_train_per_group,
             normal_quantile=args.normal_quantile,
+            normal_only=args.normal_only,
             evaluation_fraction=args.evaluation_fraction,
             model_version=args.model_version,
             threshold_version=args.threshold_version,

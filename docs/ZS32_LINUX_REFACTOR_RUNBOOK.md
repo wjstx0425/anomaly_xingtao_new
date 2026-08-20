@@ -67,6 +67,13 @@ export BASE_RECIPE=$ZS32/zs32_right_patchcore_training_v1.local.json
 mkdir -p "$ZS32" "$ASSET_ROOT"
 ```
 
+以上变量是现有三相机右手 release 示例。第四台正面相机 `DB0968108` 使用
+`configs/zs32/topology/zs32_4cam_double_side_v1.json`，产生
+`front_secondary/back_secondary`，整件为 8 个视图。四机不能继续使用上面的三机
+`ROI`、`RECIPE_TEMPLATE` 或 gate publication；首次 gate 发布、正式采集以及后续 8-view
+ROI/训练资产的顺序见
+[`configs/zs32/topology/README.md`](../configs/zs32/topology/README.md)。
+
 `RECIPE_TEMPLATE` 不可执行：它的 zero SHA256 是 unbound sentinel。第 4 节
 发布 gate publication 后，必须把命令输出的真实 `policy_sha256`
 写入 `capture_gate_policy` 后生成 `$BASE_RECIPE`；从首次训练到正式
@@ -117,7 +124,9 @@ receipt 和 deployment release。
 
 ## 4. 采集与不可变数据集
 
-一次 `zs32-capture` 对应同一物理件的一个完整 `capture_set_id`。三相机双轮采集必须正好得到六个 view；缺图、serial 错误、quality/registration 失败均非成功采集。
+一次 `zs32-capture` 对应同一物理件的一个完整 `capture_set_id`。双轮采集必须得到当前
+topology 的完整 view 集：三机为 6 个、四机为 8 个、五机为 10 个；缺图、serial 错误、
+quality/registration 失败均非成功采集。
 
 首个模型 release 之前，先把 topology、canonical
 `capture/gates/policy.json`、版本化 `capture/acquisition/hikvision.json`、按 hand

@@ -46,6 +46,39 @@ def test_zs32_workflow_seeds_each_experiment_before_construction() -> None:
     assert seed_index < model_index
 
 
+def test_zs32_workflow_uses_requested_efficientad_model_size() -> None:
+    """EfficientAD-S and EfficientAD-M must not share a hard-coded architecture."""
+    script_path = Path(__file__).resolve().parents[3] / "examples/api/03_models/zs32_defect_workflow.py"
+    source = script_path.read_text(encoding="utf-8")
+
+    build_source = source[source.index("def _build_model(") : source.index("def _assert_accelerator_ready(")]
+
+    assert "model_size=args.efficientad_model_size" in build_source
+
+
+def test_custom_trainer_forwards_efficientad_model_size(tmp_path: Path) -> None:
+    """The generic launcher must forward small/medium selection to stage 3."""
+    trainer = _load_module("pipeline_train_custom_efficientad_size", "pipeline/8_train_custom_models.py")
+    args = trainer.build_parser().parse_args(
+        [
+            "--data-root",
+            str(tmp_path / "data"),
+            "--output-root",
+            str(tmp_path / "results"),
+            "--views",
+            "right_front",
+            "--models",
+            "efficient_ad",
+            "--efficientad-model-size",
+            "small",
+        ],
+    )
+
+    workflow_args = trainer._common_workflow_args(args, "efficient_ad")
+
+    assert workflow_args[workflow_args.index("--efficientad-model-size") + 1] == "small"
+
+
 def test_multicamera_collection_wrapper_forwards_arguments_unchanged() -> None:
     """The numbered wrapper should delegate every capture option unchanged."""
     wrapper = _load_module("pipeline_collect_multicamera", "pipeline/1_collect_multicamera_data.py")

@@ -161,6 +161,11 @@ VIEW_SPECS = {
         raw_parts=("right", "front_right"),
         fallback_raw_parts=(("front_right",),),
     ),
+    "right_front_secondary": ViewSpec(
+        name="right_front_secondary",
+        raw_parts=("right", "front_secondary"),
+        fallback_raw_parts=(("front_secondary",),),
+    ),
     "right_back": ViewSpec(
         name="right_back",
         raw_parts=("right", "back"),
@@ -175,6 +180,11 @@ VIEW_SPECS = {
         name="right_back_right",
         raw_parts=("right", "back_right"),
         fallback_raw_parts=(("back_right",),),
+    ),
+    "right_back_secondary": ViewSpec(
+        name="right_back_secondary",
+        raw_parts=("right", "back_secondary"),
+        fallback_raw_parts=(("back_secondary",),),
     ),
 }
 DEFAULT_VIEW_NAMES = ("left_top", "left_bottom", "right_top", "right_bottom")
@@ -487,8 +497,20 @@ def _iter_raw_images(data_root: Path, view: str, label: str) -> Iterable[Path]:
             return
 
 
+def _nested_group_identity(image_path: Path) -> str | None:
+    """Return a session-aware group identity for nested capture data."""
+    match = re.search(r"_group(\d+)_", image_path.stem)
+    if match is None or image_path.parent.name != "images":
+        return None
+    session_id = image_path.parent.parent.name
+    return f"{session_id}__group{match.group(1)}"
+
+
 def _raw_sample_id(image_path: Path) -> str:
     """Return the sample id for nested ZS32 or flat label-directory images."""
+    nested_identity = _nested_group_identity(image_path)
+    if nested_identity is not None:
+        return nested_identity
     if re.search(r"_group\d+_", image_path.stem):
         return re.sub(r"_\d{6}(?:_fused)?$", "", image_path.stem)
     if image_path.parent.name == "images":
@@ -498,6 +520,9 @@ def _raw_sample_id(image_path: Path) -> str:
 
 def _normal_split_key(image_path: Path) -> str:
     """Return a cross-view key used to keep one capture group in one split."""
+    nested_identity = _nested_group_identity(image_path)
+    if nested_identity is not None:
+        return nested_identity
     match = re.search(r"_group(\d+)_", image_path.stem)
     return f"group{match.group(1)}" if match else _raw_sample_id(image_path)
 
@@ -586,6 +611,7 @@ def preprocess_dataset(args: argparse.Namespace) -> Path:
     roi = args.roi
     remove_blue_marks = not args.skip_blue_removal
     manifest_rows: list[dict[str, Any]] = []
+    processed_sources: dict[Path, Path] = {}
     processed_count = 0
     selected_views = _selected_views(args.views)
 
@@ -639,6 +665,11 @@ def preprocess_dataset(args: argparse.Namespace) -> Path:
                     / "images"
                     / source_path.name
                 )
+                previous_source = processed_sources.get(output_path)
+                if previous_source is not None:
+                    msg = f"Preprocessed path collision for {output_path}: {previous_source} and {source_path}"
+                    raise ValueError(msg)
+                processed_sources[output_path] = source_path
                 stats = _preprocess_image(source_path, output_path, roi, remove_blue_marks)
                 manifest_rows.append(
                     {
@@ -663,6 +694,9 @@ def preprocess_dataset(args: argparse.Namespace) -> Path:
         raise RuntimeError(msg)
 
     manifest = pd.DataFrame(manifest_rows).sort_values(["view", "label", "sample_id", "frame_id"])
+    if not manifest["processed_path"].is_unique:  # pragma: no cover - guarded before each image write
+        msg = "Preprocessed manifest contains duplicate processed_path values."
+        raise ValueError(msg)
     manifest_path = _manifest_path(output_root)
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest.to_csv(manifest_path, index=False)
@@ -727,6 +761,8 @@ def _build_datamodule(
     """Build an Anomalib Folder datamodule for one preprocessed view."""
     from anomalib.data import Folder
 
+    view_root = _processed_view_dir(output_root, view)
+    abnormal_dir = "defect" if (view_root / "defect").is_dir() else None
     if model_name == "efficient_ad":
         train_batch_size = args.efficientad_batch_size
     elif model_name == "anomaly_dino":
@@ -735,9 +771,9 @@ def _build_datamodule(
         train_batch_size = args.patchcore_batch_size
     datamodule = Folder(
         name=f"zs32_{view}",
-        root=_processed_view_dir(output_root, view),
+        root=view_root,
         normal_dir="normal",
-        abnormal_dir="defect",
+        abnormal_dir=abnormal_dir,
         normal_test_dir="normal_test",
         normal_split_ratio=0,
         extensions=DEFAULT_EXTENSIONS,
@@ -789,7 +825,7 @@ def _build_model(
         return EfficientAd(
             imagenet_dir=args.imagenet_dir.resolve(),
             teacher_out_channels=384,
-            model_size="medium",
+            model_size=args.efficientad_model_size,
             lr=1e-4,
             pre_processor=EfficientAd.configure_pre_processor(image_size=image_size),
             visualizer=visualizer,
@@ -1349,6 +1385,12 @@ def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
         help="PatchCore feature precision. float16 reduces memory.",
     )
     parser.add_argument("--efficientad-batch-size", type=int, default=1, help="EfficientAd training batch size.")
+    parser.add_argument(
+        "--efficientad-model-size",
+        choices=("small", "medium"),
+        default="medium",
+        help="EfficientAd model size.",
+    )
     parser.add_argument("--anomaly-dino-batch-size", type=int, default=1, help="AnomalyDINO training batch size.")
     parser.add_argument("--eval-batch-size", type=int, default=8, help="Evaluation batch size.")
     parser.add_argument("--efficientad-epochs", type=int, default=20, help="EfficientAd max epochs.")

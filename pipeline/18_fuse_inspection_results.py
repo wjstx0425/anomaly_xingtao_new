@@ -36,11 +36,19 @@ ZS32_RIGHT_18_COMMISSIONING_PROFILE_PATH = (
 ZS32_RIGHT_24_COMMISSIONING_PROFILE_PATH = (
     REPO_ROOT / "config/fusion/zs32_right_eight_view_24_group_commissioning.json"
 )
+ZS32_RIGHT_22_COMMISSIONING_PROFILE_PATH = (
+    REPO_ROOT / "config/fusion/zs32_right_eight_view_22_group_commissioning.json"
+)
+ZS32_RIGHT_20_COMMISSIONING_PROFILE_PATH = (
+    REPO_ROOT / "config/fusion/zs32_right_eight_view_20_group_commissioning.json"
+)
 STRICT_PROFILE_PATHS = {
     "zs32": ZS32_PROFILE_PATH,
     "zs32-right": ZS32_RIGHT_PROFILE_PATH,
     "zs32-right-18-commissioning": ZS32_RIGHT_18_COMMISSIONING_PROFILE_PATH,
     "zs32-right-24-commissioning": ZS32_RIGHT_24_COMMISSIONING_PROFILE_PATH,
+    "zs32-right-22-commissioning": ZS32_RIGHT_22_COMMISSIONING_PROFILE_PATH,
+    "zs32-right-20-commissioning": ZS32_RIGHT_20_COMMISSIONING_PROFILE_PATH,
 }
 
 
@@ -669,7 +677,13 @@ def run_fusion(args: argparse.Namespace) -> list[fusion.FusedDecision]:
         "production_release_allowed": bool(config.get("production_release_allowed", True)),
         "required_group_count": len(config.get("expected_versions", [])),
     }
-    strict_zs32 = args.profile in STRICT_PROFILE_PATHS
+    strict_zs32 = args.profile in STRICT_PROFILE_PATHS or (
+        config.get("commissioning_only") is True
+        and config.get("production_release_allowed") is False
+        and isinstance(config.get("expected_versions"), list)
+        and bool(config["expected_versions"])
+        and config.get("identity", {}).get("product") == "ZS32"
+    )
     _validate_generation_target(args, strict_zs32=strict_zs32)
     warnings: list[str] = []
     threshold_by_group: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}

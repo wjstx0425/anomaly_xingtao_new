@@ -54,12 +54,42 @@ uv sync
 | `29_zs32_fixed_roi.py` | 选择六视角固定 ROI 并裁剪 YOLO 数据集 | OpenCV 可视化框选，保持原 split 并转换 bbox |
 | `30_crop_zs32_patchcore_dataset.py` | 分别框选左右手六视角 ROI 并裁剪 PatchCore 数据集 | 生成独立裁剪数据，不修改原始图片 |
 | `31_calibrate_zs32_fusion.py` | 离线锁定 ZS32 72 组双阈值 | 输出不可原地覆盖的阈值 bundle 和校准报告 |
-| `32_run_zs32_multimodel_inference.py` | 执行右手六视角模板、PatchCore、YOLO 统一推理 | 单零件真实推理和严格融合入口 |
+| `32_run_zs32_multimodel_inference.py` | 执行右手八视角模板、PatchCore、YOLO 统一推理 | 单零件真实推理和严格融合入口 |
 | `33_run_zs32_offline_calibration.py` | 批量执行三模型离线联调与 commissioning 标定 | 可恢复批跑、真实 YOLO 标签诊断，不直接生成上线阈值 |
-| `34_publish_zs32_18_group_commissioning.py` | 发布右手 unified-ROI 18 组联调阈值 | 仅模板/PatchCore/YOLO，明确禁止生产放行 |
-| `35_run_zs32_live_commissioning.py` | 真机采集一件右手 ZS32 并执行 18 组联调 | 三相机六视角人工翻面、非生产 commissioning |
+| `34_publish_zs32_18_group_commissioning.py` | 发布右手 24 组八视图联调阈值 | 历史文件名保留，明确禁止生产放行 |
+| `35_run_zs32_live_commissioning.py` | 真机采集一件右手 ZS32 并执行 24 组联调 | 四相机八视角人工翻面、非生产 commissioning |
 | `train_zs32_template_gate.py` | 训练左右手六视角整图模板门禁 | 输出带双阈值、版本和模板哈希的 12 组模型 |
 | `predict_zs32_template_gate.py` | 执行第一个模板检测项目 | 非 PASS 返回非零退出码并阻止后续检测 |
+
+#### ZS32 八视图 Demo 唯一在线入口（2026-07-27）
+
+操作员唯一需要编辑的配置是
+`configs/zs32/zs32_demo.json`。只修改其中阈值时，常驻 worker 会在下一件开始前重读配置，
+不会重载模型；修改 checkpoint、YOLO weights、Template、ROI、topology 或推理设置后必须重启
+Dashboard。
+
+```bash
+cd /home/yunjing/anomaly_xingtao_new
+
+UV_CACHE_DIR=/tmp/uv-cache \
+PYTHONPATH=/opt/MVS/Samples/64/Python/MvImport:. \
+uv run --no-sync python \
+  pipeline/36_zs32_inspection_dashboard.py \
+  --live \
+  --demo-config configs/zs32/zs32_demo.json \
+  --part-id zs32_demo_001
+```
+
+该入口保留正面/背面两次人工确认，并先对八个视角（包括
+`front_secondary/back_secondary`）全部运行 Template。任一 Template NG 时整件立即输出
+`NG_TEMPLATE`，PatchCore/YOLO 明确记录为 `SKIPPED`；Fusion 则逐视角显示对应 Template 的
+`NG_TEMPLATE` 或 `PASS`。只有八个 Template 全部 PASS
+才继续运行后续 16 条模型分支。任一已执行分支缺失或异常均输出 `ERROR`，不会伪装成 OK。Dashboard 醒目标记
+`DEMO / 非生产`，并显示当前配置路径、修改时间和真实首个错误。
+
+现行在线链不读取 runtime bundle、threshold artifact、fusion profile 或资产 SHA，也不调用
+Stage 18/34/37。本文后部的 Stage 18/34、旧 Stage 32 严格融合和旧 bundle 命令都是历史回放说明，
+不是当前在线入口；相关脚本和结果暂时保留，禁止从本文历史段落启动现场检测。
 
 最常用流程：
 
@@ -1697,6 +1727,9 @@ HF_HUB_OFFLINE=1 bash pipeline/run_patchcore_roi_six_views.sh
 `4024×3036` 尺寸，再分别使用 `dataset/zs32_patchcore_roi_config.json` 和
 `dataset/zs32_six_view_roi_config.json` 裁剪；六个 PatchCore 常驻加载、逐视角推理，YOLO 常驻加载并一次
 batch 推理六张 ROI。YOLO 的 `candidate_conf=0.001` 只是尽量保留候选框的采集下限，不是最终 NG 阈值。
+Dashboard 的 YOLO 证据页会保留这些候选框用于诊断；Fusion 页只显示单框
+`confidence >=` 当前视角最终 YOLO 阈值的红框。如果该视角 YOLO 分支总分低于阈值，Fusion 不显示任何
+YOLO 红框。
 
 只有模型证据时先运行 `infer`。六个参数必须传原始六视角图，不要提前裁剪：
 
@@ -1715,8 +1748,9 @@ uv run python pipeline/32_run_zs32_multimodel_inference.py infer \
   --output-dir results/zs32_runtime/part001
 ```
 
-输出包含 `patchcore.csv`、`yolo.csv`、`runtime_manifest.json`、`runtime_summary.json`、两类 ROI crop、
-PatchCore 热图和 YOLO 框图。每条 branch 都保留连续 `score`、原图/证据路径与 SHA-256、实际权重版本；YOLO
+输出包含 `patchcore.csv`、`yolo.csv`、`runtime_manifest.json`、`runtime_summary.json`、六个主视角
+PatchCore ROI crop、PatchCore 热图和 YOLO 框图。YOLO 八视角 ROI 直接从同一组内存 BGR 图像生成并批量推理，
+不再写临时 YOLO crop PNG。每条 branch 都保留连续 `score`、原图/证据路径与 SHA-256、实际权重版本；YOLO
 无框明确写为 `detections=[]`、`score=0.0`。checkpoint 内部类别名 `item` 会同时保留为
 `checkpoint_class_name`，部署证据使用明确业务语义 `class_name=defect`。没有 Stage 31 locked 双阈值时，输出必定是
 `machine_status=REVIEW, inspection_complete=false`，不会把旧 `six_view_summary.csv` 的单阈值冒充正式融合阈值。
@@ -1845,6 +1879,14 @@ Stage 35 把一件右手 ZS32 的三相机六视角 HDR 采集和上述 18 组 S
 /home/yunjing/anomalib/.venv/bin/python pipeline/35_run_zs32_live_commissioning.py --part-id live_part_001
 ```
 
+如果只需排查模板算子是否阻塞后续模型，可显式跳过模板并运行六视角 PatchCore + YOLO 诊断：
+
+```bash
+/home/yunjing/anomalib/.venv/bin/python pipeline/35_run_zs32_live_commissioning.py \
+  --part-id live_part_001 \
+  --diagnostic-skip-template
+```
+
 操作员会依次看到两个提示：放好右手件正面后按 Enter，采集中央/左侧/右侧三个正面视角；再将同一零件
 翻到背面后按 Enter，采集三个背面视角。入口固定 `hand=right`、`group-count=1`、
 `images-per-group=1`、HDR 短/长曝光 `1500/6000 us`、gain `0`、settle frames `1`。默认相机按 serial
@@ -1863,13 +1905,22 @@ manifest 校验后，推理写入
 终端会打印 capture manifest、`runtime_summary.json`、输出目录和最终策略字段。完整进入 Stage18 时，还会
 打印六视角各三分支证据表和 `fusion/audit/<sample-id>.json`。
 
-这个入口只运行 template、PatchCore、YOLO 共 18 组，不包含 quality、registration、geometry 或 GUI，
+`--diagnostic-skip-template` 保留同一采集目录和 runtime 输出目录，在该输出目录直接写
+`patchcore.csv`、`yolo.csv`、对应的连续分数/证据图、`runtime_summary.json` 和 `runtime_manifest.json`。
+终端会打印两个 CSV 的绝对路径。此模式不会加载模板、不会生成 `template_match.csv`，也不会运行 fusion/Stage18，
+因此不会生成 `fusion/` 或 Stage18 audit；终端明确显示 `template: skipped (diagnostic)` 和
+`stage18_audit: none (diagnostic infer; fusion was not run)`。
+
+默认完整融合流程只运行 template、PatchCore、YOLO 共 18 组；诊断流程只运行六视角 PatchCore 和 YOLO。
+两者都不包含 quality、registration、geometry 或 GUI，
 也不允许切换到生产 36 组 profile。完整融合得到的 `OK`、`NG_*`、`REVIEW` 都是合法业务结果；如果在线模板
 先得到明确 `NG_TEMPLATE`，或模板算子异常得到短路 `REVIEW`，Stage32 会在 PatchCore、YOLO 和 Stage18 前
 停止。这种合法模板短路会打印模板结果，`audit: none`，不会生成 Stage18 audit，不能把它误判为入口崩溃。
 当前源图无法解码或尺寸错误会让 Stage32 非零并由 Stage35 报执行错误，不会伪造 `INVALID_CAPTURE` summary。
 无论哪种业务结果，都必须保持
 `commissioning_only=true, production_release_allowed=false`；Stage35 不能用于生产放行。
+跳过模板的诊断结果固定保持 `machine_status=REVIEW`、`inspection_complete=false`、
+`strict_fusion=false`、`diagnostic_skip_template=true`，只用于定位模板算子问题，不能解释为 OK、NG 或任何生产结论。
 
 ### ZS32 右手数据集离线联调与阈值诊断（Stage 33）
 
@@ -2149,3 +2200,308 @@ invalid 输入会以 `missing_prediction` 写入，并在详情里标记
 `geometry_recall`、`anomaly_dino_recall`、normal FP、stress normal FP 和
 invalid reject rate。这里的 `invalid_reject_rate` 只统计已评估并被拒绝的 invalid 样本；
 无预测 invalid 样本会进入 `not_evaluated_missing_prediction_count`。
+
+## BMW 四相机八视图HDR数据采集
+
+BMW当前采集拓扑为四台固定相机、正反两轮、每个零件八张HDR融合图：
+
+| 相机序列号 | 正面视角 | 反面视角 |
+| --- | --- | --- |
+| `DA9805574` | `front` | `back` |
+| `DA9625347` | `front_left` | `back_left` |
+| `DB0998274` | `front_right` | `back_right` |
+| `DB0968108` | `front_secondary` | `back_secondary` |
+
+固定采集配置为
+`configs/bmw/capture/bmw_4cam_eight_view_hdr_v1.json`，HDR短/长曝光为
+`1500/6000 us`。先采一个正常零件验证：
+
+```bash
+uv run --no-sync python pipeline/bmw_lab_collect_data.py \
+  --label normal \
+  --part-id bmw_normal_test \
+  --group-count 1 \
+  --root dataset/bmw_lab_raw
+```
+
+确认八张图均正常后，将 `--group-count` 改为实际零件数量，例如30。采集无光痕NG：
+
+```bash
+uv run --no-sync python pipeline/bmw_lab_collect_data.py \
+  --label defect \
+  --defect-type no_streak \
+  --part-id bmw_no_streak \
+  --group-count 20 \
+  --root dataset/bmw_lab_raw
+```
+
+程序每个零件提示两次：正面固定后按回车，随后翻转同一零件再按回车。输出位于
+`dataset/bmw_lab_raw/left/<view>/<label>/<session_id>/images`，会话清单位于
+`dataset/bmw_lab_raw/manifests/<session_id>.csv`。每个完整样本应有8条image记录和1条complete sample记录。
+当前最小入口只保存HDR融合图。旧的 `pipeline/1_collect_multicamera_data.py` 固定三相机，不再用于BMW四机采集。
+
+### BMW 八视图数据准备器
+
+新采集 CSV 不能直接交给旧六视图训练入口。先运行独立准备器，过滤 `incomplete`，校验八视图、相机绑定和
+HDR 图像，并按采集器的物理件实例 ID 做分层 `train/calibration/final_test` 切分。先 dry-run：
+
+```bash
+uv run --no-sync python pipeline/bmw_lab_prepare_eight_view_data.py \
+  --raw-root dataset/bmw_lab_raw \
+  --output-root dataset/bmw_lab_prepared \
+  --dataset-id bmw_hdr_eight_view_v1 \
+  --dry-run
+```
+
+确认统计后发布不可覆盖的数据清单：
+
+```bash
+uv run --no-sync python pipeline/bmw_lab_prepare_eight_view_data.py \
+  --raw-root dataset/bmw_lab_raw \
+  --output-root dataset/bmw_lab_prepared \
+  --dataset-id bmw_hdr_eight_view_v1
+```
+
+输出位于 `dataset/bmw_lab_prepared/bmw_hdr_eight_view_v1`。其中 `dataset_manifest.csv` 保存完整源图身份和
+SHA-256；`efficientad.csv`、`template.csv`、`yolo_annotation.csv` 和 `bright_streak.csv` 使用相互独立的
+分支标签。`no_streak` 保持业务 NG，但在 EfficientAD/Template 中是分支 normal、YOLO 是确认负样本，
+只有 `front_left` 光痕分支为 `NG_NO_STREAK`。`deform/edge/others` 不会被自动伪造成八个视图都有缺陷，
+而是标为 `review_required`，等待 ROI 和逐视图人工标注。
+
+`--skip-image-hash` 仅用于快速校验；用它发布的数据会在报告中标为弱完整性，不建议用于正式训练血缘。
+该准备器只发布 canonical manifests，不裁 ROI、不生成 YOLO 框，也不冒充旧六视图训练 release。
+
+### BMW 八视图 ROI 与训练目录
+
+新的 `right` 零件可直接用现有缺陷采集选择一次可复用 ROI；推荐避开 `deform`，使用 `others` 的第一件
+作为几何参考：
+
+```bash
+uv run --no-sync python pipeline/bmw_lab_select_eight_view_rois.py \
+  --raw-root dataset/bmw_lab_raw \
+  --hand right \
+  --source-class others \
+  --sample-id bmw_right_others_group001_000001 \
+  --profile-id bmw-right-hdr-eight-view-v1 \
+  --output configs/bmw/rois/bmw_right_hdr_eight_view_v1.json
+```
+
+该 schema-v2 ROI 绑定固定工装和 `4024×3036` 图像尺寸，不绑定未来某一次 prepared manifest。后续采完
+正常件和无光痕件后，准备新 release 时增加 `--hand right`，再把同一个
+`configs/bmw/rois/bmw_right_hdr_eight_view_v1.json` 传给训练数据物化器即可，不需要重新框选。
+
+对已发布的数据选择八个固定零件 ROI。程序确定性选择同一件 `normal/train` 八视图参考图，每个窗口框选后
+按 Enter，依次完成八个视图：
+
+```bash
+uv run --no-sync python pipeline/bmw_lab_select_eight_view_rois.py \
+  --prepared-root dataset/bmw_lab_prepared/bmw_hdr_eight_view_v1 \
+  --output configs/bmw/rois/bmw_hdr_eight_view_v1.json
+```
+
+ROI 文件绑定 `dataset_manifest.csv` 的 SHA-256，不能静默用于另一版数据。需要重选时显式增加 `--force`。
+选完后先生成 canonical ROI crops、EfficientAD目录、Template目录和YOLO标注队列：
+
+```bash
+uv run --no-sync python pipeline/bmw_lab_materialize_training_data.py \
+  --prepared-root dataset/bmw_lab_prepared/bmw_hdr_eight_view_v1 \
+  --roi-config configs/bmw/rois/bmw_hdr_eight_view_v1.json \
+  --output-root dataset/bmw_lab_training \
+  --training-id bmw_hdr_roi_training_v1
+```
+
+这一步会自动给 `normal/no_streak` 生成YOLO空标签，但不会把 `deform/edge/others` 伪装成空标签；248张
+缺陷视图会写入 `yolo/annotation_queue.csv`，并且暂不生成 `data.yaml`。标注工具应在ROI crop上输出与队列
+`expected_label_filename` 同名的标准YOLO txt；该视图确认没有可见缺陷时保留空txt，有缺陷时写类别0的框。
+全部248个txt齐备后发布新版本：
+
+```bash
+uv run --no-sync python pipeline/bmw_lab_materialize_training_data.py \
+  --prepared-root dataset/bmw_lab_prepared/bmw_hdr_eight_view_v1 \
+  --roi-config configs/bmw/rois/bmw_hdr_eight_view_v1.json \
+  --yolo-label-root /path/to/reviewed_yolo_labels \
+  --output-root dataset/bmw_lab_training \
+  --training-id bmw_hdr_roi_training_reviewed_v1
+```
+
+完整标注后 `yolo/data.yaml` 才会出现。EfficientAD目录采用八个 `<view>/normal|normal_test|defect` 布局，
+独立 final test 位于 `efficientad/held_out`；Template的八视图清单位于
+`template/trainer_manifest.csv`。
+
+### BMW 八视图实验室一键训练
+
+最终标签复核完成后，直接运行：
+
+```bash
+uv run --no-sync python pipeline/bmw_lab_train_all.py \
+  --run-id bmw_lab_eight_view_v1
+```
+
+该入口先发布 `bmw_hdr_roi_training_reviewed_v1`，然后依次训练八组 Template、标定 `front_left` 光痕规则、
+串行训练八个 EfficientAD-S，最后训练一个八视图共享的 YOLO26n。默认 EfficientAD 为 30 轮且 batch 固定为1；
+YOLO 为 100 轮、`imgsz=640`、`batch=32`。任一步失败立即停止，并在
+`results/bmw_lab_one_click/<run-id>/run_report.json` 记录进度；再次使用相同 `run-id` 时只复用已经完整发布的步骤。
+
+正式训练前可做只读检查：
+
+```bash
+uv run --no-sync python pipeline/bmw_lab_train_all.py --dry-run
+```
+
+这是快速迭代用实验室入口，不会修改或激活旧 BMW 六视图检测系统，也不会自动发布到工业运行时。
+
+### BMW 右手八视图实验室一键训练
+
+右手 ROI 数据和已复核 Label Studio 导出使用独立入口。先检查标签和训练计划：
+
+```bash
+uv run --no-sync python pipeline/bmw_lab_train_right.py --dry-run
+```
+
+确认 dry-run 输出正常后，启动完整训练：
+
+```bash
+uv run --no-sync python pipeline/bmw_lab_train_right.py
+```
+
+脚本默认读取
+`dataset/bmw_lab_labeling/bmw_right_defects_yolo_labeling_v1/project-1-at-2026-08-10-20-25-8ec6b908.zip`
+和同名 JSON，自动整理 240 个 YOLO 标签，发布
+`dataset/bmw_lab_training/bmw_right_complete_roi_reviewed_v1`，并把模型写入
+`results/bmw_lab_one_click/bmw_right_eight_view_v1`。其中 `normal` 与 `no_streak` 都作为 EfficientAD
+正常类；YOLO26n 默认 `batch=32`。如需新实验版本，只修改 `--training-id` 和 `--run-id`。
+
+### BMW 右手多批次与左右手共享 YOLO 训练
+
+当前推荐的组合训练入口同时使用两批右手 ROI 数据训练 EfficientAD、Template 和光痕规则，并使用左右手
+各自正确配对的图像与标签训练一个共享 YOLO26n。新增的 21 点批次不进入 YOLO。
+
+先做只读核对：
+
+```bash
+uv run --no-sync python pipeline/bmw_lab_train_right_multisource.py --dry-run
+```
+
+启动完整训练：
+
+```bash
+uv run --no-sync python pipeline/bmw_lab_train_right_multisource.py
+```
+
+默认组合数据发布到 `dataset/bmw_lab_training/bmw_right_multisource_left_yolo_v1`，模型写入
+`results/bmw_lab_one_click/bmw_right_multisource_left_yolo_v1`。组合目录使用符号链接，不复制大图；
+YOLO26n 保持 `batch=32`、`imgsz=640`、100 轮。
+
+### BMW 四相机八视图实验室 Demo
+
+独立入口 `pipeline/bmw_lab_eight_view_demo.py` 接入本次训练产物：八视图 Template、仅
+`front_left` 的连续光痕规则、全局单类 `defect` YOLO26n，以及八视图 EfficientAD-S。
+每次完整执行 25 项检查；任一项 NG 则整件 NG，任一项推理异常则显示异常。旧六视图 Demo 不受影响。
+
+四相机 HDR 实时演示：
+
+```bash
+uv run --no-sync python pipeline/bmw_lab_eight_view_demo.py
+```
+
+离线样本演示与实验分数界面：
+
+```bash
+uv run --no-sync python pipeline/bmw_lab_eight_view_demo.py \
+  --sample-id bmw_normal_group072_000001 \
+  --experiment-mode
+```
+
+无界面冒烟验证：
+
+```bash
+uv run --no-sync python pipeline/bmw_lab_eight_view_demo.py \
+  --sample-id bmw_normal_group072_000001 \
+  --no-gui
+```
+
+界面启动后为空白等待态。空格键拍正面，翻面后再次按空格拍反面并检测；`R` 重置，`Q` 退出。
+实验模式还可用 `1-8` 切换视角，`T/L/Y/E` 切换模板、光痕、YOLO、EfficientAD 证据。
+
+## BMW 三相机六视图实验室检测（待升级）
+
+这套旧入口服务于快速训练、阈值调整和离线对比，不是 PLC/MES 工业平台。它当前仍固定为
+`DA9805574`、`DA9625347`、`DB0968108`；每个零件先拍正面三视角，再翻转同一零件拍反面三视角。
+运行顺序固定为图像质量、六视图模板匹配、光痕规则、单个六视图 YOLO、六个独立 PatchCore。
+任一模板分支未通过时，下游模型不会运行。只有所有必检证据完整且通过，最终结果才允许为 `OK`。
+
+先用一组六视图保存图片划分零件 ROI：
+
+```bash
+uv run --no-sync python pipeline/bmw_lab_select_rois.py \
+  --capture-set /path/to/six-view-capture \
+  --config configs/bmw/experiments/bmw_lab_v1.json
+```
+
+准备包含明确 `sample_id`、物理 `part_id`、`session_id`、六个 `view_id`、图像 SHA256 和缺陷框的源清单后，
+先做只读校验，再发布新的数据目录。正式三分割至少需要 30 个完整物理零件；不足时只能使用
+`--experimental-small-data`，报告会明确标记为实验数据。
+
+```bash
+uv run --no-sync python pipeline/bmw_lab_build_manifest.py \
+  --source-manifest /path/to/source_manifest.csv \
+  --dataset-id bmw_lab_001 \
+  --output-root dataset/bmw_lab_001 \
+  --dry-run
+
+uv run --no-sync python pipeline/bmw_lab_build_manifest.py \
+  --source-manifest /path/to/source_manifest.csv \
+  --dataset-id bmw_lab_001 \
+  --output-root dataset/bmw_lab_001
+```
+
+训练产物全部写入新的版本目录，不会自动修改当前实验配置。完成训练并审核阈值后，手工把模型路径和阈值
+写入一个新的 `configs/bmw/experiments/*.json` 配置：
+
+```bash
+uv run --no-sync python pipeline/bmw_lab_train_template.py \
+  --manifest dataset/bmw_lab_001/manifests/bmw_lab_001.csv \
+  --config configs/bmw/experiments/bmw_lab_v1.json \
+  --output-root results/bmw_template_v1
+
+uv run --no-sync python pipeline/bmw_lab_train_yolo.py \
+  --data dataset/bmw_lab_001/exports/bmw_lab_001/yolo/data.yaml \
+  --base-checkpoint /path/to/base.pt \
+  --calibration-manifest /path/to/yolo_calibration_manifest.csv \
+  --output-root results/bmw_yolo \
+  --version v1
+
+uv run --no-sync python pipeline/bmw_lab_train_patchcore.py \
+  --dataset-root dataset/bmw_lab_001/exports/bmw_lab_001/patchcore \
+  --output-root results/bmw_patchcore_v1
+```
+
+离线比较只能在 `calibration` 上提出候选阈值；`final_test` 是只读的，禁止写阈值：
+
+```bash
+uv run --no-sync python pipeline/bmw_lab_evaluate.py \
+  --manifest dataset/bmw_lab_001/manifests/bmw_lab_001.csv \
+  --split final_test \
+  --profile configs/bmw/experiments/bmw_lab_v1.json \
+  --output-root results/bmw_evaluation_v1
+```
+
+甲方展示使用中文展示模式；调阈值和查看候选框使用实验模式。界面启动后不会自动拍照；空格依次执行
+正面拍摄和反面拍摄，`R` 重新检测，`Q` 退出。实验模式中数字 `1` 到 `6` 切换视角，
+`T/L/Y/P` 切换模板、光痕、YOLO、PatchCore 证据，`M` 显式重载模型。
+
+```bash
+uv run --no-sync python pipeline/bmw_lab_inspection.py \
+  --capture-set /path/to/six-view-capture \
+  --mode presentation
+
+uv run --no-sync python pipeline/bmw_lab_inspection.py \
+  --mode experiment
+```
+
+当前 `dataset/bmw` 的 6 张 OK 和 7 张无光痕 NG 图片只用于单视角光痕回归，不能用于声明完整六视图、
+YOLO 或 PatchCore 的最终性能。完整四分支结论必须等新的六视图物理零件数据、缺陷框、训练模型和独立
+`final_test` 报告齐备后才能给出。
+
+> 当前边界：新采集数据已经是四相机八视图HDR；本节旧检测系统仍是三相机六视图单曝光。八视图检测、
+> Template/PatchCore模型、YOLO数据、ROI和4×2界面将在下一阶段统一升级，不能直接混用两种成像合同。

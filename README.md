@@ -53,6 +53,31 @@ Authoritative design and execution documents:
 - [ZS32 refactor blueprint](docs/ZS32_REFACTOR_BLUEPRINT.md)
 - [Phase 0 Linux freeze runbook](docs/PHASE0_LINUX_RUNBOOK.md)
 - [ZS32 Linux refactor runbook](docs/ZS32_LINUX_REFACTOR_RUNBOOK.md)
+- [ZS32 3/4-camera topology and four-camera commissioning](configs/zs32/topology/README.md)
+- [ZS32 four-camera collection and eight-view Demo guide](docs/ZS32_FOUR_CAMERA_END_TO_END_README.md)
+
+Current ZS32 online inspection is an explicitly non-production Demo. Operators
+edit only [`configs/zs32/zs32_demo.json`](configs/zs32/zs32_demo.json); threshold
+changes apply to the next part, while model, ROI, topology, or inference-setting
+changes require restarting the Dashboard. The only supported online entry is:
+
+```bash
+UV_CACHE_DIR=/tmp/uv-cache \
+PYTHONPATH=/opt/MVS/Samples/64/Python/MvImport:. \
+uv run --no-sync python \
+  pipeline/36_zs32_inspection_dashboard.py \
+  --live \
+  --demo-config configs/zs32/zs32_demo.json \
+  --part-id zs32_demo_001
+```
+
+This path first runs Template for all eight views, including both secondary
+views. If any Template result is NG, the whole part ends as `NG_TEMPLATE` and
+PatchCore/YOLO are explicitly skipped; only an all-PASS Template gate runs the
+remaining 16 branches. It does not read a runtime bundle, threshold artifact,
+SHA publication, or Stage 18 fusion profile. Historical strict commissioning
+scripts and artifacts remain only for replay and must not be used as the online
+entry.
 
 Mac is edit-only. Camera work, tests, training, calibration, inference and
 deployment are accepted only on the Linux + NVIDIA host. The new business
@@ -65,7 +90,16 @@ Run the following only after pulling the reviewed commit onto Linux + NVIDIA:
 uv lock --check
 uv sync --frozen --extra cu126 --extra test
 uv run zs32-capture --help
+uv run zs32-bootstrap-capture --help
 ```
+
+The four-camera collector has an explicit `--legacy-layout` mode that writes
+the historical per-hand/per-view tree and one unchanged 25-column CSV manifest.
+Use the copy-paste [one-group acceptance command first, then the 120-group
+command](configs/zs32/topology/README.md#3-采集四机-legacy-数据). One complete group is
+8 PNGs plus 9 manifest data rows; 120 complete groups are 960 image rows plus
+120 complete sample rows. Stage 2 can discover all 8 view directories, but
+Stage 3, YOLO, Label Studio and parts of training remain six-view-only.
 
 Large or station-specific artifacts are intentionally excluded from Git. Keep
 datasets, raw images, checkpoints, model/source bundles, generated

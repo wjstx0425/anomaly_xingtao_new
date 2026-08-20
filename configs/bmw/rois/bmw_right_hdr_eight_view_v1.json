@@ -1,0 +1,62 @@
+{
+  "schema_version": 2,
+  "coordinate_system": "pixel_xyxy_half_open",
+  "representative_sample_id": "bmw_right_others_group001_000001",
+  "image_width": 4024,
+  "image_height": 3036,
+  "part_rois": {
+    "front": [
+      1321,
+      4,
+      3516,
+      2682
+    ],
+    "front_left": [
+      1330,
+      312,
+      2493,
+      2934
+    ],
+    "front_right": [
+      821,
+      378,
+      2675,
+      2892
+    ],
+    "front_secondary": [
+      1045,
+      368,
+      2773,
+      2822
+    ],
+    "back": [
+      812,
+      191,
+      2965,
+      2630
+    ],
+    "back_left": [
+      1484,
+      429,
+      2321,
+      2565
+    ],
+    "back_right": [
+      1367,
+      28,
+      3138,
+      2691
+    ],
+    "back_secondary": [
+      1391,
+      411,
+      3478,
+      2929
+    ]
+  },
+  "binding_mode": "fixed_setup",
+  "profile_id": "bmw-right-hdr-eight-view-v1",
+  "capture_scope": "right",
+  "reference_manifest": "/home/yunjing/anomaly_xingtao_new/dataset/bmw_lab_raw/manifests/20260810_164527_229315.csv",
+  "reference_manifest_sha256": "3d455c96af0221cc3f642198cff914591702a6e620f79528cb9536bbc417435c"
+}

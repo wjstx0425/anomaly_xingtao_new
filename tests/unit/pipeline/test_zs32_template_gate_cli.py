@@ -67,3 +67,28 @@ def test_train_cli_requires_explicit_deployment_versions() -> None:
 
     expected = {"manifest", "output_dir", "model_version", "threshold_version", "roi_version", "template_version"}
     assert expected <= required
+
+
+def test_train_cli_accepts_normal_only_threshold_calibration() -> None:
+    """The demo trainer must expose an explicit normal-only calibration mode."""
+    module = _load("train_zs32_template_gate_normal_only", "pipeline/train_zs32_template_gate.py")
+
+    args = module.build_parser().parse_args(
+        [
+            "--manifest",
+            "normal.csv",
+            "--output-dir",
+            "model",
+            "--normal-only",
+            "--model-version",
+            "model-v1",
+            "--threshold-version",
+            "threshold-v1",
+            "--roi-version",
+            "roi-v1",
+            "--template-version",
+            "template-v1",
+        ],
+    )
+
+    assert args.normal_only is True

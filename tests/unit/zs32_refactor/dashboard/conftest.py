@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -19,10 +18,6 @@ IDENTITY = {
 }
 
 
-def _sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
 def _branch(
     result_dir: Path,
     view: str,
@@ -39,6 +34,7 @@ def _branch(
         "state": state,
         "status": status,
         "score": score,
+        "threshold": None if branch == "fusion" else 0.5,
         "reason": "",
         "evidence_path": str(evidence_path.relative_to(result_dir)),
     }
@@ -52,6 +48,7 @@ def _branch(
             roi_xyxy=[5, 5, 25, 15],
         )
     if branch == "yolo":
+        record["roi_xyxy"] = [5, 5, 25, 15]
         record["detections"] = [{"xyxy": [1, 2, 8, 9], "class_name": "scratch", "confidence": 0.25}]
     return record
 
@@ -91,7 +88,6 @@ def eight_view_result_dir(tmp_path: Path) -> Path:
             **IDENTITY,
             "manifest_identity": f"{IDENTITY['part_id']}:right:{view}",
             "source_path": str(source_path.relative_to(result_dir)),
-            "source_sha256": _sha256(source_path),
             "source_shape": [30, 40],
             "model_supported": True,
             "camera": f"camera-{index // 2}",
@@ -108,24 +104,3 @@ def eight_view_result_dir(tmp_path: Path) -> Path:
     }
     write_manifest(result_dir, manifest)
     return result_dir
-
-
-@pytest.fixture
-def task2_direct_result_dir(eight_view_result_dir: Path) -> Path:
-    """Publish four direct branch fields shaped like Task 2 view records."""
-    manifest = load_manifest(eight_view_result_dir)
-    for view in VIEW_ORDER:
-        record = manifest["views"][view]
-        branches = record.pop("branches")
-        for branch, payload in branches.items():
-            payload.pop("state", None)
-            payload["display_only"] = branch == "patchcore"
-            record[branch] = payload
-
-    front = manifest["views"]["front"]
-    front["template"].update(status="NG_TEMPLATE", executed=True, score=0.91)
-    front["fusion"].update(status="SKIPPED", executed=False, score=0.42)
-    manifest["views"]["front_left"]["template"].update(status="REVIEW", executed=True)
-    manifest["views"]["back"]["patchcore"].update(status="ERROR", reason="backend failed")
-    write_manifest(eight_view_result_dir, manifest)
-    return eight_view_result_dir

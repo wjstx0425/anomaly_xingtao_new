@@ -63,6 +63,7 @@ class BranchEvidence:
     status: str
     score: float | None
     reason: str
+    threshold: float | None = None
     evidence_path: Path | None = None
     mask_path: Path | None = None
     mask_source: str | None = None
@@ -76,7 +77,6 @@ class ViewResult:
 
     view: str
     source_path: Path
-    source_sha256: str
     source_shape: tuple[int, int]
     model_supported: bool
     branches: Mapping[str, BranchEvidence]

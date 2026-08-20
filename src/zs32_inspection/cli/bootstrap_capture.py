@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import getpass
 import hashlib
+import time
 from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,6 +34,7 @@ from zs32_inspection.capture.legacy_dataset import (
 from zs32_inspection.config.loaders import load_topology
 from zs32_inspection.domain.identity import Hand, PartIdentity
 from zs32_inspection.runtime.publisher import canonical_json_bytes
+from zs32_inspection.timing import TimingRecorder
 
 from ._common import command_error, command_result
 
@@ -83,9 +85,15 @@ def _parser() -> argparse.ArgumentParser:
         help="Write the historical per-view dataset tree and CSV manifest.",
     )
     parser.add_argument("--operator-id", default=getpass.getuser())
-    parser.add_argument("--round-confirmation-timeout", type=float, default=120.0)
+    parser.add_argument(
+        "--round-confirmation-timeout",
+        type=float,
+        default=None,
+        help="Optional operator-confirmation timeout in seconds; waits indefinitely by default.",
+    )
     parser.add_argument("--progress-json", type=Path)
     parser.add_argument("--control-json", type=Path)
+    parser.add_argument("--timing-json", type=Path)
     parser.add_argument("--hand", choices=[item.value for item in Hand], required=True)
     parser.add_argument("--label", choices=("normal", "defect"), required=True)
     parser.add_argument("--defect-type")
@@ -166,8 +174,7 @@ def _validate_label(label: str, defect_type: str | None) -> str | None:
     return normalized
 
 
-def _run(argv: Sequence[str] | None) -> int:
-    args = _parser().parse_args(argv)
+def _run_with_args(args: argparse.Namespace, timing_recorder: TimingRecorder | None) -> int:
     topology = load_topology(args.topology)
     plan = CapturePlan.from_topology(topology)
     defect_type = _validate_label(args.label, args.defect_type)
@@ -228,8 +235,14 @@ def _run(argv: Sequence[str] | None) -> int:
 
     # Keep all camera handles open for the entire batch. This is substantially
     # faster and less error-prone than enumerating/opening four devices per part.
-    with HikvisionCameraAdapter(acquisition) as source:
-        service = BootstrapCaptureService(source, store, round_coordinator=coordinator)
+    adapter_options = {} if timing_recorder is None else {"timing_recorder": timing_recorder}
+    with HikvisionCameraAdapter(acquisition, **adapter_options) as source:
+        service = BootstrapCaptureService(
+            source,
+            store,
+            round_coordinator=coordinator,
+            timing_recorder=timing_recorder,
+        )
         for request in requests:
             result = service.capture(request, plan, metadata)
             published_paths.append(result.published_path)
@@ -255,6 +268,19 @@ def _run(argv: Sequence[str] | None) -> int:
         },
     )
     return 0
+
+
+def _run(argv: Sequence[str] | None) -> int:
+    args = _parser().parse_args(argv)
+    timing_recorder = (
+        TimingRecorder("zs32_bootstrap_capture") if args.timing_json is not None else None
+    )
+    started = time.perf_counter()
+    try:
+        return _run_with_args(args, timing_recorder)
+    finally:
+        if timing_recorder is not None:
+            timing_recorder.write(args.timing_json, total_seconds=time.perf_counter() - started)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

@@ -22,6 +22,7 @@ from capture_data.zs32_runtime_bundle import (
     publish_directory_no_replace,
     publish_runtime_assets,
 )
+from capture_data.zs32_model_runtime import sha256_file
 
 from zs32_inspection.domain.views import VIEW_ORDER
 
@@ -80,6 +81,8 @@ def source_spec(tmp_path: Path) -> Path:
         groups[f"right/{view}"] = {
             "low_threshold": 0.1,
             "high_threshold": 0.2,
+            "calibration_normal_count": 10,
+            "calibration_defect_count": 0,
             "templates": [
                 {
                     "path": str(template.relative_to(template_dir)),
@@ -289,6 +292,15 @@ def test_runtime_assets_publication_contains_exact_eight_views(source_spec: Path
     assert "deploy_threshold" not in payload["versions"]
 
 
+def test_runtime_assets_publication_uses_declared_yolo_imgsz(source_spec: Path, tmp_path: Path) -> None:
+    source = json.loads(source_spec.read_text(encoding="utf-8"))
+    source["yolo_imgsz"] = 1280
+    source_spec.write_text(json.dumps(source), encoding="utf-8")
+    publication = publish_runtime_assets(source_spec, tmp_path / "assets")
+    payload = json.loads(publication.runtime_assets.read_text(encoding="utf-8"))
+    assert payload["yolo"]["imgsz"] == 1280
+
+
 def test_publication_generates_all_24_profile_versions(source_spec: Path, tmp_path: Path) -> None:
     publication = publish_runtime_assets(source_spec, tmp_path / "assets")
     profile = json.loads(publication.fusion_profile.read_text(encoding="utf-8"))
@@ -296,6 +308,300 @@ def test_publication_generates_all_24_profile_versions(source_spec: Path, tmp_pa
     assert [record["view"] for record in profile["expected_versions"]][::3] == list(VIEW_ORDER)
     assert profile["branch_order"] == ["template_match", "yolo", *(f"anomaly_{view}" for view in VIEW_ORDER)]
 
+
+def test_v11_24group_source_and_profile_bind_exact_commissioning_contract() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    source = json.loads(
+        (repo_root / "config/fusion/zs32_eight_view_24group_v11_bundle_source.json").read_text(encoding="utf-8"),
+    )
+    profile_path = repo_root / source["fusion_profile_template"]
+    profile = json.loads(profile_path.read_text(encoding="utf-8"))
+
+    assert source == {
+        "schema_version": 1,
+        "bundle_id": "zs32-right-eight-view-24group-0723-v11-commissioning",
+        "product": "ZS32",
+        "hand": "right",
+        "view_order": list(VIEW_ORDER),
+        "roi_config": "dataset/zs32_all_plus_0723_retraining_release_v2/roi_config.json",
+        "roi_version": "zs32-eight-view-roi-9412b2838cdb",
+        "template_model_dir": "results/zs32_template_gate_right_0723_eight_view_v11",
+        "patchcore_summary": "results/zs32_patchcore_eight_view_all_plus_0723_seed42_v11/eight_view_summary.csv",
+        "yolo_weights": "results/yolo/zs32_all_plus_0723_normal_n1280_seed42_v11/weights/best.pt",
+        "yolo_imgsz": 1280,
+        "fusion_profile_template": "config/fusion/zs32_right_eight_view_24_group_commissioning_v11.json",
+        "commissioning_only": True,
+        "production_release_allowed": False,
+    }
+    assert profile["profile"] == "zs32_right_eight_view_24_group_commissioning_v11"
+    assert profile["identity"] == {
+        "product": "ZS32",
+        "profile": "zs32_right_eight_view_24_group_commissioning_v11",
+        "allowed_hands": ["right"],
+        "required_side": "zs32",
+    }
+    assert profile["commissioning_only"] is True
+    assert profile["production_release_allowed"] is False
+    assert profile["expected_versions"] == []
+    assert profile["required_branches_by_view"] == {
+        view: ["template_match", f"anomaly_{view}", "yolo"] for view in VIEW_ORDER
+    }
+    assert sum(len(branches) for branches in profile["required_branches_by_view"].values()) == 24
+    assert profile["branch_order"] == ["template_match", "yolo", *(f"anomaly_{view}" for view in VIEW_ORDER)]
+    assert set(profile["rules"]) == set(profile["branch_order"])
+
+
+def test_v12_0727_source_and_profile_change_only_template_release_contract() -> None:
+    """The v12 source keeps v11 non-Template runtime inputs byte-identical."""
+    repo_root = Path(__file__).resolve().parents[3]
+    v11_source = json.loads(
+        (repo_root / "config/fusion/zs32_eight_view_24group_v11_bundle_source.json").read_text(encoding="utf-8"),
+    )
+    source = json.loads(
+        (
+            repo_root / "config/fusion/zs32_eight_view_24group_template_0727_v12_bundle_source.json"
+        ).read_text(encoding="utf-8"),
+    )
+    profile_path = repo_root / source["fusion_profile_template"]
+    profile = json.loads(profile_path.read_text(encoding="utf-8"))
+
+    assert source["bundle_id"] == "zs32-right-eight-view-24group-template-0727-v12-commissioning"
+    assert source["template_model_dir"] == "results/zs32_template_gate_right_0727_eight_view_v12"
+    assert source["fusion_profile_template"] == (
+        "config/fusion/zs32_right_eight_view_24_group_commissioning_template_0727_v12.json"
+    )
+    for field in ("roi_config", "roi_version", "patchcore_summary", "yolo_weights", "yolo_imgsz"):
+        assert source[field] == v11_source[field]
+    assert source["view_order"] == list(VIEW_ORDER)
+    assert source["commissioning_only"] is True
+    assert source["production_release_allowed"] is False
+
+    assert profile["profile"] == "zs32_right_eight_view_24_group_commissioning_template_0727_v12"
+    assert profile["identity"]["profile"] == profile["profile"]
+    assert profile["expected_versions"] == []
+    assert profile["required_branches_by_view"] == {
+        view: ["template_match", f"anomaly_{view}", "yolo"] for view in VIEW_ORDER
+    }
+    assert sum(len(branches) for branches in profile["required_branches_by_view"].values()) == 24
+    for view in ("front_secondary", "back_secondary"):
+        assert profile["required_branches_by_view"][view] == ["template_match", f"anomaly_{view}", "yolo"]
+
+
+def test_v13_0727_source_and_profile_change_only_template_release_contract() -> None:
+    """The v13 source keeps v12 non-Template runtime inputs byte-identical."""
+    repo_root = Path(__file__).resolve().parents[3]
+    v12_source = json.loads(
+        (
+            repo_root / "config/fusion/zs32_eight_view_24group_template_0727_v12_bundle_source.json"
+        ).read_text(encoding="utf-8"),
+    )
+    source = json.loads(
+        (
+            repo_root / "config/fusion/zs32_eight_view_24group_template_0727_v13_bundle_source.json"
+        ).read_text(encoding="utf-8"),
+    )
+    profile_path = repo_root / source["fusion_profile_template"]
+    profile = json.loads(profile_path.read_text(encoding="utf-8"))
+
+    assert source["bundle_id"] == "zs32-right-eight-view-24group-template-0727-v13-commissioning"
+    assert source["template_model_dir"] == "results/zs32_template_gate_right_0727_eight_view_v13"
+    assert source["fusion_profile_template"] == (
+        "config/fusion/zs32_right_eight_view_24_group_commissioning_template_0727_v13.json"
+    )
+    for field in ("roi_config", "roi_version", "patchcore_summary", "yolo_weights", "yolo_imgsz"):
+        assert source[field] == v12_source[field]
+    assert source["view_order"] == list(VIEW_ORDER)
+    assert source["commissioning_only"] is True
+    assert source["production_release_allowed"] is False
+
+    assert profile["profile"] == "zs32_right_eight_view_24_group_commissioning_template_0727_v13"
+    assert profile["identity"]["profile"] == profile["profile"]
+    assert profile["expected_versions"] == []
+    assert profile["required_branches_by_view"] == {
+        view: ["template_match", f"anomaly_{view}", "yolo"] for view in VIEW_ORDER
+    }
+    assert sum(len(branches) for branches in profile["required_branches_by_view"].values()) == 24
+    for view in ("front_secondary", "back_secondary"):
+        assert profile["required_branches_by_view"][view] == ["template_match", f"anomaly_{view}", "yolo"]
+
+
+def test_published_v12_bundle_replaces_only_template_artifact_contract() -> None:
+    """The published v12 bundle must retain every non-Template v11 runtime asset."""
+    repo_root = Path(__file__).resolve().parents[3]
+    v11_path = repo_root / "results/zs32_runtime_bundle_eight_view_v11/runtime_bundle.json"
+    v12_path = repo_root / "results/zs32_runtime_bundle_eight_view_template_0727_v12/runtime_bundle.json"
+
+    v12 = load_runtime_bundle(v12_path)
+    v11_payload = json.loads(v11_path.read_text(encoding="utf-8"))
+    v12_payload = json.loads(v12_path.read_text(encoding="utf-8"))
+    v11_runtime = json.loads(Path(v11_payload["runtime_assets"]["path"]).read_text(encoding="utf-8"))
+    v12_runtime = json.loads(v12.runtime_assets.read_text(encoding="utf-8"))
+    v11_assets = json.loads(Path(v11_payload["assets_manifest"]["path"]).read_text(encoding="utf-8"))
+    v12_assets = json.loads(Path(v12_payload["assets_manifest"]["path"]).read_text(encoding="utf-8"))
+    v12_profile = json.loads(v12.fusion_profile.read_text(encoding="utf-8"))
+    v12_thresholds = json.loads(v12.threshold_artifact.read_text(encoding="utf-8"))
+
+    for payload in (v12_payload, v12_runtime, v12_profile, v12_thresholds):
+        assert payload["commissioning_only"] is True
+        assert payload["production_release_allowed"] is False
+
+    expected = v12_profile["expected_versions"]
+    thresholds = v12_thresholds["thresholds"]
+    assert len(expected) == len(thresholds) == len(v12_thresholds["required_groups"]) == 24
+    assert v12_thresholds["required_views"] == list(VIEW_ORDER)
+    assert {record["view"] for record in expected if record["branch"] == "template_match"} == set(VIEW_ORDER)
+    assert {record["view"] for record in thresholds if record["branch"] == "template_match"} == set(VIEW_ORDER)
+    assert {"front_secondary", "back_secondary"}.issubset(
+        record["view"] for record in thresholds if record["branch"] == "template_match"
+    )
+
+    v11_template = Path(v11_payload["template_model"]["model_json"]["path"])
+    v12_template = Path(v12_payload["template_model"]["model_json"]["path"])
+    assert v12.template_model_dir == v12_template.parent.resolve()
+    assert v12_template == v12.template_model_dir / "model.json"
+    assert sha256_file(v12_template) == v12_payload["template_model"]["model_json"]["sha256"]
+    assert sha256_file(v11_template) == v11_payload["template_model"]["model_json"]["sha256"]
+    assert v12_template != v11_template
+    assert v12_payload["template_model"]["model_json"]["sha256"] != v11_payload["template_model"]["model_json"]["sha256"]
+
+    assert tuple(v12_runtime["patchcore"]) == VIEW_ORDER
+    for view in VIEW_ORDER:
+        v11_checkpoint = Path(v11_runtime["patchcore"][view]["checkpoint"])
+        v12_checkpoint = Path(v12_runtime["patchcore"][view]["checkpoint"])
+        assert v12_checkpoint == v11_checkpoint
+        assert sha256_file(v12_checkpoint) == v12_runtime["patchcore"][view]["checkpoint_sha256"]
+        assert v12_runtime["patchcore"][view]["checkpoint_sha256"] == v11_runtime["patchcore"][view]["checkpoint_sha256"]
+    assert v12_assets["asset_set"]["patchcore_checkpoints"] == v11_assets["asset_set"]["patchcore_checkpoints"]
+
+    v11_yolo = v11_runtime["yolo"]
+    v12_yolo = v12_runtime["yolo"]
+    assert v12_yolo["weights"] == v11_yolo["weights"]
+    assert sha256_file(Path(v12_yolo["weights"])) == v12_yolo["weights_sha256"]
+    assert v12_yolo["weights_sha256"] == v11_yolo["weights_sha256"]
+    assert v12_yolo["class_map"] == v11_yolo["class_map"] == {"0": "defect"}
+    assert v12_assets["asset_set"]["yolo_weights_sha256"] == v11_assets["asset_set"]["yolo_weights_sha256"]
+
+    for field in ("patchcore_roi_config", "yolo_roi_config"):
+        assert v12_runtime[field] == v11_runtime[field]
+        assert sha256_file(Path(v12_runtime[field])) == v12_assets["asset_set"]["roi_config_sha256"]
+        assert v12_assets["asset_set"]["roi_config_sha256"] == v11_assets["asset_set"]["roi_config_sha256"]
+
+
+def test_published_v13_bundle_replaces_only_template_artifact_contract() -> None:
+    """The published v13 bundle changes Template while retaining v12 non-Template bindings."""
+    repo_root = Path(__file__).resolve().parents[3]
+    v12_path = repo_root / "results/zs32_runtime_bundle_eight_view_template_0727_v12/runtime_bundle.json"
+    v13_path = repo_root / "results/zs32_runtime_bundle_eight_view_template_0727_v13/runtime_bundle.json"
+
+    v13 = load_runtime_bundle(v13_path)
+    v12_payload = json.loads(v12_path.read_text(encoding="utf-8"))
+    v13_payload = json.loads(v13_path.read_text(encoding="utf-8"))
+    v12_runtime = json.loads(Path(v12_payload["runtime_assets"]["path"]).read_text(encoding="utf-8"))
+    v13_runtime = json.loads(v13.runtime_assets.read_text(encoding="utf-8"))
+    v12_assets = json.loads(Path(v12_payload["assets_manifest"]["path"]).read_text(encoding="utf-8"))
+    v13_assets = json.loads(Path(v13_payload["assets_manifest"]["path"]).read_text(encoding="utf-8"))
+    v12_thresholds = json.loads(Path(v12_payload["threshold_artifact"]["path"]).read_text(encoding="utf-8"))
+    v13_profile = json.loads(v13.fusion_profile.read_text(encoding="utf-8"))
+    v13_thresholds = json.loads(v13.threshold_artifact.read_text(encoding="utf-8"))
+    v13_model_path = Path(v13_payload["template_model"]["model_json"]["path"])
+    v13_model = json.loads(v13_model_path.read_text(encoding="utf-8"))
+
+    for payload in (v13_payload, v13_runtime, v13_profile, v13_thresholds):
+        assert payload["commissioning_only"] is True
+        assert payload["production_release_allowed"] is False
+
+    expected = v13_profile["expected_versions"]
+    thresholds = v13_thresholds["thresholds"]
+    assert len(expected) == len(thresholds) == len(v13_thresholds["required_groups"]) == 24
+    assert v13_thresholds["required_views"] == list(VIEW_ORDER)
+    assert v13_profile["required_branches_by_view"] == {
+        view: ["template_match", f"anomaly_{view}", "yolo"] for view in VIEW_ORDER
+    }
+    for view in ("front_secondary", "back_secondary"):
+        assert v13_profile["required_branches_by_view"][view] == [
+            "template_match",
+            f"anomaly_{view}",
+            "yolo",
+        ]
+
+    template_expected = {record["view"]: record for record in expected if record["branch"] == "template_match"}
+    template_thresholds = {
+        record["view"]: record for record in thresholds if record["branch"] == "template_match"
+    }
+    assert set(template_expected) == set(template_thresholds) == set(VIEW_ORDER)
+    assert set(v13_model["groups"]) == {f"right/{view}" for view in VIEW_ORDER}
+    assert v13_payload["template_model"]["model_json"]["sha256"] == (
+        "eac211cab4ee1d27adda9933c3cb9c6fde71c4a7eb50fae138201a600fa17ab5"
+    )
+    assert sha256_file(v13_model_path) == v13_payload["template_model"]["model_json"]["sha256"]
+    assert v13.template_model_dir == v13_model_path.parent.resolve()
+    for view in VIEW_ORDER:
+        model_group = v13_model["groups"][f"right/{view}"]
+        expected_record = template_expected[view]
+        threshold_record = template_thresholds[view]
+        assert expected_record["model_version"] == v13_model["versions"]["model"]
+        assert expected_record["template_version"] == v13_model["versions"]["template"]
+        assert expected_record["threshold_version"] == v13_model["versions"]["threshold"]
+        assert threshold_record["model_version"] == v13_model["versions"]["model"]
+        assert threshold_record["low_threshold"] == model_group["low_threshold"]
+        assert threshold_record["high_threshold"] == model_group["high_threshold"]
+
+    assert [record for record in thresholds if record["branch"] != "template_match"] == [
+        record for record in v12_thresholds["thresholds"] if record["branch"] != "template_match"
+    ]
+    for field in ("patchcore", "yolo", "patchcore_roi_config", "yolo_roi_config"):
+        assert v13_runtime[field] == v12_runtime[field]
+    assert v13_assets["asset_set"]["patchcore_checkpoints"] == v12_assets["asset_set"]["patchcore_checkpoints"]
+    assert v13_assets["asset_set"]["yolo_weights_sha256"] == v12_assets["asset_set"]["yolo_weights_sha256"]
+    assert v13_assets["asset_set"]["roi_config_sha256"] == v12_assets["asset_set"]["roi_config_sha256"]
+
+
+def test_publication_and_finalize_derive_22_groups(source_spec: Path, tmp_path: Path) -> None:
+    source = json.loads(source_spec.read_text(encoding="utf-8"))
+    profile_path = Path(source["fusion_profile_template"])
+    profile = json.loads(profile_path.read_text(encoding="utf-8"))
+    for view in ("front_secondary", "back_secondary"):
+        profile["required_branches_by_view"][view].remove("template_match")
+    profile_path.write_text(json.dumps(profile), encoding="utf-8")
+    publication = publish_runtime_assets(source_spec, tmp_path / "assets")
+    generated = json.loads(publication.fusion_profile.read_text(encoding="utf-8"))
+    assert len(generated["expected_versions"]) == 22
+    assert not any(
+        record["branch"] == "template_match" and record["view"].endswith("secondary")
+        for record in generated["expected_versions"]
+    )
+    threshold = _threshold_artifact(publication.assets_manifest, tmp_path / "thresholds.json")
+    assert len(json.loads(threshold.read_text(encoding="utf-8"))["required_groups"]) == 22
+    bundle = finalize_runtime_bundle(publication.assets_manifest, threshold, tmp_path / "bundle")
+    assert load_runtime_bundle(bundle).fusion_profile == publication.fusion_profile
+
+
+def test_publication_and_finalize_derive_20_groups_with_yolo_only_secondary(
+    source_spec: Path,
+    tmp_path: Path,
+) -> None:
+    """The demo profile may require only YOLO on the two secondary views."""
+    source = json.loads(source_spec.read_text(encoding="utf-8"))
+    profile_path = Path(source["fusion_profile_template"])
+    profile = json.loads(profile_path.read_text(encoding="utf-8"))
+    for view in ("front_secondary", "back_secondary"):
+        profile["required_branches_by_view"][view] = ["yolo"]
+        profile["rules"].pop(f"anomaly_{view}")
+    profile["branch_order"] = [
+        branch
+        for branch in profile["branch_order"]
+        if branch not in {"anomaly_front_secondary", "anomaly_back_secondary"}
+    ]
+    profile_path.write_text(json.dumps(profile), encoding="utf-8")
+
+    publication = publish_runtime_assets(source_spec, tmp_path / "assets")
+    generated = json.loads(publication.fusion_profile.read_text(encoding="utf-8"))
+    assert len(generated["expected_versions"]) == 20
+    assert generated["required_branches_by_view"]["front_secondary"] == ["yolo"]
+    assert generated["required_branches_by_view"]["back_secondary"] == ["yolo"]
+    threshold = _threshold_artifact(publication.assets_manifest, tmp_path / "thresholds.json")
+    bundle = finalize_runtime_bundle(publication.assets_manifest, threshold, tmp_path / "bundle")
+    assert load_runtime_bundle(bundle).fusion_profile == publication.fusion_profile
 
 @pytest.mark.parametrize(
     "malformation",

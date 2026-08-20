@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "experiment_id": "bmw-lab-v1",
+  "topology_path": "../topology/bmw_3cam_double_side_v1.json",
+  "capture": {
+    "image_width": 4024,
+    "image_height": 3036,
+    "exposure": 4000.0,
+    "gain": 0.0,
+    "timeout_ms": 3000,
+    "warmup_frames": 1
+  },
+  "part_rois": {
+    "front": [0, 0, 4024, 3036],
+    "front_left": [0, 0, 4024, 3036],
+    "front_right": [0, 0, 4024, 3036],
+    "back": [0, 0, 4024, 3036],
+    "back_left": [0, 0, 4024, 3036],
+    "back_right": [0, 0, 4024, 3036]
+  },
+  "template": {
+    "enabled": false,
+    "groups": {
+      "front": {
+        "model_path": null,
+        "threshold": 0.2
+      },
+      "front_left": {
+        "model_path": null,
+        "threshold": 0.2
+      },
+      "front_right": {
+        "model_path": null,
+        "threshold": 0.2
+      },
+      "back": {
+        "model_path": null,
+        "threshold": 0.2
+      },
+      "back_left": {
+        "model_path": null,
+        "threshold": 0.2
+      },
+      "back_right": {
+        "model_path": null,
+        "threshold": 0.2
+      }
+    }
+  },
+  "bright_streak": {
+    "config_paths": {
+      "front_left": "../bright_streak_demo.json"
+    }
+  },
+  "yolo": {
+    "enabled": false,
+    "checkpoint": null,
+    "class_name": "defect",
+    "candidate_conf": 0.25,
+    "final_threshold": 0.5
+  },
+  "patchcore": {
+    "enabled": false,
+    "checkpoints": {
+      "front": null,
+      "front_left": null,
+      "front_right": null,
+      "back": null,
+      "back_left": null,
+      "back_right": null
+    },
+    "thresholds": {
+      "front": 0.5,
+      "front_left": 0.5,
+      "front_right": 0.5,
+      "back": 0.5,
+      "back_left": 0.5,
+      "back_right": 0.5
+    }
+  },
+  "required_for_ok": ["template", "bright_streak", "yolo", "patchcore"],
+  "result_root": "../../../results/bmw_lab_v1"
+}

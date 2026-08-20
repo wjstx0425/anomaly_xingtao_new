@@ -100,3 +100,42 @@ front        yolo             ...         ...         ...         CLEAR
 单元测试覆盖：完整 manifest 映射、缺失/重复视角、incomplete sample、图片缺失、多 manifest、采集失败、Stage32 失败、输出目录冲突、终端 audit 表格和右手提示。
 
 不连接相机的验收先用历史 complete manifest 验证参数映射和终端报告。真机验收依次执行 `--list-devices` 和一个真实零件的完整命令，要求生成六张可读 `4024x3036` 图像和 runtime summary。若模板没有短路，还要求 18 条融合证据和 Stage18 audit；若模板合法短路，则要求受校验的 `NG_TEMPLATE`/`REVIEW` 模板结果、`audit=None` 和明确的短路原因。最终状态可以是 `OK`、`NG_*` 或 `REVIEW`，但身份与非生产策略字段必须一致。
+
+## Diagnostic：跳过模板、只看 PatchCore/YOLO
+
+为首次真机快速观察两个学习模型，Stage35 增加显式参数 `--diagnostic-skip-template`。该参数不修改模板
+`model.json`、18 组 locked artifact 或默认 commissioning 行为；未传参数时仍执行本文前述完整模板优先流程。
+
+诊断命令为：
+
+```bash
+/home/yunjing/anomalib/.venv/bin/python pipeline/35_run_zs32_live_commissioning.py \
+  --part-id live_diagnostic_001 \
+  --diagnostic-skip-template
+```
+
+诊断分支保持同样的右手、三 serial、单件 HDR 六视角采集和严格 manifest 校验。区别仅在 Stage32 子命令：
+
+- 调用现有 `infer` 而不是 `fuse`；
+- 不传 `--template-model-dir`，因此不加载或执行模板门；
+- 不传 `--threshold-artifact`，避免把诊断结果解释为 18 组 locked fusion；
+- 仍固定六个 PatchCore checkpoint、YOLO 权重和 GPU device；
+- 生成 `patchcore.csv`、`yolo.csv`、ROI crop、PatchCore 热图和 YOLO 框图。
+
+Stage32 的诊断 summary 必须保留 `part_id/capture_session/group_id/hand`，并明确写入：
+
+```text
+diagnostic_skip_template=true
+inspection_complete=false
+commissioning_only=true
+production_release_allowed=false
+strict_fusion=false
+```
+
+Stage35 对该合同和两个 CSV 做 fail-closed 校验后正常返回，并在终端打印 `template: skipped`、PatchCore/YOLO
+CSV 和输出目录。诊断分支没有 `template_match.csv`、Stage18 fusion 或 audit；其 `REVIEW`/连续分数只能用于
+观察模型效果，不能作为零件 OK/NG 总判定。相机、manifest、Stage32 子进程、summary 或两个模型 CSV 任一失败
+仍返回非零。
+
+测试分别锁定默认命令不变、诊断命令只使用 `infer`、诊断 summary/CSV 合同、终端醒目标记，以及诊断模式
+绝不生成或要求 Stage18 audit。

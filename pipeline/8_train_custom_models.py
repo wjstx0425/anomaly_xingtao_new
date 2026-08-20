@@ -53,9 +53,11 @@ VIEW_CHOICES = (
     "right_front",
     "right_front_left",
     "right_front_right",
+    "right_front_secondary",
     "right_back",
     "right_back_left",
     "right_back_right",
+    "right_back_secondary",
 )
 
 
@@ -207,6 +209,8 @@ def _common_workflow_args(args: argparse.Namespace, model_name: str | None = Non
         str(efficientad_batch_size),
         "--efficientad-epochs",
         str(args.efficientad_epochs),
+        "--efficientad-model-size",
+        args.efficientad_model_size,
         "--imagenet-dir",
         str(_repo_path(args.imagenet_dir)),
         "--anomaly-dino-batch-size",
@@ -568,6 +572,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--efficientad-batch-size", type=int, default=1, help="EfficientAD train batch size.")
     parser.add_argument("--efficientad-epochs", type=int, default=20, help="EfficientAD max epochs.")
+    parser.add_argument(
+        "--efficientad-model-size",
+        choices=("small", "medium"),
+        default="medium",
+        help="EfficientAD model size.",
+    )
     parser.add_argument(
         "--imagenet-dir",
         type=Path,

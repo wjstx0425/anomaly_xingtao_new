@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+import threading
 from hashlib import sha256
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -73,6 +74,46 @@ def _write_images(tmp_path: Path) -> dict[str, Path]:
         assert cv2.imwrite(str(path), np.full((3, 4, 3), index, dtype=np.uint8))
         images[view] = path
     return images
+
+
+def test_source_images_decode_in_parallel_with_canonical_results(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Eight independent source files should decode concurrently without reordering views."""
+    stage32 = _load_module("pipeline_zs32_parallel_source_decode", "pipeline/32_run_zs32_multimodel_inference.py")
+    images = {view: tmp_path / f"{view}.png" for view in VIEWS}
+    request = stage32.InspectionRequest("part-001", "session-001", "group-001", "right", images)
+    runtime = SimpleNamespace(config=SimpleNamespace(image_width=4, image_height=3))
+    lock = threading.Lock()
+    release = threading.Event()
+    active = 0
+    max_active = 0
+    entered = 0
+
+    def fake_imread(path: str, flags: int) -> np.ndarray:
+        nonlocal active, max_active, entered
+        assert flags == cv2.IMREAD_COLOR
+        view = Path(path).stem
+        with lock:
+            active += 1
+            entered += 1
+            max_active = max(max_active, active)
+            if entered >= 4:
+                release.set()
+        assert release.wait(timeout=2.0)
+        result = np.full((3, 4, 3), VIEWS.index(view), dtype=np.uint8)
+        with lock:
+            active -= 1
+        return result
+
+    monkeypatch.setattr(stage32.cv2, "imread", fake_imread)
+
+    decoded = stage32._load_source_images(request, runtime)
+
+    assert tuple(decoded) == VIEWS
+    assert max_active == 4
+    assert [int(decoded[view][0, 0, 0]) for view in VIEWS] == list(range(len(VIEWS)))
 
 
 def test_unified_entrypoint_parses_all_eight_explicit_images(tmp_path: Path) -> None:
@@ -165,6 +206,100 @@ def test_template_gate_evaluates_all_eight_before_aggregate_stop(
     assert tuple(result["view"] for result in results) == VIEWS
 
 
+@pytest.mark.parametrize("profile", ["zs32-right-20-commissioning", "zs32-right-22-commissioning"])
+def test_reduced_group_template_gate_skips_secondary_views(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    profile: str,
+) -> None:
+    stage32 = _load_module(f"pipeline_zs32_reduced_template_views_{profile}", "pipeline/32_run_zs32_multimodel_inference.py")
+    images = _write_images(tmp_path)
+    calls: list[str] = []
+
+    class FakeGate:
+        def __init__(self, _model_dir: Path) -> None:
+            pass
+
+        def evaluate(self, crop_path: Path, _hand: str, view: str) -> SimpleNamespace:
+            calls.append(view)
+            return SimpleNamespace(to_dict=lambda: {"view": view, "status": "PASS", "score": 0.01})
+
+    monkeypatch.setattr(stage32, "TemplateGate", FakeGate)
+    request = stage32.InspectionRequest("part-001", "session-001", "group-001", "right", images)
+    runtime = SimpleNamespace(config=SimpleNamespace(image_width=4, image_height=3, patchcore_rois={"right": {view: (0, 0, 4, 3) for view in VIEWS}}))
+    results, _ = stage32._template_gate(
+        request,
+        runtime,
+        tmp_path / "model",
+        tmp_path / "workspace",
+        profile,
+    )
+    assert set(calls) == {view for view in VIEWS if view not in {"front_secondary", "back_secondary"}}
+    assert len(calls) == 6
+    assert [result["view"] for result in results if result["status"] == "SKIPPED"] == [
+        "front_secondary",
+        "back_secondary",
+    ]
+
+
+def test_reduced_group_template_views_evaluate_in_parallel(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The six active Template views should overlap while results stay canonical."""
+    stage32 = _load_module("pipeline_zs32_parallel_template_views", "pipeline/32_run_zs32_multimodel_inference.py")
+    images = _write_images(tmp_path)
+    lock = threading.Lock()
+    release = threading.Event()
+    active = 0
+    max_active = 0
+    entered = 0
+
+    class FakeGate:
+        def __init__(self, _model_dir: Path) -> None:
+            pass
+
+        def evaluate(self, _crop_path: Path, _hand: str, view: str) -> SimpleNamespace:
+            nonlocal active, max_active, entered
+            with lock:
+                active += 1
+                entered += 1
+                max_active = max(max_active, active)
+                if entered >= 6:
+                    release.set()
+            assert release.wait(timeout=2.0)
+            with lock:
+                active -= 1
+            return SimpleNamespace(to_dict=lambda: {"view": view, "status": "PASS", "score": 0.01})
+
+    monkeypatch.setattr(stage32, "TemplateGate", FakeGate)
+    request = stage32.InspectionRequest("part-001", "session-001", "group-001", "right", images)
+    runtime = SimpleNamespace(
+        config=SimpleNamespace(
+            image_width=4,
+            image_height=3,
+            patchcore_rois={"right": {view: (0, 0, 4, 3) for view in VIEWS}},
+        ),
+    )
+
+    results, _ = stage32._template_gate(
+        request,
+        runtime,
+        tmp_path / "model",
+        tmp_path / "workspace",
+        "zs32-right-20-commissioning",
+    )
+
+    assert max_active == 6
+    assert tuple(result["view"] for result in results) == VIEWS
+    primary_results = [result for result in results if result["view"] not in {"front_secondary", "back_secondary"}]
+    assert all(result["status"] == "PASS" for result in primary_results)
+    assert [result["view"] for result in results if result["status"] == "SKIPPED"] == [
+        "front_secondary",
+        "back_secondary",
+    ]
+
+
 def test_diagnostic_mask_threshold_parses_with_display_only_default(tmp_path: Path) -> None:
     """The CLI must expose the documented display-only default and custom override."""
     stage32 = _load_module("pipeline_zs32_runtime_mask_threshold", "pipeline/32_run_zs32_multimodel_inference.py")
@@ -243,12 +378,13 @@ def test_diagnostic_skip_template_publication_is_explicit_and_non_production(
         "pipeline/32_run_zs32_multimodel_inference.py",
     )
     output = tmp_path / "output"
+    _write_images(tmp_path)
 
     class FakeRuntime:
         """Publish the minimal ordinary runtime artifacts consumed by Stage32."""
 
-        def __init__(self, *_args: object, **_kwargs: object) -> None:
-            pass
+        def __init__(self, config: object, *_args: object, **_kwargs: object) -> None:
+            self.config = config
 
         @staticmethod
         def run(_request: object, output_dir: Path, **_kwargs: object) -> SimpleNamespace:
@@ -271,7 +407,11 @@ def test_diagnostic_skip_template_publication_is_explicit_and_non_production(
                 missing_required_evidence=("template_match", "strict_fusion_not_run"),
             )
 
-    monkeypatch.setattr(stage32, "load_runtime_config", lambda _path: SimpleNamespace(supported_hands=("right",)))
+    monkeypatch.setattr(
+        stage32,
+        "load_runtime_config",
+        lambda _path: SimpleNamespace(supported_hands=("right",), image_width=4, image_height=3),
+    )
     monkeypatch.setattr(stage32, "ZS32ModelRuntime", FakeRuntime)
     monkeypatch.setattr(
         sys,

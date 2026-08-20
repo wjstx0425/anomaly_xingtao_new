@@ -16,7 +16,9 @@ import logging
 import math
 import shutil
 import tempfile
-from collections.abc import Mapping
+import time
+from collections.abc import Collection, Mapping
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast
@@ -29,10 +31,13 @@ from capture_data.zs32_inspection_orchestrator import InspectionRequest
 from capture_data.zs32_patchcore_roi_dataset import load_patchcore_roi_config
 from capture_data.zs32_view_roi_dataset import load_roi_config
 from zs32_inspection.domain.views import CANONICAL_VIEWS
+from zs32_inspection.timing import TimingRecorder
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SHA256_LENGTH = 64
 LOGGER = logging.getLogger(__name__)
+EVIDENCE_WRITE_WORKERS = 2
+YoloInput = Path | np.ndarray
 
 
 def sha256_file(path: Path) -> str:
@@ -150,10 +155,23 @@ class PatchcoreBackend(Protocol):
         """Predict one already-cropped view."""
 
 
+class BatchPatchcoreBackend(Protocol):
+    """Optional optimized interface that preserves one result per requested view."""
+
+    def predict_all(
+        self,
+        crops: Mapping[str, Path],
+        evidence_dir: Path,
+        *,
+        diagnostic_mask_threshold: float = 0.65,
+    ) -> dict[str, ModelEvidence | Exception]:
+        """Predict requested views while overlapping bounded evidence writers."""
+
+
 class YoloBackend(Protocol):
     """Interface used by the runtime for one eight-image YOLO batch."""
 
-    def predict(self, crops: dict[str, Path], evidence_dir: Path) -> dict[str, ModelEvidence]:
+    def predict(self, crops: Mapping[str, YoloInput], evidence_dir: Path) -> dict[str, ModelEvidence]:
         """Predict all canonical views in one batch."""
 
 
@@ -416,20 +434,25 @@ def _build_patchcore_mask(
     return (resized >= cutoff).astype(np.uint8) * 255, source, mask_threshold
 
 
-def _write_patchcore_overlay(crop_path: Path, anomaly_map: object, output_path: Path, score: float) -> None:
-    image = cv2.imread(str(crop_path), cv2.IMREAD_COLOR)
+def _write_patchcore_overlay(
+    crop: Path | np.ndarray,
+    anomaly_map: object,
+    output_path: Path,
+    score: float,
+) -> None:
+    from anomalib.visualization.image.functional import visualize_anomaly_map
+
+    image = cv2.imread(str(crop), cv2.IMREAD_COLOR) if isinstance(crop, Path) else np.array(crop, copy=True)
     if image is None:
-        msg = f"could not read PatchCore crop: {crop_path}"
+        msg = f"could not read PatchCore crop: {crop}"
         raise ValueError(msg)
     array = _array2d(anomaly_map)
     if array is not None:
         array = cv2.resize(array, (image.shape[1], image.shape[0]), interpolation=cv2.INTER_LINEAR)
-        minimum, maximum = float(array.min()), float(array.max())
-        normalized = np.zeros_like(array, dtype=np.uint8)
-        if maximum > minimum:
-            normalized = np.clip((array - minimum) * 255 / (maximum - minimum), 0, 255).astype(np.uint8)
-        heatmap = cv2.applyColorMap(normalized, cv2.COLORMAP_JET)
-        image = cv2.addWeighted(image, 0.55, heatmap, 0.45, 0)
+        # Match the training ImageVisualizer: the checkpoint post-processor already supplies the absolute [0, 1] scale.
+        heatmap_rgb = np.asarray(visualize_anomaly_map(array, colormap=True, normalize=False))
+        heatmap = cv2.cvtColor(heatmap_rgb, cv2.COLOR_RGB2BGR)
+        image = cv2.addWeighted(image, 0.5, heatmap, 0.5, 0)
     cv2.putText(image, f"PatchCore score={score:.6f}", (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     if not cv2.imwrite(str(output_path), image):
@@ -437,22 +460,43 @@ def _write_patchcore_overlay(crop_path: Path, anomaly_map: object, output_path: 
         raise OSError(msg)
 
 
+@dataclass(frozen=True, slots=True)
+class _PreparedPatchcoreEvidence:
+    """One model result whose CPU evidence files have not been persisted yet."""
+
+    evidence: ModelEvidence
+    crop: np.ndarray
+    raw: np.ndarray
+    mask: np.ndarray
+
+
 class AnomalibPatchcoreBackend:
     """PatchCore adapter that retains eight restored models and eight engines."""
 
-    def __init__(self, specs: Mapping[str, PatchcoreSpec], *, accelerator: str = "auto", devices: int = 1) -> None:
+    def __init__(
+        self,
+        specs: Mapping[str, PatchcoreSpec],
+        *,
+        views: Collection[str] = CANONICAL_VIEWS,
+        accelerator: str = "auto",
+        devices: int = 1,
+        timing: TimingRecorder | None = None,
+    ) -> None:
         from anomalib.engine import Engine
         from anomalib.models import Patchcore
 
+        requested = tuple(view for view in CANONICAL_VIEWS if view in views)
+        if not requested or set(requested) != set(views):
+            raise ValueError("PatchCore backend views must be a non-empty canonical subset")
         self.models: dict[str, object] = {}
         self.engines: dict[str, object] = {}
+        self.timing = timing
         engine_root = Path(tempfile.gettempdir()) / "anomalib-zs32-runtime-engine"
-        for view in CANONICAL_VIEWS:
-            self.models[view] = Patchcore.load_from_checkpoint(
-                specs[view].checkpoint,
-                weights_only=False,
-                visualizer=False,
-            )
+        for view in requested:
+            started = time.perf_counter()
+            self.models[view] = Patchcore.load_from_checkpoint(specs[view].checkpoint, weights_only=False, visualizer=False)
+            if self.timing is not None:
+                self.timing.add(f"patchcore_model_load/{view}", time.perf_counter() - started)
             self.engines[view] = Engine(
                 accelerator=accelerator,
                 devices=devices,
@@ -460,21 +504,25 @@ class AnomalibPatchcoreBackend:
                 logger=False,
             )
 
-    def predict(
+    def _prepare_prediction(
         self,
         view: str,
         crop_path: Path,
         evidence_path: Path,
         *,
         diagnostic_mask_threshold: float = 0.65,
-    ) -> ModelEvidence:
-        """Run PatchCore and persist its raw map, display mask, and overlay."""
+    ) -> _PreparedPatchcoreEvidence:
+        """Run one model and prepare its immutable CPU evidence payload."""
+        started = time.perf_counter()
         predictions = self.engines[view].predict(  # type: ignore[union-attr]
             model=self.models[view],
             data_path=crop_path,
             ckpt_path=None,
             return_predictions=True,
         )
+        timing = getattr(self, "timing", None)
+        if timing is not None:
+            timing.add(f"patchcore_inference/{view}", time.perf_counter() - started)
         items = _prediction_items(predictions)
         if len(items) != 1:
             msg = f"PatchCore {view} returned {len(items)} prediction items, expected 1"
@@ -494,14 +542,7 @@ class AnomalibPatchcoreBackend:
         )
         raw_path = evidence_path.parent / "raw_maps" / f"{view}.npy"
         mask_path = evidence_path.parent / "masks" / f"{view}.png"
-        raw_path.parent.mkdir(parents=True, exist_ok=True)
-        mask_path.parent.mkdir(parents=True, exist_ok=True)
-        np.save(raw_path, raw.astype(np.float32, copy=False), allow_pickle=False)
-        if not cv2.imwrite(str(mask_path), mask):
-            msg = f"failed to write PatchCore mask: {mask_path}"
-            raise OSError(msg)
-        _write_patchcore_overlay(crop_path, raw, evidence_path, score)
-        return ModelEvidence(
+        evidence = ModelEvidence(
             score=score,
             evidence_path=evidence_path,
             patchcore_artifacts=PatchcoreArtifacts(
@@ -513,21 +554,126 @@ class AnomalibPatchcoreBackend:
                 mask_shape=cast("tuple[int, int]", mask.shape),
             ),
         )
+        return _PreparedPatchcoreEvidence(
+            evidence=evidence,
+            crop=np.array(crop, copy=True),
+            raw=raw.astype(np.float32, copy=False),
+            mask=mask,
+        )
+
+    @staticmethod
+    def _persist_prediction(prepared: _PreparedPatchcoreEvidence) -> float:
+        """Persist one prepared result and return its writer wall time."""
+        artifacts = prepared.evidence.patchcore_artifacts
+        if artifacts is None:  # pragma: no cover - internal construction invariant
+            raise RuntimeError("prepared PatchCore evidence is missing artifacts")
+        artifacts.raw_anomaly_map_path.parent.mkdir(parents=True, exist_ok=True)
+        artifacts.mask_path.parent.mkdir(parents=True, exist_ok=True)
+        started = time.perf_counter()
+        np.save(artifacts.raw_anomaly_map_path, prepared.raw, allow_pickle=False)
+        if not cv2.imwrite(str(artifacts.mask_path), prepared.mask):
+            msg = f"failed to write PatchCore mask: {artifacts.mask_path}"
+            raise OSError(msg)
+        _write_patchcore_overlay(
+            prepared.crop,
+            prepared.raw,
+            prepared.evidence.evidence_path,
+            prepared.evidence.score,
+        )
+        return time.perf_counter() - started
+
+    def predict(
+        self,
+        view: str,
+        crop_path: Path,
+        evidence_path: Path,
+        *,
+        diagnostic_mask_threshold: float = 0.65,
+    ) -> ModelEvidence:
+        """Run PatchCore and synchronously persist one view's evidence."""
+        prepared = self._prepare_prediction(
+            view,
+            crop_path,
+            evidence_path,
+            diagnostic_mask_threshold=diagnostic_mask_threshold,
+        )
+        elapsed = self._persist_prediction(prepared)
+        timing = getattr(self, "timing", None)
+        if timing is not None:
+            timing.add(f"evidence_write/patchcore/{view}", elapsed)
+        return prepared.evidence
+
+    def predict_all(
+        self,
+        crops: Mapping[str, Path],
+        evidence_dir: Path,
+        *,
+        diagnostic_mask_threshold: float = 0.65,
+    ) -> dict[str, ModelEvidence | Exception]:
+        """Run views serially while bounded CPU writers overlap later GPU inference."""
+        requested = tuple(view for view in CANONICAL_VIEWS if view in crops)
+        results: dict[str, ModelEvidence | Exception] = {}
+        jobs: dict[str, tuple[ModelEvidence, Future[float]]] = {}
+        wait_started = time.perf_counter()
+        with ThreadPoolExecutor(
+            max_workers=min(EVIDENCE_WRITE_WORKERS, len(requested)),
+            thread_name_prefix="zs32-patchcore-evidence",
+        ) as executor:
+            for view in requested:
+                try:
+                    prepared = self._prepare_prediction(
+                        view,
+                        crops[view],
+                        evidence_dir / f"{view}.png",
+                        diagnostic_mask_threshold=diagnostic_mask_threshold,
+                    )
+                    jobs[view] = (prepared.evidence, executor.submit(self._persist_prediction, prepared))
+                except Exception as error:  # noqa: BLE001 - preserve per-view fail-closed behavior
+                    results[view] = error
+            wait_started = time.perf_counter()
+            for view in requested:
+                if view not in jobs:
+                    continue
+                evidence, future = jobs[view]
+                try:
+                    elapsed = future.result()
+                    timing = getattr(self, "timing", None)
+                    if timing is not None:
+                        timing.add(f"evidence_write/patchcore/{view}", elapsed)
+                    results[view] = evidence
+                except Exception as error:  # noqa: BLE001 - surface writer failure to the runtime
+                    results[view] = error
+        timing = getattr(self, "timing", None)
+        if timing is not None:
+            timing.add("evidence_write/patchcore_wait", time.perf_counter() - wait_started)
+        return results
 
 
 class UltralyticsYoloBackend:
     """YOLO adapter that retains one model and predicts eight views as one batch."""
 
-    def __init__(self, spec: YoloSpec, *, device: str | None = None) -> None:
+    def __init__(self, spec: YoloSpec, *, device: str | None = None, timing: TimingRecorder | None = None) -> None:
         from ultralytics import YOLO
 
         self.model = YOLO(spec.weights)
         self.spec = spec
         self.device = device
+        self.timing = timing
 
-    def predict(self, crops: dict[str, Path], evidence_dir: Path) -> dict[str, ModelEvidence]:
+    @staticmethod
+    def _persist_evidence(result: object, evidence_path: Path) -> None:
+        """Render and persist one YOLO result on a bounded CPU writer."""
+        plotted = result.plot()  # type: ignore[union-attr]
+        if not cv2.imwrite(str(evidence_path), plotted):
+            msg = f"failed to write YOLO evidence: {evidence_path}"
+            raise OSError(msg)
+
+    def predict(self, crops: Mapping[str, YoloInput], evidence_dir: Path) -> dict[str, ModelEvidence]:
         """Run one eight-view YOLO batch and write one annotated image per view."""
-        sources = [str(crops[view]) for view in CANONICAL_VIEWS]
+        sources = [
+            str(crops[view]) if isinstance(crops[view], Path) else np.ascontiguousarray(crops[view])
+            for view in CANONICAL_VIEWS
+        ]
         kwargs: dict[str, Any] = {
             "source": sources,
             "imgsz": self.spec.imgsz,
@@ -538,60 +684,71 @@ class UltralyticsYoloBackend:
         }
         if self.device is not None:
             kwargs["device"] = self.device
+        started = time.perf_counter()
         predictions = list(self.model.predict(**kwargs))
+        timing = getattr(self, "timing", None)
+        if timing is not None:
+            timing.add("yolo_batch_inference", time.perf_counter() - started)
         if len(predictions) != len(CANONICAL_VIEWS):
             msg = f"YOLO returned {len(predictions)} results, expected {len(CANONICAL_VIEWS)}"
             raise RuntimeError(msg)
         evidence_dir.mkdir(parents=True, exist_ok=True)
         output: dict[str, ModelEvidence] = {}
-        for view, result in zip(CANONICAL_VIEWS, predictions, strict=True):
-            detections: list[dict[str, Any]] = []
-            boxes = getattr(result, "boxes", None)
-            if boxes is not None:
-                for box in boxes:
-                    class_id = int(_scalar(box.cls))
-                    confidence = _scalar(box.conf)
-                    xyxy = [float(value) for value in box.xyxy.detach().cpu().reshape(-1).tolist()]
-                    if len(xyxy) != 4 or not all(math.isfinite(value) for value in xyxy):
-                        msg = f"YOLO emitted malformed xyxy for {view}: {xyxy}"
-                        raise ValueError(msg)
-                    x1, y1, x2, y2 = xyxy
-                    if x2 <= x1 or y2 <= y1:
-                        # Ultralytics may clip a low-confidence candidate entirely
-                        # onto an image boundary. It has no pixel area and therefore
-                        # cannot be retained as detection evidence.
-                        LOGGER.warning(
-                            "Ignoring boundary-collapsed YOLO candidate for %s: confidence=%s xyxy=%s",
-                            view,
-                            confidence,
-                            xyxy,
+        evidence_started = time.perf_counter()
+        jobs: dict[str, Future[None]] = {}
+        with ThreadPoolExecutor(
+            max_workers=min(EVIDENCE_WRITE_WORKERS, len(CANONICAL_VIEWS)),
+            thread_name_prefix="zs32-yolo-evidence",
+        ) as executor:
+            for view, result in zip(CANONICAL_VIEWS, predictions, strict=True):
+                detections: list[dict[str, Any]] = []
+                boxes = getattr(result, "boxes", None)
+                if boxes is not None:
+                    for box in boxes:
+                        class_id = int(_scalar(box.cls))
+                        confidence = _scalar(box.conf)
+                        xyxy = [float(value) for value in box.xyxy.detach().cpu().reshape(-1).tolist()]
+                        if len(xyxy) != 4 or not all(math.isfinite(value) for value in xyxy):
+                            msg = f"YOLO emitted malformed xyxy for {view}: {xyxy}"
+                            raise ValueError(msg)
+                        x1, y1, x2, y2 = xyxy
+                        if x2 <= x1 or y2 <= y1:
+                            # Ultralytics may clip a low-confidence candidate entirely
+                            # onto an image boundary. It has no pixel area and therefore
+                            # cannot be retained as detection evidence.
+                            LOGGER.warning(
+                                "Ignoring boundary-collapsed YOLO candidate for %s: confidence=%s xyxy=%s",
+                                view,
+                                confidence,
+                                xyxy,
+                            )
+                            continue
+                        names = getattr(result, "names", {})
+                        checkpoint_class_name = (
+                            str(names.get(class_id, class_id)) if isinstance(names, Mapping) else str(class_id)
                         )
-                        continue
-                    names = getattr(result, "names", {})
-                    checkpoint_class_name = (
-                        str(names.get(class_id, class_id)) if isinstance(names, Mapping) else str(class_id)
-                    )
-                    class_name = self.spec.class_map.get(class_id)
-                    if class_name is None:
-                        msg = f"YOLO class {class_id} has no deployment semantic mapping"
-                        raise ValueError(msg)
-                    detections.append(
-                        {
-                            "class": class_id,
-                            "class_name": class_name,
-                            "checkpoint_class_name": checkpoint_class_name,
-                            "confidence": confidence,
-                            "xyxy": xyxy,
-                            "area": (x2 - x1) * (y2 - y1),
-                        },
-                    )
-            evidence_path = evidence_dir / f"{view}.png"
-            plotted = result.plot()
-            if not cv2.imwrite(str(evidence_path), plotted):
-                msg = f"failed to write YOLO evidence: {evidence_path}"
-                raise OSError(msg)
-            score = max((float(item["confidence"]) for item in detections), default=0.0)
-            output[view] = ModelEvidence(score=score, evidence_path=evidence_path, detections=tuple(detections))
+                        class_name = self.spec.class_map.get(class_id)
+                        if class_name is None:
+                            msg = f"YOLO class {class_id} has no deployment semantic mapping"
+                            raise ValueError(msg)
+                        detections.append(
+                            {
+                                "class": class_id,
+                                "class_name": class_name,
+                                "checkpoint_class_name": checkpoint_class_name,
+                                "confidence": confidence,
+                                "xyxy": xyxy,
+                                "area": (x2 - x1) * (y2 - y1),
+                            },
+                        )
+                evidence_path = evidence_dir / f"{view}.png"
+                jobs[view] = executor.submit(self._persist_evidence, result, evidence_path)
+                score = max((float(item["confidence"]) for item in detections), default=0.0)
+                output[view] = ModelEvidence(score=score, evidence_path=evidence_path, detections=tuple(detections))
+            for view in CANONICAL_VIEWS:
+                jobs[view].result()
+        if timing is not None:
+            timing.add("evidence_write/yolo_png", time.perf_counter() - evidence_started)
         return output
 
 
@@ -633,6 +790,7 @@ class ZS32ModelRuntime:
         accelerator: str = "auto",
         devices: int = 1,
         yolo_device: str | None = None,
+        timing: TimingRecorder | None = None,
     ) -> None:
         self.config = config
         self._patchcore_backend = patchcore_backend
@@ -640,19 +798,37 @@ class ZS32ModelRuntime:
         self.accelerator = accelerator
         self.devices = devices
         self.yolo_device = yolo_device
+        self.timing = timing
 
-    def _ensure_backends(self) -> tuple[PatchcoreBackend, YoloBackend]:
+    def _ensure_backends(self, patchcore_views: Collection[str] = CANONICAL_VIEWS) -> tuple[PatchcoreBackend, YoloBackend]:
         if self._patchcore_backend is None:
-            self._patchcore_backend = AnomalibPatchcoreBackend(
-                self.config.patchcore,
-                accelerator=self.accelerator,
-                devices=self.devices,
-            )
+            started = time.perf_counter()
+            kwargs: dict[str, Any] = {
+                "views": patchcore_views,
+                "accelerator": self.accelerator,
+                "devices": self.devices,
+            }
+            if self.timing is not None:
+                kwargs["timing"] = self.timing
+            self._patchcore_backend = AnomalibPatchcoreBackend(self.config.patchcore, **kwargs)
+            if self.timing is not None:
+                self.timing.add("patchcore_models_load", time.perf_counter() - started)
         if self._yolo_backend is None:
-            self._yolo_backend = UltralyticsYoloBackend(self.config.yolo, device=self.yolo_device)
+            started = time.perf_counter()
+            yolo_kwargs: dict[str, Any] = {"device": self.yolo_device}
+            if self.timing is not None:
+                yolo_kwargs["timing"] = self.timing
+            self._yolo_backend = UltralyticsYoloBackend(self.config.yolo, **yolo_kwargs)
+            if self.timing is not None:
+                self.timing.add("yolo_model_load", time.perf_counter() - started)
         return self._patchcore_backend, self._yolo_backend
 
-    def _validate_request(self, request: InspectionRequest, output_dir: Path) -> dict[str, np.ndarray]:
+    def _validate_request(
+        self,
+        request: InspectionRequest,
+        output_dir: Path,
+        source_images: Mapping[str, np.ndarray] | None = None,
+    ) -> dict[str, np.ndarray]:
         if output_dir.exists():
             msg = f"output directory already exists: {output_dir}"
             raise FileExistsError(msg)
@@ -670,12 +846,16 @@ class ZS32ModelRuntime:
         if len(set(paths)) != len(paths):
             msg = "eight-view request must use eight distinct source image paths"
             raise ValueError(msg)
+        if source_images is not None and set(source_images) != set(CANONICAL_VIEWS):
+            raise ValueError("source_images must contain exactly the eight canonical views")
         images: dict[str, np.ndarray] = {}
         for view, path in zip(CANONICAL_VIEWS, paths, strict=True):
-            image = cv2.imread(str(path), cv2.IMREAD_COLOR)
+            image = source_images[view] if source_images is not None else cv2.imread(str(path), cv2.IMREAD_COLOR)
             if image is None:
                 msg = f"could not read source image for {view}: {path}"
                 raise ValueError(msg)
+            if not isinstance(image, np.ndarray) or image.ndim != 3 or image.shape[2] != 3:
+                raise ValueError(f"source image for {view} must be one BGR ndarray")
             if (image.shape[1], image.shape[0]) != (self.config.image_width, self.config.image_height):
                 msg = (
                     f"source image dimensions for {view} must be "
@@ -708,6 +888,7 @@ class ZS32ModelRuntime:
         model_version: str,
         roi_version: str,
         threshold_map: Mapping[tuple[str, str, str, str, str], tuple[float, float]],
+        source_hash: str,
         reason: str | None = None,
     ) -> BranchPrediction:
         source_path = Path(request.images[view]).expanduser().resolve()
@@ -751,7 +932,7 @@ class ZS32ModelRuntime:
             hand=request.hand,
             product=self.config.product,
             profile=self.config.profile,
-            source_hash=sha256_file(source_path),
+            source_hash=source_hash,
             evidence_hash=sha256_file(evidence_path),
             manifest_identity=f"{request.part_id}:{request.hand}:{view}",
             capture_session=request.capture_session,
@@ -781,10 +962,16 @@ class ZS32ModelRuntime:
         gt_label: int | None = None,
         split: str | None = None,
         diagnostic_mask_threshold: float = 0.65,
+        skip_patchcore_views: Collection[str] = (),
+        source_images: Mapping[str, np.ndarray] | None = None,
     ) -> RuntimeResult:
         """Run all models, publish immutable evidence, and remain REVIEW until strict fusion."""
         output_dir = output_dir.expanduser().resolve()
-        images = self._validate_request(request, output_dir)
+        started = time.perf_counter()
+        images = self._validate_request(request, output_dir, source_images)
+        if self.timing is not None:
+            stage = "source_image_validation" if source_images is not None else "source_image_decode"
+            self.timing.add(stage, time.perf_counter() - started)
         if (gt_label is None) != (split is None):
             msg = "gt_label and split must be provided together"
             raise ValueError(msg)
@@ -794,6 +981,12 @@ class ZS32ModelRuntime:
         if not math.isfinite(diagnostic_mask_threshold) or not 0 <= diagnostic_mask_threshold <= 1:
             msg = "diagnostic_mask_threshold must be finite and within [0, 1]"
             raise ValueError(msg)
+        skipped_patchcore = frozenset(skip_patchcore_views)
+        if not skipped_patchcore.issubset(CANONICAL_VIEWS):
+            raise ValueError(f"skip_patchcore_views must be a canonical subset: {sorted(skipped_patchcore)}")
+        active_patchcore_views = tuple(view for view in CANONICAL_VIEWS if view not in skipped_patchcore)
+        if not active_patchcore_views:
+            raise ValueError("at least one PatchCore view must remain enabled")
         threshold_map = load_threshold_map(threshold_artifact)
         staging = output_dir.parent / f".{output_dir.name}.tmp-{uuid4().hex}"
         staging.mkdir(parents=True)
@@ -806,26 +999,26 @@ class ZS32ModelRuntime:
         view_manifest: dict[str, dict[str, Any]] = {}
         try:
             patchcore_crops: dict[str, Path] = {}
-            yolo_crops: dict[str, Path] = {}
+            yolo_crops: dict[str, np.ndarray] = {}
+            source_hashes: dict[str, str] = {}
             source_dir = staging / "sources"
             source_dir.mkdir(parents=True)
+            encode_started = time.perf_counter()
             for view in CANONICAL_VIEWS:
                 image = images[view]
                 source = Path(request.images[view]).resolve()
                 source_copy = source_dir / f"{view}{source.suffix or '.png'}"
                 shutil.copy2(source, source_copy)
-                pc_x1, pc_y1, pc_x2, pc_y2 = self.config.patchcore_rois[request.hand][view]
                 yo_x1, yo_y1, yo_x2, yo_y2 = self.config.yolo_rois[view]
-                pc_crop = staging / "crops" / "patchcore" / f"{view}.png"
-                yo_crop = staging / "crops" / "yolo" / f"{view}.png"
-                pc_crop.parent.mkdir(parents=True, exist_ok=True)
-                yo_crop.parent.mkdir(parents=True, exist_ok=True)
-                if not cv2.imwrite(str(pc_crop), image[pc_y1:pc_y2, pc_x1:pc_x2]):
-                    raise OSError(f"failed to write PatchCore crop: {pc_crop}")
-                if not cv2.imwrite(str(yo_crop), image[yo_y1:yo_y2, yo_x1:yo_x2]):
-                    raise OSError(f"failed to write YOLO crop: {yo_crop}")
-                patchcore_crops[view] = pc_crop
-                yolo_crops[view] = yo_crop
+                yolo_crops[view] = np.ascontiguousarray(image[yo_y1:yo_y2, yo_x1:yo_x2])
+                if view in active_patchcore_views:
+                    pc_x1, pc_y1, pc_x2, pc_y2 = self.config.patchcore_rois[request.hand][view]
+                    pc_crop = staging / "crops" / "patchcore" / f"{view}.png"
+                    pc_crop.parent.mkdir(parents=True, exist_ok=True)
+                    if not cv2.imwrite(str(pc_crop), image[pc_y1:pc_y2, pc_x1:pc_x2]):
+                        raise OSError(f"failed to write PatchCore crop: {pc_crop}")
+                    patchcore_crops[view] = pc_crop
+                source_hashes[view] = sha256_file(source_copy)
                 view_manifest[view] = {
                     "view": view,
                     "part_id": request.part_id,
@@ -834,34 +1027,60 @@ class ZS32ModelRuntime:
                     "hand": request.hand,
                     "manifest_identity": f"{request.part_id}:{request.hand}:{view}",
                     "source_path": str(source_copy.relative_to(staging)),
-                    "source_sha256": sha256_file(source_copy),
+                    "source_sha256": source_hashes[view],
                     "source_shape": list(image.shape[:2]),
                     "model_supported": True,
                 }
+            if self.timing is not None:
+                self.timing.add("image_encoding_write_and_roi_crops", time.perf_counter() - encode_started)
 
             backend_load_error: Exception | None = None
             try:
-                patchcore_backend, yolo_backend = self._ensure_backends()
+                patchcore_backend, yolo_backend = self._ensure_backends(active_patchcore_views)
             except Exception as error:  # noqa: BLE001 - publish a fail-closed initialization generation
                 backend_load_error = error
                 errors.append(f"model initialization: {type(error).__name__}: {error}")
                 patchcore_backend = self._patchcore_backend
                 yolo_backend = self._yolo_backend
 
-            for view in CANONICAL_VIEWS:
+            patchcore_results: dict[str, ModelEvidence | Exception] = {}
+            if patchcore_backend is None:
+                initialization_error = backend_load_error or RuntimeError("PatchCore backend initialization failed")
+                patchcore_results = {view: initialization_error for view in active_patchcore_views}
+            else:
+                predict_all = getattr(patchcore_backend, "predict_all", None)
+                if callable(predict_all):
+                    try:
+                        batch_backend = cast("BatchPatchcoreBackend", patchcore_backend)
+                        patchcore_results = batch_backend.predict_all(
+                            patchcore_crops,
+                            staging / "evidence" / "patchcore",
+                            diagnostic_mask_threshold=diagnostic_mask_threshold,
+                        )
+                    except Exception as error:  # noqa: BLE001 - fail closed per view and continue YOLO
+                        patchcore_results = {view: error for view in active_patchcore_views}
+                else:
+                    for view in active_patchcore_views:
+                        try:
+                            patchcore_results[view] = patchcore_backend.predict(
+                                view,
+                                patchcore_crops[view],
+                                staging / "evidence" / "patchcore" / f"{view}.png",
+                                diagnostic_mask_threshold=diagnostic_mask_threshold,
+                            )
+                        except Exception as error:  # noqa: BLE001 - preserve per-view fail-closed behavior
+                            patchcore_results[view] = error
+
+            for view in active_patchcore_views:
                 temp_evidence = staging / "evidence" / "patchcore" / f"{view}.png"
                 final_evidence = final_patchcore_dir / f"{view}.png"
                 evidence: ModelEvidence | None = None
                 error_reason = None
                 try:
-                    if patchcore_backend is None:
-                        raise backend_load_error or RuntimeError("PatchCore backend initialization failed")
-                    evidence = patchcore_backend.predict(
-                        view,
-                        patchcore_crops[view],
-                        temp_evidence,
-                        diagnostic_mask_threshold=diagnostic_mask_threshold,
-                    )
+                    candidate = patchcore_results.get(view, RuntimeError(f"PatchCore result missing for {view}"))
+                    if isinstance(candidate, Exception):
+                        raise candidate
+                    evidence = candidate
                     if evidence.evidence_path.resolve() != temp_evidence.resolve() or not temp_evidence.is_file():
                         msg = f"PatchCore backend did not publish the requested evidence for {view}"
                         raise RuntimeError(msg)
@@ -940,9 +1159,20 @@ class ZS32ModelRuntime:
                     model_version=self.config.patchcore[view].model_version,
                     roi_version=self.config.versions.patchcore_roi,
                     threshold_map=threshold_map,
+                    source_hash=source_hashes[view],
                     reason=error_reason,
                 )
                 patchcore_rows.append(dataclass_replace_paths(row, evidence_path=final_evidence))
+
+            for view in skipped_patchcore:
+                view_manifest[view]["patchcore"] = {
+                    "state": "skipped",
+                    "status": "SKIPPED",
+                    "score": None,
+                    "reason": "PatchCore disabled by the 20-group commissioning profile",
+                    "display_only": True,
+                    "roi_xyxy": list(self.config.patchcore_rois[request.hand][view]),
+                }
 
             try:
                 if yolo_backend is None:
@@ -1007,6 +1237,7 @@ class ZS32ModelRuntime:
                     model_version=self.config.yolo.model_version,
                     roi_version=self.config.versions.yolo_roi,
                     threshold_map=threshold_map,
+                    source_hash=source_hashes[view],
                     reason=error_reason,
                 )
                 yolo_rows.append(dataclass_replace_paths(row, evidence_path=final_evidence))

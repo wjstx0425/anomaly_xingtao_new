@@ -10,6 +10,8 @@ import hashlib
 import importlib.util
 import json
 import sys
+import threading
+from collections.abc import Mapping
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -17,6 +19,7 @@ from typing import cast
 import cv2
 import numpy as np
 import pytest
+import capture_data.zs32_model_runtime as runtime_module
 from capture_data.zs32_inspection_orchestrator import InspectionRequest
 from capture_data.zs32_model_runtime import (
     AnomalibPatchcoreBackend,
@@ -26,6 +29,7 @@ from capture_data.zs32_model_runtime import (
     YoloSpec,
     ZS32ModelRuntime,
     _build_patchcore_mask,
+    _write_patchcore_overlay,
     load_runtime_config,
 )
 from capture_data.zs32_patchcore_roi_dataset import VIEWS as PATCHCORE_ROI_VIEWS
@@ -174,8 +178,14 @@ def test_yolo_backend_drops_boundary_collapsed_candidates(
         )
         for view in VIEWS
     ]
+    captured: dict[str, object] = {}
+
+    def _predict(**kwargs: object) -> list[SimpleNamespace]:
+        captured.update(kwargs)
+        return predictions
+
     backend = object.__new__(UltralyticsYoloBackend)
-    backend.model = SimpleNamespace(predict=lambda **_kwargs: predictions)
+    backend.model = SimpleNamespace(predict=_predict)
     backend.spec = YoloSpec(
         weights=tmp_path / "best.pt",
         weights_sha256="0" * 64,
@@ -187,10 +197,15 @@ def test_yolo_backend_drops_boundary_collapsed_candidates(
         class_map={0: "defect"},
     )
     backend.device = "cpu"
-    crops = {view: tmp_path / f"{view}.png" for view in VIEWS}
+    crops = {view: np.full((8, 8, 3), index, dtype=np.uint8) for index, view in enumerate(VIEWS)}
 
     output = backend.predict(crops, tmp_path / "evidence")
 
+    sources = cast("list[np.ndarray]", captured["source"])
+    assert len(sources) == len(VIEWS)
+    for index, source in enumerate(sources):
+        np.testing.assert_array_equal(source, crops[VIEWS[index]])
+        assert source.flags.c_contiguous
     assert output["front"].score == pytest.approx(0.003)
     assert len(output["front"].detections) == 1
     assert output["front"].detections[0]["xyxy"] == [1.0, 2.0, 8.0, 9.0]
@@ -234,6 +249,44 @@ def test_yolo_backend_still_rejects_nonfinite_candidates(tmp_path: Path) -> None
         backend.predict(crops, tmp_path / "evidence")
 
 
+def test_yolo_backend_drains_writers_and_propagates_write_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed evidence future must be observed after every submitted writer drains."""
+    predictions = [SimpleNamespace(boxes=[], names={0: "item"}) for _view in VIEWS]
+    backend = object.__new__(UltralyticsYoloBackend)
+    backend.model = SimpleNamespace(predict=lambda **_kwargs: predictions)
+    backend.spec = YoloSpec(
+        weights=tmp_path / "best.pt",
+        weights_sha256="0" * 64,
+        model_version="yolo-v1",
+        imgsz=640,
+        candidate_conf=0.001,
+        iou=0.7,
+        max_det=300,
+        class_map={0: "defect"},
+    )
+    backend.device = "cpu"
+    completed: list[str] = []
+
+    def _persist(_result: object, path: Path) -> None:
+        try:
+            if path.stem == "front":
+                raise OSError("simulated evidence writer failure")
+            assert cv2.imwrite(str(path), np.zeros((8, 8, 3), dtype=np.uint8))
+        finally:
+            completed.append(path.stem)
+
+    monkeypatch.setattr(UltralyticsYoloBackend, "_persist_evidence", staticmethod(_persist))
+    crops = {view: np.zeros((8, 8, 3), dtype=np.uint8) for view in VIEWS}
+
+    with pytest.raises(OSError, match="simulated evidence writer failure"):
+        backend.predict(crops, tmp_path / "evidence")
+
+    assert set(completed) == set(VIEWS)
+
+
 class _PatchcoreBackend:
     def __init__(self) -> None:
         self.calls: list[tuple[str, tuple[int, int]]] = []
@@ -275,14 +328,14 @@ class _PatchcoreBackend:
 
 class _YoloBackend:
     def __init__(self) -> None:
-        self.calls: list[dict[str, Path]] = []
+        self.calls: list[dict[str, Path | np.ndarray]] = []
 
-    def predict(self, crops: dict[str, Path], evidence_dir: Path) -> dict[str, ModelEvidence]:
+    def predict(self, crops: Mapping[str, Path | np.ndarray], evidence_dir: Path) -> dict[str, ModelEvidence]:
         """Write deterministic explicit-empty YOLO evidence."""
         self.calls.append(dict(crops))
         results: dict[str, ModelEvidence] = {}
-        for view, crop_path in crops.items():
-            image = cv2.imread(str(crop_path))
+        for view, crop in crops.items():
+            image = cv2.imread(str(crop)) if isinstance(crop, Path) else np.array(crop, copy=True)
             assert image is not None
             evidence_path = evidence_dir / f"{view}.png"
             evidence_path.parent.mkdir(parents=True, exist_ok=True)
@@ -407,6 +460,25 @@ def test_patchcore_mask_uses_normalized_diagnostic_fallback() -> None:
     assert mask.tolist() == [[0, 0], [255, 255]]
 
 
+def test_patchcore_overlay_preserves_absolute_anomaly_scale(tmp_path: Path) -> None:
+    """Low-amplitude normal maps must not be stretched to the full color range."""
+    crop = tmp_path / "crop.png"
+    assert cv2.imwrite(str(crop), np.zeros((64, 64, 3), dtype=np.uint8))
+    low_map = np.array([[0.0, 0.05], [0.1, 0.05]], dtype=np.float32)
+    high_map = low_map * 10
+    low_path = tmp_path / "low.png"
+    high_path = tmp_path / "high.png"
+
+    _write_patchcore_overlay(crop, low_map, low_path, score=0.1)
+    _write_patchcore_overlay(crop, high_map, high_path, score=0.1)
+
+    low_overlay = cv2.imread(str(low_path), cv2.IMREAD_COLOR)
+    high_overlay = cv2.imread(str(high_path), cv2.IMREAD_COLOR)
+    assert low_overlay is not None
+    assert high_overlay is not None
+    assert not np.array_equal(low_overlay, high_overlay)
+
+
 @pytest.mark.parametrize("invalid_value", [float("nan"), float("inf"), float("-inf")])
 def test_patchcore_mask_rejects_nonfinite_raw_map(invalid_value: float) -> None:
     """Lossless raw maps must never silently repair NaN or infinity values."""
@@ -484,6 +556,64 @@ def test_anomalib_backend_persists_unscaled_raw_map_and_binary_mask(tmp_path: Pa
     assert set(np.unique(saved_mask)) <= {0, 255}
 
 
+def test_patchcore_predict_all_overlaps_write_and_surfaces_one_writer_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A blocked writer must not prevent the next view's model inference from starting."""
+    views = ("front", "front_left")
+    crops: dict[str, Path] = {}
+    writer_started = threading.Event()
+    release_writer = threading.Event()
+
+    class _Engine:
+        def __init__(self, view: str) -> None:
+            self.view = view
+
+        def predict(self, **_kwargs: object) -> list[SimpleNamespace]:
+            if self.view == "front_left":
+                assert writer_started.wait(timeout=2)
+                release_writer.set()
+            crop = crops[self.view]
+            return [
+                SimpleNamespace(
+                    image_path=crop,
+                    pred_score=0.4,
+                    anomaly_map=np.arange(4, dtype=np.float32).reshape(2, 2),
+                    pred_mask=None,
+                ),
+            ]
+
+    for index, view in enumerate(views):
+        crop = tmp_path / f"{view}.png"
+        assert cv2.imwrite(str(crop), np.full((5, 6, 3), index * 20, dtype=np.uint8))
+        crops[view] = crop
+
+    original_persist = AnomalibPatchcoreBackend._persist_prediction
+
+    def _blocked_persist(prepared: object) -> float:
+        evidence = getattr(prepared, "evidence")
+        if evidence.evidence_path.stem == "front":
+            writer_started.set()
+            assert release_writer.wait(timeout=2)
+            raise OSError("simulated PatchCore writer failure")
+        return original_persist(prepared)
+
+    monkeypatch.setattr(AnomalibPatchcoreBackend, "_persist_prediction", staticmethod(_blocked_persist))
+    backend = AnomalibPatchcoreBackend.__new__(AnomalibPatchcoreBackend)
+    backend.engines = {view: _Engine(view) for view in views}
+    backend.models = {view: object() for view in views}
+    backend.timing = None
+
+    results = backend.predict_all(crops, tmp_path / "evidence")
+
+    assert tuple(results) == views
+    assert isinstance(results["front"], OSError)
+    assert isinstance(results["front_left"], ModelEvidence)
+    assert not (tmp_path / "evidence" / "front.png").exists()
+    assert (tmp_path / "evidence" / "front_left.png").is_file()
+
+
 def test_load_runtime_config_rejects_checkpoint_hash_mismatch(tmp_path: Path) -> None:
     """A changed checkpoint must invalidate the model bundle."""
     config_path, checkpoints = _write_fixture(tmp_path)
@@ -512,6 +642,8 @@ def test_runtime_writes_continuous_evidence_and_never_returns_ok_without_thresho
     assert len(patchcore.calls) == len(VIEWS)
     assert len(yolo.calls) == 1
     assert tuple(yolo.calls[0]) == VIEWS
+    assert all(isinstance(crop, np.ndarray) for crop in yolo.calls[0].values())
+    assert not (output_dir / "crops" / "yolo").exists()
     with (output_dir / "patchcore.csv").open(encoding="utf-8", newline="") as file:
         patchcore_rows = list(csv.DictReader(file))
     with (output_dir / "yolo.csv").open(encoding="utf-8", newline="") as file:
@@ -537,6 +669,106 @@ def test_runtime_writes_continuous_evidence_and_never_returns_ok_without_thresho
     assert manifest["views"]["front"]["patchcore"]["mask_shape"] == [5, 6]
     assert Path(manifest["views"]["front"]["patchcore"]["raw_anomaly_map_path"]).is_file()
     assert Path(manifest["views"]["front"]["patchcore"]["mask_path"]).is_file()
+
+
+def test_runtime_hashes_each_archived_source_once_and_keeps_an_independent_copy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Source publication remains immutable while branch rows reuse its one digest."""
+    config_path, _ = _write_fixture(tmp_path)
+    images = _write_images(tmp_path)
+    config = load_runtime_config(config_path)
+    hashed_paths: list[Path] = []
+    original_sha256_file = runtime_module.sha256_file
+
+    def _record_sha(path: Path) -> str:
+        hashed_paths.append(path.resolve())
+        return original_sha256_file(path)
+
+    monkeypatch.setattr(runtime_module, "sha256_file", _record_sha)
+    output_dir = tmp_path / "source-cache"
+    runtime = ZS32ModelRuntime(config, patchcore_backend=_PatchcoreBackend(), yolo_backend=_YoloBackend())
+
+    runtime.run(InspectionRequest("part-001", "session-001", "group-001", "right", images), output_dir)
+
+    archived_sources = {path.resolve() for path in (output_dir / "sources").glob("*.png")}
+    assert len(archived_sources) == len(VIEWS)
+    archived_hashes = [path for path in hashed_paths if path.parent.name == "sources"]
+    assert len(archived_hashes) == len(VIEWS)
+    assert {path.name for path in archived_hashes} == {path.name for path in archived_sources}
+    before = {path.name: path.read_bytes() for path in archived_sources}
+    images["front"].write_bytes(b"changed-after-publication")
+    assert {path.name: path.read_bytes() for path in archived_sources} == before
+
+
+def test_runtime_skips_secondary_patchcore_but_keeps_eight_view_yolo(tmp_path: Path) -> None:
+    """The 20-group runtime must not execute or emit CSV rows for secondary PatchCore."""
+    config_path, _ = _write_fixture(tmp_path)
+    images = _write_images(tmp_path)
+    patchcore = _PatchcoreBackend()
+    yolo = _YoloBackend()
+    runtime = ZS32ModelRuntime(load_runtime_config(config_path), patchcore_backend=patchcore, yolo_backend=yolo)
+    output_dir = tmp_path / "output-20"
+
+    runtime.run(
+        InspectionRequest("part-001", "session-001", "group-001", "right", images),
+        output_dir,
+        skip_patchcore_views={"front_secondary", "back_secondary"},
+    )
+
+    expected_patchcore = [view for view in VIEWS if not view.endswith("secondary")]
+    assert [view for view, _shape in patchcore.calls] == expected_patchcore
+    assert len(yolo.calls) == 1
+    assert tuple(yolo.calls[0]) == VIEWS
+    with (output_dir / "patchcore.csv").open(encoding="utf-8", newline="") as file:
+        rows = list(csv.DictReader(file))
+    assert [row["view"] for row in rows] == expected_patchcore
+    manifest = json.loads((output_dir / "runtime_manifest.json").read_text(encoding="utf-8"))
+    for view in ("front_secondary", "back_secondary"):
+        branch = manifest["views"][view]["branches"]["patchcore"]
+        assert branch["state"] == "skipped"
+        assert branch["status"] == "SKIPPED"
+        assert branch["score"] is None
+
+
+def test_runtime_converts_batch_patchcore_orchestration_failure_to_six_view_errors(tmp_path: Path) -> None:
+    """A batch orchestration failure must remain fail-closed without suppressing YOLO."""
+
+    class _RaisingBatchPatchcore(_PatchcoreBackend):
+        @staticmethod
+        def predict_all(
+            _crops: Mapping[str, Path],
+            _evidence_dir: Path,
+            *,
+            diagnostic_mask_threshold: float = 0.65,
+        ) -> dict[str, ModelEvidence | Exception]:
+            del diagnostic_mask_threshold
+            raise RuntimeError("simulated batch orchestration failure")
+
+    config_path, _ = _write_fixture(tmp_path)
+    images = _write_images(tmp_path)
+    yolo = _YoloBackend()
+    output_dir = tmp_path / "batch-orchestration-error"
+    runtime = ZS32ModelRuntime(
+        load_runtime_config(config_path),
+        patchcore_backend=_RaisingBatchPatchcore(),
+        yolo_backend=yolo,
+    )
+
+    result = runtime.run(
+        InspectionRequest("part-001", "session-001", "group-001", "right", images),
+        output_dir,
+        skip_patchcore_views={"front_secondary", "back_secondary"},
+    )
+
+    assert result.inspection_complete is False
+    assert len(yolo.calls) == 1
+    with (output_dir / "patchcore.csv").open(encoding="utf-8", newline="") as stream:
+        rows = list(csv.DictReader(stream))
+    assert len(rows) == 6
+    assert all(row["status"] == "ERROR" for row in rows)
+    assert len(list((output_dir / "evidence" / "patchcore").glob("*.error.json"))) == 6
 
 
 def test_runtime_manifest_is_directly_parseable_with_truthful_four_branch_records(tmp_path: Path) -> None:
@@ -642,6 +874,80 @@ def test_stage32_fuse_replaces_skipped_fusion_with_real_parseable_evidence(tmp_p
         assert view.branches["fusion"].status == "OK"
         assert view.branches["fusion"].score is None
         assert view.branches["fusion"].evidence_path == fusion_csv.resolve()
+
+
+def test_stage18_audit_rewrites_patchcore_dashboard_statuses_and_preserves_secondary_skip(tmp_path: Path) -> None:
+    """Dashboard status must reflect Stage18 CLEAR/GRAY/STRONG instead of generic availability."""
+    config_path, _ = _write_fixture(tmp_path)
+    images = _write_images(tmp_path)
+    output_dir = tmp_path / "strict-fuse-decisions"
+    runtime = ZS32ModelRuntime(
+        load_runtime_config(config_path),
+        patchcore_backend=_PatchcoreBackend(),
+        yolo_backend=_YoloBackend(),
+    )
+    runtime.run(
+        InspectionRequest("part-001", "session-001", "group-001", "right", images),
+        output_dir,
+        skip_patchcore_views={"front_secondary", "back_secondary"},
+    )
+    fusion_dir = output_dir / "fusion"
+    audit_dir = fusion_dir / "audit"
+    audit_dir.mkdir(parents=True)
+    (fusion_dir / "fused_predictions.csv").write_text(
+        "part_id,final_status\npart-001,NG_ANOMALY\n",
+        encoding="utf-8",
+    )
+    levels = {"front": "CLEAR", "front_left": "GRAY", "back_right": "STRONG"}
+    runtime_manifest = json.loads((output_dir / "runtime_manifest.json").read_text(encoding="utf-8"))
+    audit_views = {}
+    for view in VIEWS:
+        if view.endswith("secondary"):
+            audit_views[view] = []
+            continue
+        level = levels.get(view, "CLEAR")
+        score = runtime_manifest["views"][view]["branches"]["patchcore"]["score"]
+        low, high = {
+            "CLEAR": (score + 0.1, score + 0.2),
+            "GRAY": (score - 0.1, score + 0.1),
+            "STRONG": (score - 0.2, score - 0.1),
+        }[level]
+        audit_views[view] = [
+            {
+                "branch": f"anomaly_{view}",
+                "computed_evidence_level": level,
+                "score": score,
+                "low_threshold": low,
+                "high_threshold": high,
+                "pred_label": int(level == "STRONG"),
+            },
+        ]
+    (audit_dir / "part-001.json").write_text(json.dumps({"views": audit_views}), encoding="utf-8")
+    stage32 = cast("object", _load_stage32("stage32_patchcore_status_writeback"))
+
+    stage32._update_runtime_manifest_after_fusion(  # type: ignore[attr-defined]
+        output_dir,
+        {
+            "machine_status": "NG_ANOMALY",
+            "inspection_complete": True,
+            "strict_fusion": True,
+            "fusion_profile": "zs32-right-20-commissioning",
+            "commissioning_only": True,
+            "production_release_allowed": False,
+            "fusion_output": str(fusion_dir),
+            "reason": "back_right PatchCore is strong",
+        },
+    )
+
+    parsed = load_inspection_result(output_dir)
+    by_view = {view.view: view.branches["patchcore"] for view in parsed.views}
+    assert by_view["front"].state is BranchState.AVAILABLE
+    assert by_view["front"].status == "CLEAR"
+    assert by_view["front_left"].status == "REVIEW"
+    assert by_view["back_right"].status == "NG_ANOMALY"
+    for view in ("front_secondary", "back_secondary"):
+        assert by_view[view].state is BranchState.SKIPPED
+        assert by_view[view].status == "SKIPPED"
 
 
 @pytest.mark.parametrize("fault", ["missing", "not_file", "outside"])

@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "mode": "demo",
+  "patchcore_process_count": 8,
+  "topology": "configs/zs32/topology/zs32_4cam_double_side_v1.json",
+  "roi_config": "dataset/zs32_all_plus_0723_retraining_release_v2/roi_config.json",
+  "models": {
+    "template_dir": "results/zs32_template_gate_right_0727_plus_defect_eight_view_v14",
+    "patchcore": {
+      "front": "results/zs32_patchcore_eight_view_0727_plus_defect_seed42_v14/right_front/runs/right_front/patchcore_wrn_l23_s256_r005_k9_fp32_bs16_fpr005_seed42/Patchcore/zs32_right_front/right_front/v0/weights/lightning/model.ckpt",
+      "front_left": "results/zs32_patchcore_eight_view_0727_plus_defect_seed42_v14/right_front_left/runs/right_front_left/patchcore_wrn_l23_s256_r005_k9_fp32_bs16_fpr005_seed42/Patchcore/zs32_right_front_left/right_front_left/v0/weights/lightning/model.ckpt",
+      "front_right": "results/zs32_patchcore_eight_view_0727_plus_defect_seed42_v14/right_front_right/runs/right_front_right/patchcore_wrn_l23_s256_r005_k9_fp32_bs16_fpr005_seed42/Patchcore/zs32_right_front_right/right_front_right/v0/weights/lightning/model.ckpt",
+      "front_secondary": "results/zs32_patchcore_eight_view_0727_plus_defect_seed42_v14/right_front_secondary/runs/right_front_secondary/patchcore_wrn_l23_s256_r005_k9_fp32_bs16_fpr005_seed42/Patchcore/zs32_right_front_secondary/right_front_secondary/v0/weights/lightning/model.ckpt",
+      "back": "results/zs32_patchcore_eight_view_0727_plus_defect_seed42_v14/right_back/runs/right_back/patchcore_wrn_l23_s256_r005_k9_fp32_bs16_fpr005_seed42/Patchcore/zs32_right_back/right_back/v0/weights/lightning/model.ckpt",
+      "back_left": "results/zs32_patchcore_eight_view_0727_plus_defect_seed42_v14/right_back_left/runs/right_back_left/patchcore_wrn_l23_s256_r005_k9_fp32_bs16_fpr005_seed42/Patchcore/zs32_right_back_left/right_back_left/v0/weights/lightning/model.ckpt",
+      "back_right": "results/zs32_patchcore_eight_view_0727_plus_defect_seed42_v14/right_back_right/runs/right_back_right/patchcore_wrn_l23_s256_r005_k9_fp32_bs16_fpr005_seed42/Patchcore/zs32_right_back_right/right_back_right/v0/weights/lightning/model.ckpt",
+      "back_secondary": "results/zs32_patchcore_eight_view_0727_plus_defect_seed42_v14/right_back_secondary/runs/right_back_secondary/patchcore_wrn_l23_s256_r005_k9_fp32_bs16_fpr005_seed42/Patchcore/zs32_right_back_secondary/right_back_secondary/v0/weights/lightning/model.ckpt"
+    },
+    "yolo": {
+      "weights": "results/yolo/zs32_all_plus_0723_normal_n1280_seed42_v11/weights/best.pt",
+      "imgsz": 1280,
+      "candidate_conf": 0.001
+    }
+  },
+  "thresholds": {
+    "template": {
+      "front": 0.032784421443939209,
+      "front_left": 0.03422431707382202,
+      "front_right": 0.033634672164917,
+      "front_secondary": 0.03163009166717529,
+      "back": 0.027854928970336914,
+      "back_left": 0.03238605976104736,
+      "back_right": 0.04661347150802612,
+      "back_secondary": 0.0412694239616394
+    },
+    "patchcore": {
+      "front": 0.5000116217136383,
+      "front_left": 0.4211932897567749,
+      "front_right": 0.365172829627990723,
+      "front_secondary": 0.4191740334033966,
+      "back": 0.4475995540618896,
+      "back_left": 0.41428269743919373,
+      "back_right": 0.42657169342041016,
+      "back_secondary": 0.50668842792511
+    },
+    "yolo": {
+      "front": 0.07,
+      "front_left": 0.07,
+      "front_right": 0.07,
+      "front_secondary": 0.07,
+      "back": 0.07,
+      "back_left": 0.07,
+      "back_right": 0.07,
+      "back_secondary": 0.07
+    }
+  }
+}

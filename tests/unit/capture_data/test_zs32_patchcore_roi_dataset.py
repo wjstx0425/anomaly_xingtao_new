@@ -43,7 +43,7 @@ def _load_stage30() -> ModuleType:
 
 
 def _complete_config() -> dict[str, object]:
-    """Return a valid 12-ROI configuration payload."""
+    """Return a valid two-hand, eight-view configuration payload."""
     return {
         "schema_version": 1,
         "coordinate_system": "pixel_xyxy_half_open",
@@ -116,7 +116,7 @@ def _complete_readable_tree(dataset_root: Path) -> dict[tuple[str, str], Path]:
     return paths
 
 
-def test_config_loads_complete_12_roi_payload_without_mutating_it(tmp_path: Path) -> None:
+def test_config_loads_complete_roi_payload_without_mutating_it(tmp_path: Path) -> None:
     """A complete two-hand configuration returns typed ROIs and the original payload."""
     config_path = tmp_path / "rois.json"
     expected_payload = _complete_config()
@@ -129,6 +129,25 @@ def test_config_loads_complete_12_roi_payload_without_mutating_it(tmp_path: Path
     assert set(rois) == {"right", "left"}
     assert all(set(rois[hand]) == set(VIEWS) for hand in HANDS)
     assert payload == expected_payload
+
+
+def test_config_loads_stage29_top_level_views_for_right_hand(tmp_path: Path) -> None:
+    """The eight-view Stage 29 config is reusable for a right-only Stage 30 conversion."""
+    payload = _complete_config()
+    hands = payload.pop("hands")
+    assert isinstance(hands, dict)
+    right = hands["right"]
+    assert isinstance(right, dict)
+    payload["views"] = right["views"]
+    config_path = tmp_path / "rois.json"
+    _write_config(config_path, payload)
+
+    width, height, rois, loaded = load_patchcore_roi_config(config_path, hands=("right",))
+
+    assert (width, height) == (40, 30)
+    assert set(rois) == {"right"}
+    assert set(rois["right"]) == set(VIEWS)
+    assert loaded == payload
 
 
 @pytest.mark.parametrize(
@@ -154,7 +173,7 @@ def test_config_rejects_missing_or_extra_hands(tmp_path: Path, hands: set[str], 
 
 @pytest.mark.parametrize("extra", [False, True])
 def test_config_rejects_missing_or_extra_views(tmp_path: Path, extra: bool) -> None:
-    """Each hand must contain exactly the six canonical views."""
+    """Each hand must contain exactly the eight canonical views."""
     payload = _complete_config()
     hands = payload["hands"]
     assert isinstance(hands, dict)
@@ -281,6 +300,24 @@ def test_discovery_returns_frozen_records_in_stable_order_and_accepts_uppercase_
         records[0].hand = "left"  # type: ignore[misc]
 
 
+def test_discovery_supports_right_only_and_excludes_complete_sessions(tmp_path: Path) -> None:
+    """Right-only discovery neither requires left normals nor emits an excluded session."""
+    dataset_root = tmp_path / "dataset"
+    for view in VIEWS:
+        _add_image(dataset_root, hand="right", view=view, session_id="keep")
+        _add_image(dataset_root, hand="right", view=view, session_id="duplicate", stem_tail="duplicate")
+
+    records = discover_patchcore_images(
+        dataset_root,
+        hands=("right",),
+        excluded_session_ids=("duplicate",),
+    )
+
+    assert len(records) == len(VIEWS)
+    assert {record.hand for record in records} == {"right"}
+    assert {record.session_id for record in records} == {"keep"}
+
+
 def test_discovery_uses_longest_view_prefix_and_extracts_identity(tmp_path: Path) -> None:
     """Compound views, labels, defect types, sessions, and relative tails are preserved."""
     dataset_root = tmp_path / "dataset"
@@ -353,7 +390,7 @@ def test_discovery_uses_parent_view_for_normal_completeness(tmp_path: Path) -> N
 
 
 def test_discovery_rejects_unknown_filename_view_prefix(tmp_path: Path) -> None:
-    """Every image filename must identify one of the six canonical views."""
+    """Every image filename must identify one of the eight canonical views."""
     dataset_root = tmp_path / "dataset"
     _complete_discovery_tree(dataset_root)
     source_path = dataset_root / "right/front/normal/session/images/right_side_normal_001.png"
@@ -418,7 +455,7 @@ def test_discovery_keeps_same_filename_in_different_source_views_separate(tmp_pa
     ]
 
 
-def test_selection_reuses_existing_rois_and_atomically_writes_all_12_entries(
+def test_selection_reuses_existing_rois_and_atomically_writes_all_entries(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -479,18 +516,19 @@ def test_selection_reuses_existing_rois_and_atomically_writes_all_12_entries(
     expected_order = [(hand, view) for hand in HANDS for view in VIEWS]
     assert unreadable_first < selected_images[("right", "front")]
     assert [call[0] for call in selection_calls] == [selected_images[pair] for pair in expected_order]
-    assert [call[1] for call in selection_calls] == [(1, 2, 20, 25)] * 12
-    assert [call[2:] for call in selection_calls] == [(800, 600)] * 12
+    pair_count = len(HANDS) * len(VIEWS)
+    assert [call[1] for call in selection_calls] == [(1, 2, 20, 25)] * pair_count
+    assert [call[2:] for call in selection_calls] == [(800, 600)] * pair_count
     assert [call[0].name for call in overlay_calls] == [f"{hand}_{view}_roi.png" for hand, view in expected_order]
-    assert [call[1] for call in overlay_calls] == [(30, 40, 3)] * 12
-    assert [call[2] for call in overlay_calls] == [(index, 1, index + 10, 20) for index in range(12)]
+    assert [call[1] for call in overlay_calls] == [(30, 40, 3)] * pair_count
+    assert [call[2] for call in overlay_calls] == [(index, 1, index + 10, 20) for index in range(pair_count)]
     assert replace_calls == [(config_path.with_suffix(".json.tmp"), config_path)]
     assert not config_path.with_suffix(".json.tmp").exists()
     assert json.loads(config_path.read_text(encoding="utf-8")) == payload
     assert payload["image_size"] == {"width": 40, "height": 30}
     hands_payload = payload["hands"]
     assert isinstance(hands_payload, dict)
-    assert sum(len(hand_payload["views"]) for hand_payload in hands_payload.values()) == 12
+    assert sum(len(hand_payload["views"]) for hand_payload in hands_payload.values()) == pair_count
     for index, (hand, view) in enumerate(expected_order):
         view_payload = hands_payload[hand]["views"][view]
         assert view_payload == {
@@ -503,7 +541,7 @@ def test_selection_rejects_reference_size_mismatch_before_opening_selector(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """All 12 normal reference images must share one source size before selection starts."""
+    """All normal reference images must share one source size before selection starts."""
     dataset_root = tmp_path / "dataset"
     for hand in HANDS:
         for view in VIEWS:
@@ -542,6 +580,41 @@ def test_preflight_rejects_unreadable_image_without_creating_output(tmp_path: Pa
 
     assert not output_root.exists()
     assert not list(dataset_root.glob(".cropped.*"))
+
+
+def test_right_only_conversion_accepts_nested_dataset_and_stage29_config(tmp_path: Path) -> None:
+    """Stage 30 can crop nested right-only data with the eight-view Stage 29 ROI file."""
+    repo_root = tmp_path
+    dataset_root = repo_root / "dataset/zs32_new"
+    for view in CANONICAL_VIEWS:
+        retained = _add_image(dataset_root, hand="right", view=view, session_id="keep")
+        excluded = _add_image(dataset_root, hand="right", view=view, session_id="duplicate", stem_tail="duplicate")
+        _write_test_image(retained)
+        _write_test_image(excluded)
+    payload = {
+        "schema_version": 1,
+        "coordinate_system": "pixel_xyxy_half_open",
+        "image_size": {"width": 40, "height": 30},
+        "views": {view: {"roi": [1, 2, 20, 25]} for view in CANONICAL_VIEWS},
+    }
+    config_path = repo_root / "dataset/zs32_eight_view_roi_config.json"
+    _write_config(config_path, payload)
+    output_root = repo_root / "dataset/zs32_eight_view_patchcore_roi"
+
+    result = roi_dataset.crop_patchcore_dataset(
+        repo_root,
+        dataset_root,
+        output_root,
+        config_path,
+        hands=("right",),
+        expected_views=CANONICAL_VIEWS,
+        excluded_session_ids=("duplicate",),
+    )
+
+    assert result["total_images"] == len(CANONICAL_VIEWS)
+    assert len(list((output_root / "right").rglob("*.png"))) == len(CANONICAL_VIEWS)
+    manifest = (output_root / "crop_manifest.csv").read_text(encoding="utf-8")
+    assert "duplicate" not in manifest
 
 
 def test_preflight_rejects_image_size_mismatch_without_creating_output(tmp_path: Path) -> None:
@@ -723,7 +796,8 @@ def test_conversion_shows_visible_progress_for_all_images(
         config_path,
     )
 
-    assert calls == [(12, "Checking images"), (12, "Cropping images")]
+    image_count = len(HANDS) * len(VIEWS)
+    assert calls == [(image_count, "Checking images"), (image_count, "Cropping images")]
 
 
 def test_conversion_preserves_pixels_hierarchy_extensions_and_writes_complete_metadata(tmp_path: Path) -> None:
@@ -774,8 +848,9 @@ def test_conversion_preserves_pixels_hierarchy_extensions_and_writes_complete_me
 
     assert result["output_root"] == output_root
     assert result["manifest_path"] == output_root / "crop_manifest.csv"
-    assert result["total_images"] == 14
-    assert result["output_images"] == 14
+    expected_count = len(HANDS) * len(VIEWS) + 2
+    assert result["total_images"] == expected_count
+    assert result["output_images"] == expected_count
     assert result["corrected_views"] == 0
     assert result["cleanup_warning"] == ""
     assert result["backup_path"] == ""
@@ -791,7 +866,7 @@ def test_conversion_preserves_pixels_hierarchy_extensions_and_writes_complete_me
 
     with (output_root / "crop_manifest.csv").open(newline="", encoding="utf-8") as file:
         rows = list(csv.DictReader(file))
-    assert len(rows) == 14
+    assert len(rows) == expected_count
     assert set(rows[0]) == {
         "source_path",
         "output_path",
@@ -839,8 +914,8 @@ def test_conversion_preserves_pixels_hierarchy_extensions_and_writes_complete_me
     assert json.loads((output_root / "roi_config.json").read_text(encoding="utf-8")) == payload
 
     expected_summary = {
-        "total_images": 14,
-        "output_images": 14,
+        "total_images": expected_count,
+        "output_images": expected_count,
         "corrected_views": 0,
         "by_hand_view": {
             hand: {
@@ -973,8 +1048,9 @@ def test_backup_cleanup_failure_keeps_committed_output_and_reports_backup(
         overwrite=True,
     )
 
-    assert result["total_images"] == 12
-    assert result["output_images"] == 12
+    expected_count = len(HANDS) * len(VIEWS)
+    assert result["total_images"] == expected_count
+    assert result["output_images"] == expected_count
     assert "simulated backup cleanup failure" in result["cleanup_warning"]
     backup_path = Path(result["backup_path"])
     assert backup_path.is_dir()
@@ -983,7 +1059,7 @@ def test_backup_cleanup_failure_keeps_committed_output_and_reports_backup(
     assert (output_root / "crop_manifest.csv").is_file()
     assert (output_root / "roi_config.json").is_file()
     assert (output_root / "summary.json").is_file()
-    assert len(list(output_root.rglob("*.png"))) == 12
+    assert len(list(output_root.rglob("*.png"))) == expected_count
 
 
 def test_stage30_parser_uses_repo_local_defaults() -> None:
@@ -995,10 +1071,10 @@ def test_stage30_parser_uses_repo_local_defaults() -> None:
     convert_args = stage30.build_parser().parse_args(["convert"])
 
     assert select_args.dataset_root == dataset_root
-    assert select_args.config == dataset_root / "zs32_patchcore_roi_config.json"
-    assert select_args.preview_dir == dataset_root / "zs32_patchcore_roi_previews"
+    assert select_args.config == dataset_root / "zs32_eight_view_patchcore_roi_config.json"
+    assert select_args.preview_dir == dataset_root / "zs32_eight_view_patchcore_roi_previews"
     assert convert_args.dataset_root == dataset_root
-    assert convert_args.output_root == dataset_root / "zs32_patchcore_roi"
+    assert convert_args.output_root == dataset_root / "zs32_eight_view_patchcore_roi"
     assert convert_args.overwrite is False
 
 
@@ -1010,7 +1086,9 @@ def test_stage30_select_and_convert_delegate_and_print_results(
     """Stage 30 delegates both commands and reports ROI and conversion results."""
     stage30 = _load_stage30()
     payload = {
-        "hands": {hand: {"views": {view: {"roi": [1, 2, 20, 25]} for view in VIEWS}} for hand in HANDS},
+        "hands": {
+            hand: {"views": {view: {"roi": [1, 2, 20, 25]} for view in CANONICAL_VIEWS}} for hand in HANDS
+        },
     }
     calls: list[tuple[str, dict[str, object]]] = []
 
@@ -1032,20 +1110,33 @@ def test_stage30_select_and_convert_delegate_and_print_results(
     monkeypatch.setattr(stage30, "select_patchcore_rois", fake_select)
     monkeypatch.setattr(stage30, "crop_patchcore_dataset", fake_convert)
 
-    stage30.main(["select", "--dataset-root", str(tmp_path / "dataset")])
+    stage30.main(["select", "--dataset-root", str(tmp_path / "dataset"), "--hand", "right"])
     select_output = capsys.readouterr().out
-    stage30.main(["convert", "--dataset-root", str(tmp_path / "dataset"), "--overwrite"])
+    stage30.main(
+        [
+            "convert",
+            "--dataset-root",
+            str(tmp_path / "dataset"),
+            "--hand",
+            "right",
+            "--exclude-session",
+            "duplicate-session",
+            "--overwrite",
+        ],
+    )
     convert_output = capsys.readouterr().out
 
-    assert len([line for line in select_output.splitlines() if "[1, 2, 20, 25]" in line]) == 12
+    assert len([line for line in select_output.splitlines() if "[1, 2, 20, 25]" in line]) == len(CANONICAL_VIEWS)
     assert "Images: 12 -> 12" in convert_output
     assert "Corrected views: 2" in convert_output
     assert "WARNING: old backup kept" in convert_output
     assert calls[0][0] == "select"
     assert calls[1][0] == "convert"
     assert calls[1][1]["overwrite"] is True
-
-
+    assert calls[1][1]["hands"] == ("right",)
+    assert calls[0][1]["expected_views"] == CANONICAL_VIEWS
+    assert calls[1][1]["expected_views"] == CANONICAL_VIEWS
+    assert calls[1][1]["excluded_session_ids"] == ("duplicate-session",)
 def test_legacy_six_view_roi_config_replays_by_default(tmp_path: Path) -> None:
     payload = {
         "schema_version": 1,
