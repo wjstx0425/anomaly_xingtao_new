@@ -760,13 +760,14 @@ def capture_sample(
     sample_id = f"{args.part_id}_{group_id}_{image_index:06d}"
     rows: list[dict[str, str]] = []
     current_round = "front"
+    hand_part = "左手件" if args.hand == "left" else "右手件"
     try:
         for current_round in ("front", "back"):
             if prompt is not None:
                 prompt_text = (
-                    "放好 ZS32 左手件正面后按 Enter 或 s..."
+                    f"放好 ZS32 {hand_part}正面后按 Enter 或 s..."
                     if current_round == "front"
-                    else "将同一个 ZS32 左手件翻到背面后按 Enter 或 s..."
+                    else f"将同一个 ZS32 {hand_part}翻到背面后按 Enter 或 s..."
                 )
                 prompt(prompt_text)
             results = capture_round(handles, adapter, args, pacer)
@@ -856,9 +857,10 @@ def capture_group(
     image_indices = range(1, args.images_per_group + 1)
     rows_by_index: dict[int, list[dict[str, str]]] = {index: [] for index in image_indices}
     failures: dict[int, tuple[str, Exception]] = {}
+    hand_part = "左手件" if args.hand == "left" else "右手件"
     for round_name, prompt_text in (
-        ("front", "放好 ZS32 左手件正面后按 Enter 或 s..."),
-        ("back", "将同一个 ZS32 左手件翻到背面后按 Enter 或 s..."),
+        ("front", f"放好 ZS32 {hand_part}正面后按 Enter 或 s..."),
+        ("back", f"将同一个 ZS32 {hand_part}翻到背面后按 Enter 或 s..."),
     ):
         if prompt is not None:
             prompt(prompt_text)

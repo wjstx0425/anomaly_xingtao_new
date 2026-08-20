@@ -54,6 +54,10 @@ uv sync
 | `29_zs32_fixed_roi.py` | 选择六视角固定 ROI 并裁剪 YOLO 数据集 | OpenCV 可视化框选，保持原 split 并转换 bbox |
 | `30_crop_zs32_patchcore_dataset.py` | 分别框选左右手六视角 ROI 并裁剪 PatchCore 数据集 | 生成独立裁剪数据，不修改原始图片 |
 | `31_calibrate_zs32_fusion.py` | 离线锁定 ZS32 72 组双阈值 | 输出不可原地覆盖的阈值 bundle 和校准报告 |
+| `32_run_zs32_multimodel_inference.py` | 执行右手六视角模板、PatchCore、YOLO 统一推理 | 单零件真实推理和严格融合入口 |
+| `33_run_zs32_offline_calibration.py` | 批量执行三模型离线联调与 commissioning 标定 | 可恢复批跑、真实 YOLO 标签诊断，不直接生成上线阈值 |
+| `34_publish_zs32_18_group_commissioning.py` | 发布右手 unified-ROI 18 组联调阈值 | 仅模板/PatchCore/YOLO，明确禁止生产放行 |
+| `35_run_zs32_live_commissioning.py` | 真机采集一件右手 ZS32 并执行 18 组联调 | 三相机六视角人工翻面、非生产 commissioning |
 | `train_zs32_template_gate.py` | 训练左右手六视角整图模板门禁 | 输出带双阈值、版本和模板哈希的 12 组模型 |
 | `predict_zs32_template_gate.py` | 执行第一个模板检测项目 | 非 PASS 返回非零退出码并阻止后续检测 |
 
@@ -1724,8 +1728,10 @@ PatchCore 热图和 YOLO 框图。每条 branch 都保留连续 `score`、原图
 --template-model-dir results/zs32_template_gate/v1
 ```
 
-入口会先按 PatchCore ROI 裁图并依次执行六视角模板门禁；任一视角 REVIEW/NG_TEMPLATE/异常都会立即停止，
-PatchCore 和 YOLO 不会加载或执行。六视角全部 PASS 后才继续模型推理，并输出 `template_match.csv`。
+入口会先按 PatchCore ROI 裁图并依次执行六视角模板门禁。正式 `zs32-right` 下任一视角
+REVIEW/NG_TEMPLATE/异常都会立即停止，PatchCore 和 YOLO 不会加载或执行；显式使用
+`zs32-right-18-commissioning` 时，模板 REVIEW 作为 GRAY 证据继续交给 PatchCore/YOLO 兜底，明确
+NG_TEMPLATE 仍然短路。模板证据写入 `template_match.csv`。
 
 收集标定集或独立测试集连续分数时，给每个物理零件增加成对参数：
 
@@ -1775,6 +1781,163 @@ uv run python pipeline/32_run_zs32_multimodel_inference.py fuse \
 INVALID_CAPTURE 或相应 NG。正式 `fuse` 不接受旧 `template_match.csv` 替代本次在线模板门禁；两个 strict
 profile 都会忽略 CSV 自报的 `evidence_level`，按 locked `score/low/high` 重新计算证据等级。原有
 `--profile zs32` 双手 72 组合同保持不变。
+
+#### Unified-ROI 18 组融合联调
+
+尚未准备 quality、registration、geometry 时，不修改或削弱正式 `zs32-right`。Stage 34 将在线模板模型的
+六组阈值、Stage 33 的六组 PatchCore 阈值和六组 YOLO 高精度候选合成独立的 18 组 artifact：
+
+```bash
+uv run --frozen python pipeline/34_publish_zs32_18_group_commissioning.py \
+  --runtime-config /home/yunjing/anomalib/results/zs32_offline_commissioning/runtime_models.local.json \
+  --template-model /home/yunjing/anomalib/results/zs32_template_gate_right_unified_roi_v1/model.json \
+  --template-patchcore-thresholds /home/yunjing/anomalib/results/zs32_offline_calibration_unified_roi_v1/template_patchcore_threshold_calibration/thresholds.json \
+  --yolo-auxiliary-thresholds /home/yunjing/anomalib/results/zs32_offline_calibration_unified_roi_v1/yolo_high_precision_auxiliary/thresholds.json \
+  --output-dir /home/yunjing/anomalib/results/zs32_18group_commissioning_v1 \
+  --commissioning-only
+```
+
+运行 Stage 32 时继续使用 `fuse`，但必须显式选择新 profile；不传 quality/registration/geometry：
+
+```bash
+/home/yunjing/anomalib/.venv/bin/python pipeline/32_run_zs32_multimodel_inference.py fuse \
+  --fusion-profile zs32-right-18-commissioning \
+  --part-id PART_ID \
+  --capture-session SESSION_ID \
+  --group-id GROUP_ID \
+  --hand right \
+  --front-image /absolute/path/front.png \
+  --front-left-image /absolute/path/front_left.png \
+  --front-right-image /absolute/path/front_right.png \
+  --back-image /absolute/path/back.png \
+  --back-left-image /absolute/path/back_left.png \
+  --back-right-image /absolute/path/back_right.png \
+  --runtime-config /home/yunjing/anomalib/results/zs32_offline_commissioning/runtime_models.local.json \
+  --template-model-dir /home/yunjing/anomalib/results/zs32_template_gate_right_unified_roi_v1 \
+  --threshold-artifact /home/yunjing/anomalib/results/zs32_18group_commissioning_v1/thresholds.json \
+  --accelerator gpu --devices 1 --yolo-device 0 \
+  --output-dir /home/yunjing/anomalib/results/zs32_18group_runtime/PART_ID
+```
+
+该 profile 精确要求 `6 views × (template_match + PatchCore + YOLO)=18` 条证据。Stage18 仍校验 profile
+SHA、artifact 双层哈希、模型/ROI/阈值/模板版本、CSV 浮点阈值和源图/证据哈希。联调 OK 只表示这 18 组证据
+完整且 CLEAR；`runtime_summary.json`、`runtime_manifest.json`、`fusion/fusion_policy.json` 和 audit 都会写入
+`commissioning_only=true, production_release_allowed=false`，不能解释为 36 组生产放行。
+
+Stage34 还会拒绝 `calibration_valid=false`、非 `ok` 源记录、YOLO 六视角候选不完整、测试集参与选阈值或
+低于其声明精度下限的候选。Stage32 在加载 GPU 模型前，会把当前 runtime config 与模板 `model.json` 的
+真实 SHA-256 和 artifact 绑定值逐字节核对。模板 REVIEW 只有在分数、双阈值、四类版本和模板证据哈希完整，
+且数值确实位于灰区时才允许继续；模板异常包装出的 REVIEW 会直接短路并保留非生产策略标记。
+
+2026-07-14 的真实 `group038` GPU smoke 位于
+`/home/yunjing/anomalib/results/zs32_18group_smoke/group038`：六视角模板、PatchCore、YOLO 共 18 条证据均
+CLEAR，Stage18 返回 `OK/inspection_complete=true`，无错误；这是 18 组联调成功，不是生产验收。
+修订后同一输入的复跑位于 `/home/yunjing/anomalib/results/zs32_18group_smoke_v2/group038`，结果仍为
+`OK/inspection_complete=true`。
+
+#### Stage 35 真机右手 18 组 commissioning
+
+Stage 35 把一件右手 ZS32 的三相机六视角 HDR 采集和上述 18 组 Stage32/18 联调串成一个终端流程。
+先枚举相机，再开始单件采集：
+
+```bash
+/home/yunjing/anomalib/.venv/bin/python pipeline/35_run_zs32_live_commissioning.py --list-devices
+/home/yunjing/anomalib/.venv/bin/python pipeline/35_run_zs32_live_commissioning.py --part-id live_part_001
+```
+
+操作员会依次看到两个提示：放好右手件正面后按 Enter，采集中央/左侧/右侧三个正面视角；再将同一零件
+翻到背面后按 Enter，采集三个背面视角。入口固定 `hand=right`、`group-count=1`、
+`images-per-group=1`、HDR 短/长曝光 `1500/6000 us`、gain `0`、settle frames `1`。默认相机按 serial
+绑定：中央 `DA9805574`、左侧 `DA9625347`、右侧 `DB0998274`。
+
+默认资产为：
+
+- runtime config：`/home/yunjing/anomalib/results/zs32_offline_commissioning/runtime_models.local.json`；
+- template model：`/home/yunjing/anomalib/results/zs32_template_gate_right_unified_roi_v1`；
+- threshold artifact：`/home/yunjing/anomalib/results/zs32_18group_commissioning_v1/thresholds.json`；
+- PatchCore：`--accelerator gpu --devices 1`；YOLO：`--yolo-device 0`。
+
+采集写入 `/home/yunjing/anomalib/results/zs32_live_capture/<timestamp>_<part-id>/`；通过唯一 complete
+manifest 校验后，推理写入
+`/home/yunjing/anomalib/results/zs32_live_runtime/<capture-session>/<part-id>_group001_000001/`。
+终端会打印 capture manifest、`runtime_summary.json`、输出目录和最终策略字段。完整进入 Stage18 时，还会
+打印六视角各三分支证据表和 `fusion/audit/<sample-id>.json`。
+
+这个入口只运行 template、PatchCore、YOLO 共 18 组，不包含 quality、registration、geometry 或 GUI，
+也不允许切换到生产 36 组 profile。完整融合得到的 `OK`、`NG_*`、`REVIEW` 都是合法业务结果；如果在线模板
+先得到明确 `NG_TEMPLATE`，或模板算子异常得到短路 `REVIEW`，Stage32 会在 PatchCore、YOLO 和 Stage18 前
+停止。这种合法模板短路会打印模板结果，`audit: none`，不会生成 Stage18 audit，不能把它误判为入口崩溃。
+当前源图无法解码或尺寸错误会让 Stage32 非零并由 Stage35 报执行错误，不会伪造 `INVALID_CAPTURE` summary。
+无论哪种业务结果，都必须保持
+`commissioning_only=true, production_release_allowed=false`；Stage35 不能用于生产放行。
+
+### ZS32 右手数据集离线联调与阈值诊断（Stage 33）
+
+`pipeline/33_run_zs32_offline_calibration.py` 在一个进程中常驻六个 PatchCore backend 和一个 YOLO
+backend，按物理零件批量处理模板、PatchCore、YOLO 三类分数。它从原始文件名恢复六视角语义，避免旧
+`crop_manifest.csv` 中少量 `resolved_view` 路由错误污染标定；模板也会对本次正确裁剪后的六张图重新打分，
+不会复用旧 CSV 的模板分数。中断后使用 `--resume` 继续，已完整发布的 case 不会重新加载模型推理。
+
+当前右手 unified-ROI 资产可运行：
+
+```bash
+/home/yunjing/anomalib/.venv/bin/python pipeline/33_run_zs32_offline_calibration.py \
+  --crop-manifest /home/yunjing/anomalib/dataset/zs32_patchcore_roi_yolo/crop_manifest.csv \
+  --template-calibration-csv /home/yunjing/anomalib/results/zs32_template_gate_right_unified_roi_v1/calibration_rows.csv \
+  --template-model-dir /home/yunjing/anomalib/results/zs32_template_gate_right_unified_roi_v1 \
+  --runtime-config /home/yunjing/anomalib/results/zs32_offline_commissioning/runtime_models.local.json \
+  --yolo-dataset-root /home/yunjing/anomalib/dataset/zs32_six_view_roi_yolo \
+  --path-root /home/yunjing/anomalib \
+  --output-dir /home/yunjing/anomalib/results/zs32_offline_calibration_unified_roi_v1 \
+  --commissioning-only \
+  --yolo-aux-min-image-precision 0.90 \
+  --accelerator gpu \
+  --devices 1 \
+  --yolo-device 0
+```
+
+这里使用旧 `/home/yunjing/anomalib/.venv` 是因为运行时需要导入本机 Ultralytics fork；仓库自身的测试和
+静态检查仍使用 `uv`。若输出目录已存在，增加 `--resume`。主要产物为：
+
+- `cases/`：每个物理零件的三模型 CSV、ROI、热图、检测框和运行 manifest；
+- `calibration_rows.csv`：按模板训练合同选出的 99 个物理零件，共 1782 条三模型连续分数；
+- `template_patchcore_threshold_calibration/`：模板与 PatchCore 的 12 组 commissioning 双阈值和留出集指标；
+- `yolo_annotation_calibration_rows.csv`：只使用 ROI YOLO 数据的 `val/test` 真实 bbox 是否存在标签，排除
+  `train`，并把每个 `part/view` 作为独立标定身份；
+- `yolo_annotation_thresholds_by_view/summary.json`：六视角 YOLO 阈值是否退化、真实正负样本量和留出指标；
+- `yolo_high_precision_auxiliary/`：仅由 `val` 选择的六视角 YOLO 图像级高精度候选阈值、`test`
+  评估和整件六视角 OR 指标；只有显式传入 `--yolo-aux-min-image-precision` 才生成；
+- `yolo_runtime_crop_identity.json`：运行时 594 张 YOLO crop 与带标签 ROI 图片逐像素一致的验证结果；
+- `threshold_quality_report.json`：总产物能否用于运行时注入的显式拒绝结论。
+
+`commissioning_run_contract.json` 会绑定 99 个物理零件的原图 SHA-256、label/split、模板模型、runtime
+config、YOLO 标签树和标定参数。每个阈值目录另有 `stage33_publication.json` 绑定输入 CSV 与输出哈希。
+`--resume` 任一合同不一致都会停止，不会把旧 checkpoint、旧标签、旧阈值或已变化的源图静默复用。
+YOLO 还强制同一物理零件的六个视角处于同一 `train/val/test` split，并校验 label 有唯一配对图片及合法 bbox；
+标签 ROI 图片写入 SHA-256 合同，完成推理后还与本次运行时 crop 做逐像素比对。
+`zs32_six_view_yolo` 与 `zs32_six_view_roi_yolo` 的 label stem、split 和是否有框已核对为
+train 1398、val 306、test 306 全部一一对应；阈值标定使用后者，因为本次 YOLO 分数来自 ROI 推理。
+
+Stage 33 固定要求 `--commissioning-only`。当前模板、PatchCore、YOLO 并没有共享一份从训练开始就锁定的
+独立物理零件划分；三模型只覆盖右手 strict profile 的 18/36 组，缺少 quality、registration、geometry。
+因此根目录 `threshold_calibration/thresholds.json` 即使显示算法拟合成功，也不能传给 Stage 32 `fuse`。
+YOLO 的正式阈值只能看真实 bbox 标签产物；若某视角为了满足目标召回率得到零阈值，必须先补数据或改进模型，
+不能把零阈值当作可部署阈值。
+
+旧 `yolo_annotation_thresholds_by_view/` 是“每个视角单分支召回优先”的诊断，因此要求每个视角独立达到目标
+召回；它不适合作为多视角互补系统的唯一验收门槛。新 `yolo_high_precision_auxiliary/` 则把 YOLO 定位为
+高精度强证据：在每个视角的 `val` 行中，只考虑大于零的候选分数，先满足指定的图像级 bbox-presence
+precision，再最大化 recall；`test` 只评估，不参与选阈值。`score >= T_view` 是 YOLO STRONG 候选，未来写入
+完整 locked profile 后会直接触发 `NG_YOLO`；`score < T_view` 只表示 YOLO CLEAR，并不表示整件 OK，漏检仍由
+PatchCore、模板和其他视角兜底。这里的 precision 只检查“有框图片上是否出现高分候选”，不是预测框与 GT 框的
+IoU precision。
+
+当前以 `--yolo-aux-min-image-precision 0.90` 得到的候选阈值为：front `0.380689`、front_left
+`0.880016`、front_right `0.876506`、back `0.025683`、back_left `0.523034`、back_right
+`0.008334`。`val` 六视角整件 OR 为 TP/FP/FN/TN=`4/0/1/8`；留出 `test` 为 `5/0/0/13`，且五个
+被拦截正件都有至少一个“该触发视角自身带 GT 框”的触发，没有靠错误视角误报凑成 TP。每视角正样本仍很少，
+该目录明确标记 `commissioning_only=true`、`runtime_injection_supported=false`，不能直接传给 Stage 32/18；正式
+注入还必须补齐并锁定右手 strict profile 的全部 36 组阈值。
 
 ### ZS32 六视角严格融合
 

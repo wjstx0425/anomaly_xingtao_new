@@ -936,11 +936,11 @@ def test_select_devices_by_serial_rejects_duplicate_enumerated_serials() -> None
         multicam.select_devices_by_serial(multicam.DEFAULT_SERIALS, available)
 
 
-def test_parser_rejects_non_left_hand() -> None:
-    """The first ZS32 release should accept only left-hand samples."""
+def test_parser_rejects_unknown_hand() -> None:
+    """ZS32 capture should accept only left- and right-hand samples."""
     with pytest.raises(SystemExit):
         multicam.build_parser().parse_args(
-            ["--hand", "right", "--label", "normal", "--hdr"]
+            ["--hand", "unknown", "--label", "normal", "--hdr"]
         )
 
 
@@ -1312,6 +1312,26 @@ def test_capture_sample_prompts_before_front_and_back_rounds(
     ]
 
 
+def test_capture_sample_prompts_for_right_hand_part(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both sample placement prompts should identify a right-hand part."""
+    args = make_storage_args(tmp_path, hand="right")
+    paths = multicam.create_session(args, datetime(2026, 7, 11, 12, 34, 56, 8))
+    adapter = FakeAdapter()
+    handles = make_handles(adapter)
+    prompts: list[str] = []
+    monkeypatch.setattr(multicam, "capture_round", lambda *_args, **_kwargs: make_round_results())
+    monkeypatch.setattr(multicam, "save_round", lambda *_args: [])
+    monkeypatch.setattr(multicam, "_write_manifest", lambda *_args: None)
+
+    multicam.capture_sample(handles, adapter, args, paths, "group001", 1, prompt=prompts.append)
+
+    assert len(prompts) == 2
+    assert all("右手件" in prompt for prompt in prompts)
+    assert all("左手件" not in prompt for prompt in prompts)
+
+
 def test_capture_group_prompts_once_and_captures_all_fronts_before_backs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1364,6 +1384,26 @@ def test_capture_group_prompts_once_and_captures_all_fronts_before_backs(
         ("back", "part001_group001_000002", 2),
         ("back", "part001_group001_000003", 3),
     ]
+
+
+def test_capture_group_prompts_for_right_hand_part(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both placement prompts should identify a right-hand part."""
+    args = make_storage_args(tmp_path, hand="right", images_per_group=1)
+    paths = multicam.create_session(args, datetime(2026, 7, 11, 12, 34, 56, 7))
+    adapter = FakeAdapter()
+    handles = make_handles(adapter)
+    prompts: list[str] = []
+    monkeypatch.setattr(multicam, "capture_round", lambda *_args, **_kwargs: make_round_results())
+    monkeypatch.setattr(multicam, "save_round", lambda *_args: [])
+    monkeypatch.setattr(multicam, "_write_manifest", lambda *_args: None)
+
+    multicam.capture_group(handles, adapter, args, paths, "group001", prompt=prompts.append)
+
+    assert len(prompts) == 2
+    assert all("右手件" in prompt for prompt in prompts)
+    assert all("左手件" not in prompt for prompt in prompts)
 
 
 @pytest.mark.parametrize(("manual_load", "expected_prompt_count"), [(False, 0), (True, 4)])

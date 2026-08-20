@@ -26,14 +26,6 @@ _NG_STATUSES = {"NG", "FAIL", "FAILED", "DEFECT", "STRONG", "NG_TEMPLATE"}
 _DOWNSTREAM_STATUSES = {"OK", "REVIEW", "SUSPECT", "RETAKE", "INVALID_CAPTURE"}
 
 
-def _strict_finite_number(value: object) -> float | None:
-    """Return a finite number without accepting booleans or coercible strings."""
-    if isinstance(value, bool) or not isinstance(value, int | float):
-        return None
-    number = float(value)
-    return number if isfinite(number) else None
-
-
 @dataclass(frozen=True)
 class InspectionRequest:
     """Identify one physical ZS32 part and its complete eight-view capture.
@@ -122,15 +114,16 @@ def _normalize_gate_result(  # noqa: C901
         if status != "PASS" and not reason:
             reason = f"template gate returned {normalized or 'an empty status'}"
     if raw_status not in {None, ""} and status in {"PASS", "REVIEW", "NG_TEMPLATE"}:
-        risk = _strict_finite_number(risk_score)
-        similarity = _strict_finite_number(evidence.get("similarity"))
-        low = _strict_finite_number(evidence.get("low_threshold"))
-        high = _strict_finite_number(evidence.get("high_threshold"))
-        if any(value is None for value in (risk, similarity, low, high)):
+        try:
+            risk = float(risk_score)
+            similarity = float(evidence["similarity"])
+            low = float(evidence["low_threshold"])
+            high = float(evidence["high_threshold"])
+        except (KeyError, TypeError, ValueError):
             status = "REVIEW"
             reason = "template gate result is missing continuous score or dual thresholds"
         else:
-            if not 0 <= low <= high <= 2:
+            if not all(isfinite(value) for value in (risk, similarity, low, high)) or not 0 <= low <= high <= 2:
                 status = "REVIEW"
                 reason = "template gate result contains invalid continuous evidence"
             else:

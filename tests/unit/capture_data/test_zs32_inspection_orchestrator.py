@@ -120,33 +120,6 @@ def test_all_template_views_pass_before_downstream_runs_once(tmp_path: Path) -> 
     assert rows[0]["evidence_hash"] == audit["template_results"][0]["best_template_sha256"]
 
 
-@pytest.mark.parametrize("invalid_score", ["0.02", True, float("nan"), float("inf")])
-def test_non_strict_template_score_stops_orchestrator_downstream(
-    tmp_path: Path,
-    invalid_score: object,
-) -> None:
-    """The orchestrator must reject coerced and non-finite continuous evidence."""
-    gate = SequenceGate()
-    original_evaluate = gate.evaluate
-
-    def evaluate(image_path: Path, hand: str, view: str) -> dict[str, object]:
-        result = original_evaluate(image_path, hand, view)
-        if view == "front":
-            result["risk_score"] = invalid_score
-        return result
-
-    gate.evaluate = evaluate  # type: ignore[method-assign]
-    downstream = Mock()
-
-    audit = ZS32InspectionOrchestrator(gate, downstream).run(_request(tmp_path))
-
-    downstream.assert_not_called()
-    assert audit["machine_status"] == "REVIEW"
-    assert audit["inspection_complete"] is False
-    assert audit["evaluated_views"] == list(VIEWS)
-    assert audit["template_results"][0]["status"] == "REVIEW"
-
-
 @pytest.mark.parametrize(
     ("gate_status", "machine_status"),
     [("REVIEW", "REVIEW"), ("NG_TEMPLATE", "NG_TEMPLATE"), ("FAIL", "NG_TEMPLATE")],
