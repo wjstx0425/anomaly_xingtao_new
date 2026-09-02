@@ -1220,3 +1220,68 @@ def test_robustness_benchmark_marks_unpredicted_invalid_as_not_evaluated(tmp_pat
     assert summary["missing_prediction_count"] == 1
     assert summary["not_evaluated_missing_prediction_count"] == 1
     assert "not_evaluated/missing_prediction" in details
+
+
+def test_zs32_classical_benchmark_wrapper_exposes_only_offline_arguments() -> None:
+    """Stage 38 must remain a thin diagnostic-only wrapper."""
+    wrapper = _load_module(
+        "pipeline_zs32_classical_benchmark",
+        "pipeline/38_benchmark_zs32_classical_operators.py",
+    )
+
+    parser = wrapper.build_parser()
+    help_text = parser.format_help()
+
+    expected_options = {
+        "--manifest",
+        "--output-dir",
+        "--view",
+        "--max-normal-per-view",
+        "--max-defect-per-view",
+        "--seed",
+        "--resize-scale",
+        "--warmup-rounds",
+        "--timing-rounds",
+        "--timing-samples-per-view",
+        "--parallel-workers",
+        "--save-overlays",
+        "--no-save-overlays",
+    }
+    assert all(option in help_text for option in expected_options)
+    forbidden_options = {
+        "--stage18",
+        "--runtime-bundle",
+        "--threshold-artifact",
+        "--final-decision",
+        "--dashboard",
+    }
+    assert not any(option in help_text for option in forbidden_options)
+
+
+def test_zs32_classical_benchmark_wrapper_builds_standalone_config(tmp_path: Path) -> None:
+    """Stage 38 should map CLI values directly to its standalone benchmark config."""
+    wrapper = _load_module(
+        "pipeline_zs32_classical_benchmark_config",
+        "pipeline/38_benchmark_zs32_classical_operators.py",
+    )
+    args = wrapper.build_parser().parse_args(
+        [
+            "--manifest",
+            str(tmp_path / "crop_manifest.csv"),
+            "--output-dir",
+            str(tmp_path / "out"),
+            "--view",
+            "front",
+            "--view",
+            "back",
+            "--timing-rounds",
+            "3",
+            "--no-save-overlays",
+        ],
+    )
+
+    config = wrapper.config_from_args(args)
+
+    assert config.views == ("front", "back")
+    assert config.timing_rounds == 3
+    assert config.save_overlays is False

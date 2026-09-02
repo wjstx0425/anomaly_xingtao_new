@@ -2273,3 +2273,11 @@
 - Left candidate weighted thresholds in `front, front_left, front_right, front_secondary` order are `0.010475272808328773`, `0.003943851201103199`, `0.005322204567186717`, and `0.006334702633248857`. Right values are `0.011022074315514753`, `0.0045888184310348586`, `0.01314845384400194`, and `0.006763783384760403`.
 - Thresholds use calibration-normal maximum plus 10%. Final-test is reporting-only: each hand has one false reject in `front` and one in `front_left`, with zero in `front_right` and `front_secondary`. Reports are under each new result root at `calibration/weighted_template_outside05_report.json`.
 - Focused regression passed with 40 tests. CPU replay `bmw_right_normal_retake_group001_000001` using the right candidate produced 25 PASS / 0 NG / 0 ERROR in 9172 ms; its front Template evidence records weights `3.0/0.5` and effective ratio `6.0`. This is saved-image verification; CUDA behavior for the new weighting and live four-camera capture remain unverified.
+
+## ZS32 standalone classical surface-operator prototype (2026-07-26, merged 2026-09-02)
+
+- The prototype code is merged into the current repository, but remains runtime-isolated: it is not connected to Stage 32, Stage 18, Dashboard, v10, model configs, or threshold artifacts.
+- Core code is `capture_data/zs32_classical_operators.py`; offline benchmarking is in `capture_data/zs32_classical_benchmark.py` and `pipeline/38_benchmark_zs32_classical_operators.py`. The operators publish uncalibrated continuous scores, masks, components, and overlays only, never final inspection labels.
+- Historical benchmark artifact `results/zs32_classical_operator_benchmark_v1` used 30 full-resolution ROIs and reported p50 `0.1691 s` for `thin_line`, `0.2429 s` for `pit_spot`, `2.8204 s` for a six-image serial round, and `1.5489 s` for a two-worker round.
+- Visual quality was not accepted: fixed geometry, normal texture, high-contrast hole edges, and angled-view backgrounds produced false evidence. Add per-view material/ignore masks and region-level target labels before considering runtime integration.
+- Detailed limitations and commands are in `docs/ZS32_CLASSICAL_OPERATORS_PROTOTYPE.md`.
