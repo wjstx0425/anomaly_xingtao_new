@@ -146,6 +146,8 @@ def _source_class(raw_root: Path, image_path: Path, view_id: str) -> str:
     tail = parts[view_index + 1 :]
     if tail and tail[0] == "normal":
         return "normal"
+    if len(tail) >= 2 and tail[:2] == ("defect", "defect"):
+        return "others"
     if len(tail) >= 2 and tail[0] == "defect" and tail[1] in SOURCE_CLASSES[1:]:
         return tail[1]
     raise ValueError(f"capture path has unsupported label layout: {image_path}")

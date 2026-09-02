@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import cv2
@@ -62,6 +63,18 @@ def test_plan_has_the_exact_left_normal_stage_order_without_yolo_or_bright_strea
     assert all("yolo" not in step.name and "bright" not in step.name for step in plan)
 
 
+def test_all_normal_train_mode_is_checkpoint_only_until_external_validation(tmp_path: Path) -> None:
+    from bmw_inspection.lab import left_normal_training as training
+
+    config = replace(_config(training, tmp_path), efficientad_all_normal_train=True)
+    plan = training.build_left_normal_plan(config)
+
+    efficientad_step = next(step for step in plan if step.name == "efficientad")
+    assert efficientad_step.parameters["all_normal_train"] is True
+    with pytest.raises(ValueError, match="all-normal.*stage train.*external validation"):
+        training.run_left_normal_training(config, dry_run=True, stage="all")
+
+
 def test_dry_run_refuses_any_non_left_capture_scope_before_gpu_work(tmp_path: Path) -> None:
     from bmw_inspection.lab import left_normal_training as training
 
@@ -70,6 +83,38 @@ def test_dry_run_refuses_any_non_left_capture_scope_before_gpu_work(tmp_path: Pa
 
     with pytest.raises(ValueError, match="capture_scope.*left"):
         training.run_left_normal_training(config, dry_run=True)
+
+
+def test_right_capture_scope_accepts_matching_prepared_release_and_roi(tmp_path: Path) -> None:
+    from bmw_inspection.lab import left_normal_training as training
+
+    config = replace(_config(training, tmp_path), capture_scope="right")
+    manifest = config.prepared_root / "manifests/dataset_manifest.csv"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text("sample_id\n", encoding="utf-8")
+    _write_json(
+        config.prepared_root / "report.json",
+        {"capture_scope": "right", "dataset_id": config.prepared_root.name, "release_status": "published"},
+    )
+    _write_json(
+        config.roi_config,
+        {
+            "schema_version": 1,
+            "coordinate_system": "pixel_xyxy_half_open",
+            "dataset_id": config.prepared_root.name,
+            "source_manifest": str(manifest),
+            "source_manifest_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest(),
+            "representative_sample_id": "right-normal-001",
+            "image_width": 10,
+            "image_height": 10,
+            "part_rois": {view: [0, 0, 10, 10] for view in VIEW_ORDER},
+        },
+    )
+
+    report = training.run_left_normal_training(config, dry_run=True, stage="train")
+
+    assert report["status"] == "dry_run"
+    assert report["capture_scope"] == "right"
 
 
 def test_template_candidate_thresholds_bind_all_eight_model_json_hashes(tmp_path: Path) -> None:

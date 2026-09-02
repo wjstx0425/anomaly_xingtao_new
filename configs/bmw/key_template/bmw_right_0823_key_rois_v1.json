@@ -1,0 +1,89 @@
+{
+  "reference_sample_id": "bmw_right_normal_retake_group001_000001",
+  "views": {
+    "front": [
+      {
+        "id": "roi_01",
+        "roi_xyxy": [
+          977,
+          39,
+          1369,
+          250
+        ]
+      },
+      {
+        "id": "roi_02",
+        "roi_xyxy": [
+          1760,
+          2428,
+          2074,
+          2686
+        ]
+      }
+    ],
+    "front_left": [
+      {
+        "id": "roi_01",
+        "roi_xyxy": [
+          91,
+          99,
+          518,
+          397
+        ]
+      },
+      {
+        "id": "roi_02",
+        "roi_xyxy": [
+          590,
+          2274,
+          954,
+          2566
+        ]
+      }
+    ],
+    "front_right": [
+      {
+        "id": "roi_01",
+        "roi_xyxy": [
+          25,
+          734,
+          370,
+          921
+        ]
+      },
+      {
+        "id": "roi_02",
+        "roi_xyxy": [
+          592,
+          2465,
+          987,
+          2630
+        ]
+      }
+    ],
+    "front_secondary": [
+      {
+        "id": "roi_01",
+        "roi_xyxy": [
+          176,
+          2000,
+          467,
+          2210
+        ]
+      },
+      {
+        "id": "roi_02",
+        "roi_xyxy": [
+          240,
+          0,
+          681,
+          237
+        ]
+      }
+    ],
+    "back": [],
+    "back_left": [],
+    "back_right": [],
+    "back_secondary": []
+  }
+}

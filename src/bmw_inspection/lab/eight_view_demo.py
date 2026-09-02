@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import csv
-import hashlib
 import json
 import math
-import re
 from dataclasses import dataclass
 from enum import Enum
 from numbers import Real
@@ -23,7 +21,7 @@ from bmw_inspection.lab.trusted_ok_reference import TrustedOkMatch
 
 
 class DemoBranch(str, Enum):
-    """The four evidence branches shown by the laboratory Demo."""
+    """Evidence branches shown by the laboratory Demo."""
 
     TEMPLATE = "template"
     BRIGHT_STREAK = "bright_streak"
@@ -141,6 +139,20 @@ class EightViewInspection:
 
 
 @dataclass(frozen=True, slots=True)
+class TemplateWeightedRegionsConfig:
+    """Optional critical-region weighting for the existing Template branch."""
+
+    enabled: bool
+    weight: float
+    outside_weight: float
+    roi_config: Path
+    thresholds: Mapping[str, float]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "thresholds", MappingProxyType(dict(self.thresholds)))
+
+
+@dataclass(frozen=True, slots=True)
 class EightViewDemoConfig:
     """Resolved paths and editable thresholds for one Demo profile."""
 
@@ -149,44 +161,49 @@ class EightViewDemoConfig:
     capture_config: Path
     roi_config: Path
     prepared_manifest: Path
-    training_run: Path
     result_root: Path
     template_models: Mapping[str, Path]
+    template_thresholds: Mapping[str, float]
     efficientad_checkpoints: Mapping[str, Path]
     efficientad_thresholds: Mapping[str, float]
     efficientad_base_thresholds: Mapping[str, float]
     efficientad_threshold_margin: float
-    efficientad_threshold_source_csv: str
-    efficientad_threshold_source_csv_sha256: str
     bright_streak_engine: str
-    bright_streak_config: Path
-    bright_streak_config_sha256: str | None
+    bright_streak_geometry: Mapping[str, float | int]
+    bright_streak_thresholds: Mapping[str, float | int]
     yolo_checkpoint: Path
     yolo_candidate_conf: float
     yolo_final_threshold: float
     yolo_imgsz: int
+    efficientad_threshold_source: str | None = None
+    efficientad_validation_status: str | None = None
+    yolo_ignore_regions: Mapping[str, tuple[tuple[int, int, int, int], ...]] = MappingProxyType({})
     bright_streak_rotated_roi: Path | None = None
-    bright_streak_rotated_roi_sha256: str | None = None
-    bright_streak_weak_row_score_override: float | None = None
     efficientad_ignore_mask_index: Path | None = None
-    efficientad_ignore_mask_index_sha256: str | None = None
-    efficientad_component_filter_artifact: Path | None = None
-    efficientad_component_filter_artifact_sha256: str | None = None
+    efficientad_component_filter_config: Path | None = None
     efficientad_component_policies: Mapping[str, ComponentFilterPolicy] | None = None
     template_ignore_mask_index: Path | None = None
-    template_ignore_mask_index_sha256: str | None = None
-    template_masked_threshold_artifact: Path | None = None
-    template_masked_threshold_artifact_sha256: str | None = None
-    template_masked_thresholds: Mapping[str, float] | None = None
+    template_weighted_regions: TemplateWeightedRegionsConfig | None = None
     trusted_ok_reference_index: Path | None = None
-    trusted_ok_reference_index_sha256: str | None = None
-    trusted_ok_reference_error: str | None = None
     views: tuple[str, ...] = VIEW_ORDER
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "template_models", MappingProxyType(dict(self.template_models)))
+        object.__setattr__(self, "template_thresholds", MappingProxyType(dict(self.template_thresholds)))
         object.__setattr__(self, "efficientad_checkpoints", MappingProxyType(dict(self.efficientad_checkpoints)))
         object.__setattr__(self, "efficientad_thresholds", MappingProxyType(dict(self.efficientad_thresholds)))
+        object.__setattr__(self, "bright_streak_geometry", MappingProxyType(dict(self.bright_streak_geometry)))
+        object.__setattr__(self, "bright_streak_thresholds", MappingProxyType(dict(self.bright_streak_thresholds)))
+        object.__setattr__(
+            self,
+            "yolo_ignore_regions",
+            MappingProxyType(
+                {
+                    view: tuple(tuple(region) for region in regions)
+                    for view, regions in self.yolo_ignore_regions.items()
+                }
+            ),
+        )
         object.__setattr__(
             self,
             "efficientad_base_thresholds",
@@ -198,12 +215,13 @@ class EightViewDemoConfig:
                 "efficientad_component_policies",
                 MappingProxyType(dict(self.efficientad_component_policies)),
             )
-        if self.template_masked_thresholds is not None:
-            object.__setattr__(
-                self,
-                "template_masked_thresholds",
-                MappingProxyType(dict(self.template_masked_thresholds)),
-            )
+
+    @property
+    def shared_ignore_mask_index(self) -> Path | None:
+        """Return the one shared path when Template and EfficientAD use the same mask."""
+        if self.template_ignore_mask_index == self.efficientad_ignore_mask_index:
+            return self.template_ignore_mask_index
+        return None
 
 
 def _immutable_value(value: Any) -> Any:
@@ -323,214 +341,134 @@ def _probability(value: object, name: str) -> float:
     return parsed
 
 
-def _sha256(path: Path) -> str:
-    """Hash one immutable deployment asset."""
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
-def _load_efficientad_thresholds(
-    path: Path,
-    *,
-    expected_component_policy_sha256: str | None = None,
-    expected_mask_index_sha256: str | None = None,
-) -> tuple[Mapping[str, float], Mapping[str, float], float, str, str, Mapping[str, str]]:
-    """Load the Task 3 threshold contract and reject unsafe Demo assets."""
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        raise ValueError(f"无法读取EfficientAD整件阈值资产：{path}: {error}") from error
-    if not isinstance(payload, dict):
-        raise ValueError("EfficientAD整件阈值资产必须是JSON对象")
-    component_binding_expected = expected_component_policy_sha256 is not None
-    if component_binding_expected != (expected_mask_index_sha256 is not None):
-        raise ValueError("EfficientAD component threshold binding配置不完整")
-    if component_binding_expected:
-        if payload.get("score_source") != "accepted_component_max_p95":
-            raise ValueError(
-                "EfficientAD整件阈值资产score_source必须是accepted_component_max_p95"
-            )
-        if payload.get("component_policy_sha256") != expected_component_policy_sha256:
-            raise ValueError("EfficientAD整件阈值资产component_policy_sha256不匹配")
-        if payload.get("mask_index_sha256") != expected_mask_index_sha256:
-            raise ValueError("EfficientAD整件阈值资产mask_index_sha256不匹配")
-    source_csv = payload.get("source_csv")
-    if not isinstance(source_csv, str) or not source_csv.strip():
-        raise ValueError("EfficientAD整件阈值资产source_csv必须是非空字符串")
-    source_csv_sha256 = payload.get("source_csv_sha256")
-    if not isinstance(source_csv_sha256, str) or re.fullmatch(r"[0-9a-f]{64}", source_csv_sha256) is None:
-        raise ValueError("EfficientAD整件阈值资产source_csv_sha256必须是64位小写十六进制")
-    for flag in ("demo_only", "test_used_for_selection"):
-        if payload.get(flag) is not True:
-            raise ValueError(f"EfficientAD整件阈值资产必须显式标记{flag}=true")
-    thresholds = payload.get("thresholds")
-    if not isinstance(thresholds, dict) or set(thresholds) != set(VIEW_ORDER):
-        raise ValueError("EfficientAD整件阈值资产必须按标准顺序覆盖八个视角")
-    if any(isinstance(value, bool) or not isinstance(value, Real) for value in thresholds.values()):
-        raise ValueError("EfficientAD整件阈值必须是有限数值")
-
-    # Reuse the Task 3 threshold contract rather than maintaining a second
-    # numerical validator in the Demo loader.
-    from bmw_inspection.lab.efficientad_thresholds import _validated_thresholds
-
-    try:
-        views, parsed = _validated_thresholds({view: thresholds[view] for view in VIEW_ORDER})
-    except ValueError as error:
-        raise ValueError("EfficientAD整件阈值必须是有限数值") from error
-    if views != VIEW_ORDER:
-        raise ValueError("EfficientAD整件阈值资产必须按标准顺序覆盖八个视角")
-    base_payload = payload.get("base_thresholds")
-    margin_payload = payload.get("threshold_margin")
-    if base_payload is None and margin_payload is None:
-        base_parsed = dict(parsed)
-        margin = 0.0
-    else:
-        if not isinstance(base_payload, dict) or set(base_payload) != set(VIEW_ORDER):
-            raise ValueError("EfficientAD基础阈值必须按标准顺序覆盖八个视角")
-        if isinstance(margin_payload, bool) or not isinstance(margin_payload, Real):
-            raise ValueError("EfficientAD阈值余量必须是有限非负数值")
-        margin = float(margin_payload)
-        if not math.isfinite(margin) or margin < 0:
-            raise ValueError("EfficientAD阈值余量必须是有限非负数值")
-        try:
-            base_views, base_parsed = _validated_thresholds(
-                {view: base_payload[view] for view in VIEW_ORDER}
-            )
-        except ValueError as error:
-            raise ValueError("EfficientAD基础阈值必须是有限数值") from error
-        if base_views != VIEW_ORDER:
-            raise ValueError("EfficientAD基础阈值必须按标准顺序覆盖八个视角")
-        if any(
-            not math.isclose(parsed[view], base_parsed[view] + margin, abs_tol=1e-12)
-            for view in VIEW_ORDER
-        ):
-            raise ValueError("EfficientAD基础阈值加余量必须等于部署阈值")
-    checkpoint_sha256 = payload.get("checkpoint_sha256_by_view")
-    if (
-        not isinstance(checkpoint_sha256, dict)
-        or set(checkpoint_sha256) != set(VIEW_ORDER)
-        or any(
-            not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None
-            for value in checkpoint_sha256.values()
-        )
-    ):
-        raise ValueError("EfficientAD阈值资产checkpoint_sha256_by_view必须按标准顺序覆盖八个视角")
-    ordered_checkpoint_sha256 = {view: checkpoint_sha256[view] for view in VIEW_ORDER}
-    return (
-        MappingProxyType(parsed),
-        MappingProxyType(base_parsed),
-        margin,
-        source_csv,
-        source_csv_sha256,
-        MappingProxyType(ordered_checkpoint_sha256),
-    )
-
-
-def _load_template_masked_thresholds(
-    path: Path,
-    *,
-    expected_mask_sha256: str,
-) -> tuple[Mapping[str, float], Mapping[str, str]]:
-    """Load calibration-only masked Template thresholds and bound model hashes."""
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        raise ValueError(f"无法读取Template masked threshold artifact：{path}: {error}") from error
-    if (
-        not isinstance(payload, dict)
-        or payload.get("schema_version") != "bmw.template_manual_ignore_thresholds/1.0"
-        or payload.get("selection_split") != "calibration"
-        or payload.get("final_test_used_for_selection") is not False
-    ):
-        raise ValueError("Template masked threshold artifact必须声明calibration-only选择")
-    if payload.get("manual_ignore_mask_index_sha256") != expected_mask_sha256:
-        raise ValueError("Template masked threshold artifact的mask SHA256不匹配")
-    thresholds = payload.get("thresholds")
-    if not isinstance(thresholds, dict) or set(thresholds) != set(VIEW_ORDER):
-        raise ValueError("Template masked thresholds必须覆盖八个标准视角")
-    parsed: dict[str, float] = {}
-    for view in VIEW_ORDER:
-        value = thresholds[view]
-        if (
-            isinstance(value, bool)
-            or not isinstance(value, Real)
-            or not math.isfinite(float(value))
-            or float(value) < 0
-        ):
-            raise ValueError("Template masked thresholds必须是有限非负数值")
-        parsed[view] = float(value)
-    views = payload.get("views")
-    if not isinstance(views, dict) or set(views) != set(VIEW_ORDER):
-        raise ValueError("Template masked threshold artifact缺少八视角模型SHA256")
-    model_sha256: dict[str, str] = {}
-    for view in VIEW_ORDER:
-        item = views[view]
-        value = item.get("model_json_sha256") if isinstance(item, dict) else None
-        if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
-            raise ValueError("Template masked threshold artifact模型SHA256格式不正确")
-        model_sha256[view] = value
-    return MappingProxyType(parsed), MappingProxyType(model_sha256)
-
-
 def _load_efficientad_component_policies(path: Path) -> Mapping[str, ComponentFilterPolicy]:
-    """Load one exact eight-view component-filter policy asset."""
+    """Load only the component-filter parameters used by inference."""
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
-        raise ValueError(f"无法读取EfficientAD component filter artifact：{path}: {error}") from error
-    if (
-        not isinstance(payload, dict)
-        or set(payload) != {"schema_version", "candidate_only", "score_source", "policies"}
-        or payload.get("schema_version") != "bmw.efficientad_component_filter/1.0"
-        or payload.get("candidate_only") is not True
-        or payload.get("score_source") != "accepted_component_max_p95"
-    ):
-        raise ValueError("EfficientAD component filter artifact字段不正确")
-    policies = payload.get("policies")
+        raise ValueError(f"无法读取EfficientAD组件过滤配置：{path}: {error}") from error
+    policies = payload.get("policies") if isinstance(payload, dict) else None
     if not isinstance(policies, dict) or set(policies) != set(VIEW_ORDER):
-        raise ValueError("EfficientAD component filter policies必须覆盖八个标准视角")
-    expected_fields = {
-        "low_threshold",
-        "seed_threshold",
-        "p95_threshold",
-        "minimum_area",
-        "hard_peak_threshold",
-        "line_minimum_length",
-        "line_minimum_area",
-    }
+        raise ValueError("EfficientAD组件过滤配置必须覆盖八个标准视角")
     parsed: dict[str, ComponentFilterPolicy] = {}
     for view in VIEW_ORDER:
         item = policies[view]
-        if not isinstance(item, dict) or set(item) != expected_fields:
-            raise ValueError(f"EfficientAD component filter policy字段不正确：{view}")
+        if not isinstance(item, dict):
+            raise ValueError(f"EfficientAD组件过滤参数无效：{view}")
         try:
             parsed[view] = ComponentFilterPolicy(**item)
         except (TypeError, ValueError) as error:
-            raise ValueError(f"EfficientAD component filter policy无效：{view}") from error
+            raise ValueError(f"EfficientAD组件过滤参数无效：{view}") from error
+    return MappingProxyType(parsed)
+
+
+def _view_numbers(raw: object, name: str, *, non_negative: bool = False) -> Mapping[str, float]:
+    if not isinstance(raw, dict) or set(raw) != set(VIEW_ORDER):
+        raise ValueError(f"{name}必须覆盖八个标准视角")
+    parsed: dict[str, float] = {}
+    for view in VIEW_ORDER:
+        value = raw[view]
+        if isinstance(value, bool) or not isinstance(value, Real) or not math.isfinite(float(value)):
+            raise ValueError(f"{name}.{view}必须是有限数值")
+        number = float(value)
+        if non_negative and number < 0:
+            raise ValueError(f"{name}.{view}不能为负数")
+        parsed[view] = number
     return MappingProxyType(parsed)
 
 
 def load_demo_config(path: Path) -> EightViewDemoConfig:
-    """Load the small profile and resolve the exact trained model assets."""
+    """Load one editable laboratory profile without release or digest binding."""
     resolved = Path(path).expanduser().resolve()
     payload = _json_object(resolved)
-    required = {
-        "schema_version",
-        "demo_id",
-        "capture_config",
-        "roi_config",
-        "prepared_manifest",
-        "training_run",
-        "result_root",
-        "bright_streak",
-        "efficientad",
-        "yolo",
-    }
-    allowed = required | {"template", "trusted_ok_reference"}
-    if not required.issubset(payload) or not set(payload).issubset(allowed) or payload["schema_version"] != 1:
-        raise ValueError("BMW八视图Demo配置字段或schema_version不正确")
-    yolo = payload["yolo"]
-    if not isinstance(yolo, dict) or set(yolo) != {"candidate_conf", "final_threshold", "imgsz"}:
-        raise ValueError("yolo配置字段不正确")
+    base = resolved.parent
+
+    def section(name: str) -> dict[str, Any]:
+        value = payload.get(name)
+        if not isinstance(value, dict):
+            raise ValueError(f"{name}配置必须是JSON对象")
+        return value
+
+    def resolve(raw: object, name: str, *, must_exist: bool = True) -> Path:
+        if not isinstance(raw, str) or not raw.strip():
+            raise ValueError(f"{name}路径必须是非空字符串")
+        candidate = Path(raw).expanduser()
+        candidate = (candidate if candidate.is_absolute() else base / candidate).resolve()
+        if must_exist and not candidate.is_file():
+            raise ValueError(f"{name}不存在：{candidate}")
+        return candidate
+
+    def view_paths(raw: object, name: str) -> Mapping[str, Path]:
+        if not isinstance(raw, dict) or set(raw) != set(VIEW_ORDER):
+            raise ValueError(f"{name}必须覆盖八个标准视角")
+        return MappingProxyType(
+            {view: resolve(raw[view], f"{name} {view}") for view in VIEW_ORDER}
+        )
+
+    template = section("template")
+    bright = section("bright_streak")
+    efficientad = section("efficientad")
+    yolo = section("yolo")
+    template_models = view_paths(template.get("models"), "Template")
+    template_thresholds = _view_numbers(
+        template.get("thresholds"), "Template阈值", non_negative=True
+    )
+    weighted_regions_raw = template.get("weighted_regions")
+    template_weighted_regions = None
+    if weighted_regions_raw is not None:
+        if not isinstance(weighted_regions_raw, dict):
+            raise ValueError("Template weighted_regions必须是JSON对象")
+        enabled = weighted_regions_raw.get("enabled")
+        if not isinstance(enabled, bool):
+            raise ValueError("Template weighted_regions.enabled必须是布尔值")
+        weight_raw = weighted_regions_raw.get("weight")
+        if isinstance(weight_raw, bool) or not isinstance(weight_raw, Real):
+            raise ValueError("Template关键区域权重必须是有限且不小于1的数值")
+        weight = float(weight_raw)
+        if not math.isfinite(weight) or weight < 1.0:
+            raise ValueError("Template关键区域权重必须是有限且不小于1的数值")
+        outside_weight_raw = weighted_regions_raw.get("outside_weight", 1.0)
+        if isinstance(outside_weight_raw, bool) or not isinstance(outside_weight_raw, Real):
+            raise ValueError("Template关键区域外权重必须是有限正数")
+        outside_weight = float(outside_weight_raw)
+        if not math.isfinite(outside_weight) or outside_weight <= 0.0:
+            raise ValueError("Template关键区域外权重必须是有限正数")
+        template_weighted_regions = TemplateWeightedRegionsConfig(
+            enabled=enabled,
+            weight=weight,
+            outside_weight=outside_weight,
+            roi_config=resolve(weighted_regions_raw.get("roi_config"), "Template关键区域ROI"),
+            thresholds=_view_numbers(
+                weighted_regions_raw.get("thresholds"),
+                "Template加权阈值",
+                non_negative=True,
+            ),
+        )
+    efficientad_checkpoints = view_paths(efficientad.get("checkpoints"), "EfficientAD")
+    efficientad_thresholds = _view_numbers(
+        efficientad.get("thresholds"), "EfficientAD阈值"
+    )
+    base_thresholds_raw = efficientad.get("base_thresholds")
+    efficientad_base_thresholds = (
+        efficientad_thresholds
+        if base_thresholds_raw is None
+        else _view_numbers(base_thresholds_raw, "EfficientAD基础阈值")
+    )
+    margin_raw = efficientad.get("threshold_margin", 0.0)
+    if isinstance(margin_raw, bool) or not isinstance(margin_raw, Real):
+        raise ValueError("EfficientAD threshold_margin必须是有限非负数值")
+    efficientad_threshold_margin = float(margin_raw)
+    if not math.isfinite(efficientad_threshold_margin) or efficientad_threshold_margin < 0:
+        raise ValueError("EfficientAD threshold_margin必须是有限非负数值")
+    threshold_source = efficientad.get("threshold_source")
+    validation_status = efficientad.get("validation_status")
+    for name, value in (
+        ("EfficientAD threshold_source", threshold_source),
+        ("EfficientAD validation_status", validation_status),
+    ):
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            raise ValueError(f"{name}必须是非空字符串")
+
     candidate = _probability(yolo["candidate_conf"], "candidate_conf")
     final = _probability(yolo["final_threshold"], "final_threshold")
     if candidate > final:
@@ -538,318 +476,91 @@ def load_demo_config(path: Path) -> EightViewDemoConfig:
     imgsz = yolo["imgsz"]
     if isinstance(imgsz, bool) or not isinstance(imgsz, int) or imgsz <= 0:
         raise ValueError("yolo.imgsz必须是正整数")
-    bright_streak_config = payload["bright_streak"]
-    if not isinstance(bright_streak_config, dict):
-        raise ValueError("bright_streak配置字段不正确")
-    bright_streak_rotated_roi_raw: object | None = None
-    bright_streak_rotated_roi_sha256: str | None = None
-    bright_streak_weak_row_score_override: float | None = None
-    if set(bright_streak_config) == {"config"}:
-        bright_streak_engine = "calibrated_rule_v1"
-        bright_streak_sha256 = None
-    elif set(bright_streak_config) == {"engine", "config", "config_sha256"}:
-        bright_streak_engine = bright_streak_config["engine"]
-        bright_streak_sha256 = bright_streak_config["config_sha256"]
-        if bright_streak_engine in {
-            "tracked_profile_v3_manual_rotated_roi",
-            "tracked_profile_v3_manual_rotated_candidate",
-        }:
-            raise ValueError("bright_streak配置字段不正确")
-        if bright_streak_engine not in {"raw_profile_v2", "tracked_profile_v3"}:
-            raise ValueError("bright_streak.engine只支持raw_profile_v2或tracked_profile_v3")
-        if not isinstance(bright_streak_sha256, str) or re.fullmatch(r"[0-9a-f]{64}", bright_streak_sha256) is None:
-            raise ValueError("光痕配置资产 SHA256格式不正确")
-    elif set(bright_streak_config) in {
-        frozenset(
-            {
-                "engine",
-                "config",
-                "config_sha256",
-                "rotated_roi",
-                "rotated_roi_sha256",
-            }
-        ),
-        frozenset(
-            {
-                "engine",
-                "config",
-                "config_sha256",
-                "rotated_roi",
-                "rotated_roi_sha256",
-                "weak_row_score_override",
-            }
-        ),
-    }:
-        bright_streak_engine = bright_streak_config["engine"]
-        if bright_streak_engine not in {
-            "tracked_profile_v3_manual_rotated_roi",
-            "tracked_profile_v3_manual_rotated_candidate",
-        }:
-            raise ValueError("bright_streak.engine与倾斜光痕ROI配置不匹配")
-        bright_streak_sha256 = bright_streak_config["config_sha256"]
-        bright_streak_rotated_roi_raw = bright_streak_config["rotated_roi"]
-        bright_streak_rotated_roi_sha256 = bright_streak_config["rotated_roi_sha256"]
-        if (
-            bright_streak_engine == "tracked_profile_v3_manual_rotated_candidate"
-            and "weak_row_score_override" in bright_streak_config
-        ):
-            raise ValueError("候选旋转光痕配置不允许弱响应覆盖阈值")
-        if "weak_row_score_override" in bright_streak_config:
-            override = bright_streak_config["weak_row_score_override"]
+    yolo_ignore_regions: dict[str, tuple[tuple[int, int, int, int], ...]] = {}
+    raw_ignore_regions = yolo.get("ignore_regions", {})
+    if not isinstance(raw_ignore_regions, dict):
+        raise ValueError("YOLO忽略区域必须按视角配置")
+    for view, raw_regions in raw_ignore_regions.items():
+        if view not in VIEW_ORDER or not isinstance(raw_regions, list):
+            raise ValueError("YOLO忽略区域包含未知视角或无效区域列表")
+        parsed_regions: list[tuple[int, int, int, int]] = []
+        for raw_region in raw_regions:
             if (
-                isinstance(override, bool)
-                or not isinstance(override, Real)
-                or not math.isfinite(float(override))
-                or float(override) != 95.0
+                not isinstance(raw_region, list)
+                or len(raw_region) != 4
+                or any(isinstance(value, bool) or not isinstance(value, int) for value in raw_region)
             ):
-                raise ValueError("光痕弱响应覆盖阈值只允许精确值95.0")
-            bright_streak_weak_row_score_override = 95.0
-        for label, digest in (
-            ("光痕配置资产", bright_streak_sha256),
-            ("倾斜光痕ROI", bright_streak_rotated_roi_sha256),
-        ):
-            if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
-                raise ValueError(f"{label} SHA256格式不正确")
-    else:
-        raise ValueError("bright_streak配置字段不正确")
-    efficientad_config = payload["efficientad"]
-    efficientad_base_fields = {
-        "threshold_artifact",
-        "threshold_artifact_sha256",
-    }
-    efficientad_mask_fields = {
-        "ignore_mask_index",
-        "ignore_mask_index_sha256",
-    }
-    efficientad_component_fields = {
-        "component_filter_artifact",
-        "component_filter_artifact_sha256",
-    }
-    allowed_efficientad_fields = efficientad_base_fields | efficientad_mask_fields | efficientad_component_fields
-    configured_efficientad_fields = set(efficientad_config) if isinstance(efficientad_config, dict) else set()
-    if (
-        not isinstance(efficientad_config, dict)
-        or not efficientad_base_fields.issubset(configured_efficientad_fields)
-        or not configured_efficientad_fields.issubset(allowed_efficientad_fields)
-        or bool(configured_efficientad_fields & efficientad_mask_fields)
-        != (efficientad_mask_fields <= configured_efficientad_fields)
-        or bool(configured_efficientad_fields & efficientad_component_fields)
-        != (efficientad_component_fields <= configured_efficientad_fields)
-    ):
-        raise ValueError("efficientad配置字段不正确")
-    if (
-        efficientad_component_fields <= configured_efficientad_fields
-        and not efficientad_mask_fields <= configured_efficientad_fields
-    ):
-        raise ValueError("EfficientAD component filter必须同时配置ignore mask")
-    trusted_ok_config = payload.get("trusted_ok_reference")
-    if "trusted_ok_reference" in payload and (
-        not isinstance(trusted_ok_config, dict)
-        or set(trusted_ok_config) != {"index", "index_sha256"}
-        or not isinstance(trusted_ok_config.get("index_sha256"), str)
-        or re.fullmatch(r"[0-9a-f]{64}", trusted_ok_config["index_sha256"]) is None
-    ):
-        raise ValueError("trusted_ok_reference配置字段不正确")
-    base = resolved.parent
-
-    def resolve(raw: object) -> Path:
-        if not isinstance(raw, str) or not raw.strip():
-            raise ValueError("配置路径必须是非空字符串")
-        candidate_path = Path(raw).expanduser()
-        return (candidate_path if candidate_path.is_absolute() else base / candidate_path).resolve()
-
-    template_config = payload.get("template")
-    template_ignore_mask_index: Path | None = None
-    template_ignore_mask_index_sha256: str | None = None
-    template_masked_threshold_artifact: Path | None = None
-    template_masked_threshold_artifact_sha256: str | None = None
-    template_masked_thresholds: Mapping[str, float] | None = None
-    expected_template_model_sha256: Mapping[str, str] | None = None
-    if template_config is not None:
-        expected_fields = {
-            "ignore_mask_index",
-            "ignore_mask_index_sha256",
-            "threshold_artifact",
-            "threshold_artifact_sha256",
-        }
-        if not isinstance(template_config, dict) or set(template_config) != expected_fields:
-            raise ValueError("template配置字段不正确")
-        template_ignore_mask_index = resolve(template_config["ignore_mask_index"])
-        template_ignore_mask_index_sha256 = template_config["ignore_mask_index_sha256"]
-        template_masked_threshold_artifact = resolve(template_config["threshold_artifact"])
-        template_masked_threshold_artifact_sha256 = template_config["threshold_artifact_sha256"]
-        for label, candidate_path, expected_sha in (
-            ("ignore mask index", template_ignore_mask_index, template_ignore_mask_index_sha256),
-            (
-                "masked threshold artifact",
-                template_masked_threshold_artifact,
-                template_masked_threshold_artifact_sha256,
-            ),
-        ):
-            if not isinstance(expected_sha, str) or re.fullmatch(r"[0-9a-f]{64}", expected_sha) is None:
-                raise ValueError(f"Template {label} SHA256格式不正确")
-            if not candidate_path.is_file() or _sha256(candidate_path) != expected_sha:
-                raise ValueError(f"Template {label} SHA256不匹配")
-        template_masked_thresholds, expected_template_model_sha256 = _load_template_masked_thresholds(
-            template_masked_threshold_artifact,
-            expected_mask_sha256=template_ignore_mask_index_sha256,
-        )
-
-    capture_config = resolve(payload["capture_config"])
-    roi_config = resolve(payload["roi_config"])
-    training_run = resolve(payload["training_run"])
-    bright = resolve(bright_streak_config["config"])
-    if bright_streak_sha256 is not None and (
-        not bright.is_file() or _sha256(bright) != bright_streak_sha256
-    ):
-        raise ValueError("光痕配置资产 SHA256不匹配")
-    bright_streak_rotated_roi: Path | None = None
-    if bright_streak_rotated_roi_raw is not None:
-        bright_streak_rotated_roi = resolve(bright_streak_rotated_roi_raw)
-        if (
-            not bright_streak_rotated_roi.is_file()
-            or _sha256(bright_streak_rotated_roi) != bright_streak_rotated_roi_sha256
-        ):
-            raise ValueError("倾斜光痕ROI SHA256不匹配")
-    threshold_artifact = resolve(efficientad_config["threshold_artifact"])
-    expected_threshold_sha256 = efficientad_config["threshold_artifact_sha256"]
-    if not isinstance(expected_threshold_sha256, str) or re.fullmatch(r"[0-9a-f]{64}", expected_threshold_sha256) is None:
-        raise ValueError("EfficientAD threshold artifact SHA256格式不正确")
-    if not threshold_artifact.is_file() or _sha256(threshold_artifact) != expected_threshold_sha256:
-        raise ValueError("EfficientAD threshold artifact SHA256不匹配")
-    efficientad_component_filter_artifact: Path | None = None
-    efficientad_component_filter_artifact_sha256: str | None = None
-    efficientad_component_policies: Mapping[str, ComponentFilterPolicy] | None = None
-    if "component_filter_artifact" in efficientad_config:
-        efficientad_component_filter_artifact = resolve(efficientad_config["component_filter_artifact"])
-        efficientad_component_filter_artifact_sha256 = efficientad_config[
-            "component_filter_artifact_sha256"
-        ]
-        if (
-            not isinstance(efficientad_component_filter_artifact_sha256, str)
-            or re.fullmatch(r"[0-9a-f]{64}", efficientad_component_filter_artifact_sha256) is None
-        ):
-            raise ValueError("EfficientAD component filter artifact SHA256格式不正确")
-        if (
-            not efficientad_component_filter_artifact.is_file()
-            or _sha256(efficientad_component_filter_artifact)
-            != efficientad_component_filter_artifact_sha256
-        ):
-            raise ValueError("EfficientAD component filter artifact SHA256不匹配")
-        efficientad_component_policies = _load_efficientad_component_policies(
-            efficientad_component_filter_artifact
-        )
-    efficientad_ignore_mask_index: Path | None = None
-    efficientad_ignore_mask_index_sha256: str | None = None
-    if "ignore_mask_index" in efficientad_config:
-        efficientad_ignore_mask_index = resolve(efficientad_config["ignore_mask_index"])
-        efficientad_ignore_mask_index_sha256 = efficientad_config["ignore_mask_index_sha256"]
-        if (
-            not isinstance(efficientad_ignore_mask_index_sha256, str)
-            or re.fullmatch(r"[0-9a-f]{64}", efficientad_ignore_mask_index_sha256) is None
-        ):
-            raise ValueError("EfficientAD ignore mask index SHA256格式不正确")
-        if (
-            not efficientad_ignore_mask_index.is_file()
-            or _sha256(efficientad_ignore_mask_index) != efficientad_ignore_mask_index_sha256
-        ):
-            raise ValueError("EfficientAD ignore mask index SHA256不匹配")
-    if template_ignore_mask_index is not None and (
-        efficientad_ignore_mask_index is None
-        or template_ignore_mask_index != efficientad_ignore_mask_index
-        or template_ignore_mask_index_sha256 != efficientad_ignore_mask_index_sha256
-    ):
-        raise ValueError("Template必须复用当前EfficientAD的同一手动ignore mask资产")
-    trusted_ok_index: Path | None = None
-    trusted_ok_index_sha256: str | None = None
-    trusted_ok_reference_error: str | None = None
-    if trusted_ok_config is not None:
-        trusted_ok_index = resolve(trusted_ok_config["index"])
-        if trusted_ok_index.name != "reference_index.json":
-            raise ValueError("trusted_ok_reference.index必须指向reference_index.json")
-        trusted_ok_index_sha256 = trusted_ok_config["index_sha256"]
-        if not trusted_ok_index.is_file() or trusted_ok_index.is_symlink():
-            trusted_ok_reference_error = "可信OK参考索引不是普通文件"
-        elif _sha256(trusted_ok_index) != trusted_ok_index_sha256:
-            trusted_ok_reference_error = "可信OK参考索引SHA256不匹配"
-    (
-        efficientad_thresholds,
-        efficientad_base_thresholds,
-        efficientad_threshold_margin,
-        efficientad_source_csv,
-        efficientad_source_csv_sha256,
-        expected_checkpoint_sha256,
-    ) = _load_efficientad_thresholds(
-        threshold_artifact,
-        expected_component_policy_sha256=efficientad_component_filter_artifact_sha256,
-        expected_mask_index_sha256=(
-            efficientad_ignore_mask_index_sha256
-            if efficientad_component_filter_artifact_sha256 is not None
-            else None
-        ),
+                raise ValueError("YOLO忽略区域坐标必须是四个整数")
+            x1, y1, x2, y2 = raw_region
+            if x1 < 0 or y1 < 0 or x1 >= x2 or y1 >= y2:
+                raise ValueError("YOLO忽略区域坐标范围无效")
+            parsed_regions.append((x1, y1, x2, y2))
+        yolo_ignore_regions[view] = tuple(parsed_regions)
+    bright_streak_engine = bright.get("engine")
+    if bright_streak_engine != "tracked_profile_v3_manual_rotated_roi":
+        raise ValueError("实验室版本只保留tracked_profile_v3_manual_rotated_roi光痕引擎")
+    geometry = bright.get("geometry")
+    thresholds = bright.get("thresholds")
+    if not isinstance(geometry, dict) or not isinstance(thresholds, dict):
+        raise ValueError("光痕geometry和thresholds必须直接写在Demo配置中")
+    bright_streak_rotated_roi = resolve(bright.get("rotated_roi"), "光痕旋转ROI")
+    template_mask = (
+        resolve(template["ignore_mask_index"], "Template ignore mask")
+        if "ignore_mask_index" in template
+        else None
     )
-    for label, asset in (("capture_config", capture_config), ("roi_config", roi_config)):
-        if not asset.is_file():
-            raise ValueError(f"{label}不存在：{asset}")
-    template_models = {view: training_run / "template" / view / "model.json" for view in VIEW_ORDER}
-    efficientad = {view: training_run / "efficientad" / view / "model.ckpt" for view in VIEW_ORDER}
-    yolo_checkpoint = training_run / "yolo/train/weights/best.pt"
-    for label, asset in {
-        **{f"Template {view}": model for view, model in template_models.items()},
-        **{f"EfficientAD {view}": model for view, model in efficientad.items()},
-        "bright_streak": bright,
-        "YOLO": yolo_checkpoint,
-    }.items():
-        if not asset.is_file():
-            raise ValueError(f"{label}模型不存在：{asset}")
-    for view, checkpoint in efficientad.items():
-        if _sha256(checkpoint) != expected_checkpoint_sha256[view]:
-            raise ValueError(f"EfficientAD {view} checkpoint SHA256不匹配")
-    if expected_template_model_sha256 is not None:
-        for view, model in template_models.items():
-            if _sha256(model) != expected_template_model_sha256[view]:
-                raise ValueError(f"Template {view} model.json SHA256不匹配")
+    efficientad_mask = (
+        resolve(efficientad["ignore_mask_index"], "EfficientAD ignore mask")
+        if "ignore_mask_index" in efficientad
+        else None
+    )
+    component_filter = (
+        resolve(efficientad["component_filter"], "EfficientAD组件过滤配置")
+        if "component_filter" in efficientad
+        else None
+    )
+    component_policies = (
+        None if component_filter is None else _load_efficientad_component_policies(component_filter)
+    )
+    trusted_config = payload.get("trusted_ok_reference")
+    trusted_index = None
+    if trusted_config is not None:
+        if not isinstance(trusted_config, dict):
+            raise ValueError("trusted_ok_reference配置必须是JSON对象")
+        trusted_index = resolve(trusted_config.get("index"), "可信OK索引")
     demo_id = payload["demo_id"]
     if not isinstance(demo_id, str) or not demo_id.strip():
         raise ValueError("demo_id不能为空")
     return EightViewDemoConfig(
         path=resolved,
         demo_id=demo_id,
-        capture_config=capture_config,
-        roi_config=roi_config,
-        prepared_manifest=resolve(payload["prepared_manifest"]),
-        training_run=training_run,
-        result_root=resolve(payload["result_root"]),
+        capture_config=resolve(payload.get("capture_config"), "capture_config"),
+        roi_config=resolve(payload.get("roi_config"), "roi_config"),
+        prepared_manifest=resolve(payload.get("prepared_manifest"), "prepared_manifest"),
+        result_root=resolve(payload.get("result_root"), "result_root", must_exist=False),
         template_models=template_models,
-        efficientad_checkpoints=efficientad,
+        template_thresholds=template_thresholds,
+        efficientad_checkpoints=efficientad_checkpoints,
         efficientad_thresholds=efficientad_thresholds,
         efficientad_base_thresholds=efficientad_base_thresholds,
         efficientad_threshold_margin=efficientad_threshold_margin,
-        efficientad_threshold_source_csv=efficientad_source_csv,
-        efficientad_threshold_source_csv_sha256=efficientad_source_csv_sha256,
+        efficientad_threshold_source=threshold_source,
+        efficientad_validation_status=validation_status,
         bright_streak_engine=bright_streak_engine,
-        bright_streak_config=bright,
-        bright_streak_config_sha256=bright_streak_sha256,
-        yolo_checkpoint=yolo_checkpoint,
+        bright_streak_geometry=geometry,
+        bright_streak_thresholds=thresholds,
+        yolo_checkpoint=resolve(yolo.get("checkpoint"), "YOLO checkpoint"),
         yolo_candidate_conf=candidate,
         yolo_final_threshold=final,
         yolo_imgsz=imgsz,
+        yolo_ignore_regions=yolo_ignore_regions,
         bright_streak_rotated_roi=bright_streak_rotated_roi,
-        bright_streak_rotated_roi_sha256=bright_streak_rotated_roi_sha256,
-        bright_streak_weak_row_score_override=bright_streak_weak_row_score_override,
-        efficientad_ignore_mask_index=efficientad_ignore_mask_index,
-        efficientad_ignore_mask_index_sha256=efficientad_ignore_mask_index_sha256,
-        efficientad_component_filter_artifact=efficientad_component_filter_artifact,
-        efficientad_component_filter_artifact_sha256=efficientad_component_filter_artifact_sha256,
-        efficientad_component_policies=efficientad_component_policies,
-        template_ignore_mask_index=template_ignore_mask_index,
-        template_ignore_mask_index_sha256=template_ignore_mask_index_sha256,
-        template_masked_threshold_artifact=template_masked_threshold_artifact,
-        template_masked_threshold_artifact_sha256=template_masked_threshold_artifact_sha256,
-        template_masked_thresholds=template_masked_thresholds,
-        trusted_ok_reference_index=trusted_ok_index,
-        trusted_ok_reference_index_sha256=trusted_ok_index_sha256,
-        trusted_ok_reference_error=trusted_ok_reference_error,
+        efficientad_ignore_mask_index=efficientad_mask,
+        efficientad_component_filter_config=component_filter,
+        efficientad_component_policies=component_policies,
+        template_ignore_mask_index=template_mask,
+        template_weighted_regions=template_weighted_regions,
+        trusted_ok_reference_index=trusted_index,
     )
 
 
@@ -860,6 +571,7 @@ __all__ = [
     "DemoFinalStatus",
     "EightViewDemoConfig",
     "EightViewInspection",
+    "TemplateWeightedRegionsConfig",
     "fuse_demo_status",
     "load_capture_directory",
     "load_demo_config",

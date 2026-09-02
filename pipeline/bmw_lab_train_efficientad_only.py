@@ -22,6 +22,7 @@ from bmw_inspection.lab.eight_view_train_all import (  # noqa: E402
     preflight_efficientad_only,
     run_efficientad_only_training,
 )
+from bmw_inspection.lab.eight_view_dataset import VIEW_ORDER  # noqa: E402
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -40,6 +41,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gpu", type=int, default=0)
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--view",
+        action="append",
+        choices=VIEW_ORDER,
+        help="只训练指定视角；可重复传入。默认训练完整八视图。",
+    )
+    parser.add_argument(
+        "--efficientad-all-normal-train",
+        action="store_true",
+        help="全部normal只用于训练checkpoint；跳过normal_test评分与阈值拟合。",
+    )
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -64,6 +76,8 @@ def _config_from_args(args: argparse.Namespace) -> LabTrainingConfig:
         gpu=args.gpu,
         workers=args.workers,
         seed=args.seed,
+        views=tuple(args.view) if args.view else VIEW_ORDER,
+        efficientad_all_normal_train=args.efficientad_all_normal_train,
     )
 
 

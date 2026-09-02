@@ -42,6 +42,7 @@ class LabTrainingConfig:
     efficientad_batch: int = 1
     efficientad_epochs: int = 30
     efficientad_image_size: tuple[int, int] = (256, 256)
+    efficientad_all_normal_train: bool = False
     yolo_batch: int = 32
     yolo_epochs: int = 100
     yolo_image_size: int = 640
@@ -119,6 +120,12 @@ def build_training_plan(config: LabTrainingConfig) -> tuple[TrainingStep, ...]:
                 "batch": config.efficientad_batch,
                 "epochs": config.efficientad_epochs,
                 "image_size": list(config.efficientad_image_size),
+                "all_normal_train": config.efficientad_all_normal_train,
+                "validation": (
+                    "pending_external_validation"
+                    if config.efficientad_all_normal_train
+                    else "materialized_normal_test"
+                ),
             },
         ),
         TrainingStep(
@@ -139,18 +146,21 @@ def build_efficientad_only_plan(config: LabTrainingConfig) -> tuple[TrainingStep
     The 21:00 diagnostic release has pending YOLO labels, so this plan must
     not select materialization or any branch that depends on YOLO readiness.
     """
+    efficientad_step = TrainingStep(
+        "efficientad",
+        {
+            "views": list(config.views),
+            "model_size": "small",
+            "batch": config.efficientad_batch,
+            "epochs": config.efficientad_epochs,
+            "image_size": list(config.efficientad_image_size),
+            "seed": config.seed,
+        },
+    )
+    if config.efficientad_all_normal_train:
+        return (efficientad_step,)
     return (
-        TrainingStep(
-            "efficientad",
-            {
-                "views": list(config.views),
-                "model_size": "small",
-                "batch": config.efficientad_batch,
-                "epochs": config.efficientad_epochs,
-                "image_size": list(config.efficientad_image_size),
-                "seed": config.seed,
-            },
-        ),
+        efficientad_step,
         TrainingStep(
             "score_normal_test",
             {
@@ -170,7 +180,32 @@ def build_efficientad_only_plan(config: LabTrainingConfig) -> tuple[TrainingStep
     )
 
 
+def build_template_only_plan(config: LabTrainingConfig, *, threshold: float) -> tuple[TrainingStep, ...]:
+    """Return a single Template stage that reuses an explicit deployment threshold."""
+    fixed_threshold = _template_threshold(threshold)
+    return (
+        TrainingStep(
+            "template",
+            {
+                "views": list(config.views),
+                "template_count": 5,
+                "fixed_threshold": fixed_threshold,
+            },
+        ),
+    )
+
+
 StageHandler = Callable[[LabTrainingConfig], dict[str, Any]]
+TemplateOnlyStageHandler = Callable[[LabTrainingConfig, float], dict[str, Any]]
+
+
+def _template_threshold(value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+        raise ValueError("Template fixed threshold must be finite")
+    threshold = float(value)
+    if threshold < 0.0:
+        raise ValueError("Template fixed threshold must be non-negative")
+    return threshold
 
 
 def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
@@ -259,6 +294,8 @@ def preflight_model_assets(config: LabTrainingConfig) -> dict[str, Any]:
         raise ValueError("BMW laboratory training requires the canonical eight-view order")
     if config.efficientad_batch != 1:
         raise ValueError("EfficientAD train batch is fixed to 1 by the model implementation")
+    if not isinstance(config.efficientad_all_normal_train, bool):
+        raise TypeError("efficientad_all_normal_train must be bool")
     for name, value in (
         ("efficientad_epochs", config.efficientad_epochs),
         ("yolo_batch", config.yolo_batch),
@@ -325,8 +362,11 @@ def preflight_efficientad_only(config: LabTrainingConfig) -> dict[str, Any]:
     preflight because both include YOLO/materialization requirements that are
     irrelevant to the 21:00 EfficientAD-only diagnostic.
     """
-    if config.views != VIEW_ORDER:
-        raise ValueError("BMW laboratory training requires the canonical eight-view order")
+    if not config.views or len(set(config.views)) != len(config.views):
+        raise ValueError("EfficientAD-only views must be a non-empty unique subset")
+    canonical_views = tuple(view for view in VIEW_ORDER if view in config.views)
+    if config.views != canonical_views:
+        raise ValueError("EfficientAD-only views must follow the canonical BMW view order")
     if config.efficientad_batch != 1:
         raise ValueError("EfficientAD train batch is fixed to 1 by the model implementation")
     if isinstance(config.efficientad_epochs, bool) or not isinstance(config.efficientad_epochs, int):
@@ -337,10 +377,11 @@ def preflight_efficientad_only(config: LabTrainingConfig) -> dict[str, Any]:
         raise ValueError("workers must be a positive integer")
     dataset_root = config.training_release / "efficientad"
     image_counts: dict[str, dict[str, int]] = {}
+    required_splits = ("normal",) if config.efficientad_all_normal_train else ("normal", "normal_test")
     for view in config.views:
         counts = {
             split: len(_image_paths(dataset_root / view / split))
-            for split in ("normal", "normal_test")
+            for split in required_splits
         }
         if not all(counts.values()):
             raise ValueError(f"EfficientAD release is missing normal data for {view}: {dataset_root / view}")
@@ -354,6 +395,32 @@ def preflight_efficientad_only(config: LabTrainingConfig) -> dict[str, Any]:
     }
 
 
+def preflight_template_only(config: LabTrainingConfig) -> dict[str, Any]:
+    """Validate a selected-view Template release without checking other model branches."""
+    if not config.views or len(set(config.views)) != len(config.views):
+        raise ValueError("Template-only views must be a non-empty unique subset")
+    canonical_views = tuple(view for view in VIEW_ORDER if view in config.views)
+    if config.views != canonical_views:
+        raise ValueError("Template-only views must follow the canonical BMW view order")
+    manifest = config.training_release / "template/trainer_manifest.csv"
+    groups = _load_eight_view_template_rows(manifest, config.views)
+    image_counts: dict[str, int] = {}
+    for view, rows in groups.items():
+        split_counts = {split: sum(row.split == split for row in rows) for split in ("train", "calibration", "final_test")}
+        if split_counts["train"] < 3 or not split_counts["calibration"] or not split_counts["final_test"]:
+            raise ValueError(f"Template release lacks train/calibration/final_test rows for {view}")
+        for row in rows:
+            if cv2.imread(str(row.image_path), cv2.IMREAD_UNCHANGED) is None:
+                raise ValueError(f"cannot decode Template input: {row.image_path}")
+        image_counts[view] = len(rows)
+    return {
+        "status": "ready",
+        "training_release": str(config.training_release),
+        "views": list(config.views),
+        "image_counts": image_counts,
+    }
+
+
 def _materialize_stage(config: LabTrainingConfig) -> dict[str, Any]:
     from bmw_inspection.lab.eight_view_training_data import materialize_training_data
 
@@ -362,6 +429,10 @@ def _materialize_stage(config: LabTrainingConfig) -> dict[str, Any]:
         report = json.loads(report_path.read_text(encoding="utf-8"))
         if not training_release_report_is_complete(report, config.views):
             raise ValueError(f"existing training release is incomplete: {config.training_release}")
+        if bool(report.get("efficientad_all_normal_train", False)) != config.efficientad_all_normal_train:
+            raise ValueError(
+                "existing training release EfficientAD all-normal mode does not match the requested run"
+            )
         return {"status": "reused", "training_release": str(config.training_release)}
     report = materialize_training_data(
         prepared_root=config.prepared_root,
@@ -369,6 +440,7 @@ def _materialize_stage(config: LabTrainingConfig) -> dict[str, Any]:
         output_root=config.training_root,
         training_id=config.training_id,
         yolo_label_root=config.reviewed_yolo_labels,
+        efficientad_all_normal_train=config.efficientad_all_normal_train,
     )
     if report.get("yolo_training_ready") is not True:
         raise RuntimeError("materialized dataset is not YOLO training ready")
@@ -390,8 +462,11 @@ class _EightViewTemplateSample:
     label: str
 
 
-def _load_eight_view_template_rows(path: Path) -> dict[str, list[_EightViewTemplateSample]]:
-    groups = {view: [] for view in VIEW_ORDER}
+def _load_eight_view_template_rows(
+    path: Path,
+    views: tuple[str, ...] = VIEW_ORDER,
+) -> dict[str, list[_EightViewTemplateSample]]:
+    groups = {view: [] for view in views}
     with path.open("r", newline="", encoding="utf-8-sig") as stream:
         reader = csv.DictReader(stream)
         required = {"sample_id", "part_id", "view_id", "image_path", "split", "label"}
@@ -399,8 +474,10 @@ def _load_eight_view_template_rows(path: Path) -> dict[str, list[_EightViewTempl
             raise ValueError("template trainer manifest is missing required fields")
         for row_number, row in enumerate(reader, start=2):
             view = row["view_id"]
-            if view not in groups:
+            if view not in VIEW_ORDER:
                 raise ValueError(f"unknown template view at row {row_number}: {view}")
+            if view not in groups:
+                continue
             image_path = Path(row["image_path"])
             image_path = image_path if image_path.is_absolute() else path.parent / image_path
             image_path = image_path.resolve()
@@ -417,7 +494,7 @@ def _load_eight_view_template_rows(path: Path) -> dict[str, list[_EightViewTempl
                 )
             )
     if any(not rows for rows in groups.values()):
-        raise ValueError("template manifest must contain all eight views")
+        raise ValueError("template manifest must contain every selected view")
     return groups
 
 
@@ -425,7 +502,7 @@ def _template_stage(config: LabTrainingConfig) -> dict[str, Any]:
     from bmw_inspection.lab.template import train_template_group
 
     manifest = config.training_release / "template/trainer_manifest.csv"
-    groups = _load_eight_view_template_rows(manifest)
+    groups = _load_eight_view_template_rows(manifest, config.views)
     output_root = config.run_dir / "template"
     output_root.mkdir(parents=True, exist_ok=True)
     models: dict[str, str] = {}
@@ -451,6 +528,41 @@ def _template_stage(config: LabTrainingConfig) -> dict[str, Any]:
         )
         models[view] = str(trained)
     report = {"status": "complete", "model_count": len(models), "models": models}
+    _write_json(output_root / "training_report.json", report)
+    return report
+
+
+def _template_fixed_stage(config: LabTrainingConfig, threshold: float) -> dict[str, Any]:
+    from bmw_inspection.lab.template import train_template_group_fixed_threshold
+
+    fixed_threshold = _template_threshold(threshold)
+    manifest = config.training_release / "template/trainer_manifest.csv"
+    groups = _load_eight_view_template_rows(manifest, config.views)
+    output_root = config.run_dir / "template"
+    output_root.mkdir(parents=True, exist_ok=True)
+    models: dict[str, str] = {}
+    for view in config.views:
+        output_dir = output_root / view
+        first = cv2.imread(str(groups[view][0].image_path), cv2.IMREAD_UNCHANGED)
+        if first is None:
+            raise ValueError(f"cannot decode Template input: {groups[view][0].image_path}")
+        height, width = first.shape[:2]
+        trained = train_template_group_fixed_threshold(  # type: ignore[arg-type]
+            groups[view],
+            (0, 0, width, height),
+            output_dir,
+            threshold=fixed_threshold,
+            target_size=(512, 512),
+            max_shift=12,
+            template_count=5,
+        )
+        models[view] = str(trained)
+    report = {
+        "status": "complete",
+        "model_count": len(models),
+        "fixed_threshold": fixed_threshold,
+        "models": models,
+    }
     _write_json(output_root / "training_report.json", report)
     return report
 
@@ -687,6 +799,29 @@ def _json_safe(value: Any) -> Any:
     return str(value)
 
 
+def _efficientad_data_options(config: LabTrainingConfig) -> dict[str, Any]:
+    """Return the EfficientAD data contract for checkpoint training."""
+    if not isinstance(config.efficientad_all_normal_train, bool):
+        raise TypeError("efficientad_all_normal_train must be bool")
+    if config.efficientad_all_normal_train:
+        return {
+            "normal_test_dir": None,
+            "test_split_mode": "none",
+            "val_split_mode": "none",
+            "run_test": False,
+            "limit_val_batches": 0,
+            "validation_status": "pending_external_validation",
+        }
+    return {
+        "normal_test_dir": "normal_test",
+        "test_split_mode": "from_dir",
+        "val_split_mode": "same_as_test",
+        "run_test": True,
+        "limit_val_batches": 1.0,
+        "validation_status": "internal_release_validation",
+    }
+
+
 def _efficientad_stage(config: LabTrainingConfig) -> dict[str, Any]:
     from lightning import seed_everything
 
@@ -697,6 +832,7 @@ def _efficientad_stage(config: LabTrainingConfig) -> dict[str, Any]:
     dataset_root = config.training_release / "efficientad"
     output_root = config.run_dir / "efficientad"
     output_root.mkdir(parents=True, exist_ok=True)
+    data_options = _efficientad_data_options(config)
     models: dict[str, dict[str, Any]] = {}
     for view in config.views:
         view_data = dataset_root / view
@@ -712,20 +848,24 @@ def _efficientad_stage(config: LabTrainingConfig) -> dict[str, Any]:
             continue
         if run_dir.exists():
             raise FileExistsError(f"incomplete EfficientAD output exists; choose a new --run-id: {run_dir}")
-        abnormal_dir = "defect" if _image_paths(view_data / "defect") else None
+        abnormal_dir = (
+            None
+            if config.efficientad_all_normal_train
+            else "defect" if _image_paths(view_data / "defect") else None
+        )
         datamodule = Folder(
             name=f"bmw_{view}",
             root=view_data,
             normal_dir="normal",
             abnormal_dir=abnormal_dir,
-            normal_test_dir="normal_test",
+            normal_test_dir=data_options["normal_test_dir"],
             normal_split_ratio=0.0,
             extensions=(".png",),
             train_batch_size=1,
             eval_batch_size=1,
             num_workers=config.workers,
-            test_split_mode="from_dir",
-            val_split_mode="same_as_test",
+            test_split_mode=data_options["test_split_mode"],
+            val_split_mode=data_options["val_split_mode"],
             seed=config.seed,
         )
         seed_everything(config.seed, workers=True)
@@ -744,11 +884,16 @@ def _efficientad_stage(config: LabTrainingConfig) -> dict[str, Any]:
             deterministic=True,
             precision="32-true",
             logger=False,
+            limit_val_batches=data_options["limit_val_batches"],
         )
         engine.fit(model=model, datamodule=datamodule)
         run_dir.mkdir(parents=True, exist_ok=True)
         engine.trainer.save_checkpoint(checkpoint, weights_only=False)
-        test_metrics = engine.test(model=model, datamodule=datamodule)
+        test_metrics = (
+            engine.test(model=model, datamodule=datamodule)
+            if data_options["run_test"]
+            else []
+        )
         report = {
             "status": "complete",
             "view": view,
@@ -757,6 +902,13 @@ def _efficientad_stage(config: LabTrainingConfig) -> dict[str, Any]:
             "epochs": config.efficientad_epochs,
             "batch": 1,
             "image_size": list(config.efficientad_image_size),
+            "efficientad_all_normal_train": config.efficientad_all_normal_train,
+            "validation_status": data_options["validation_status"],
+            "threshold_status": (
+                "pending_external_validation"
+                if config.efficientad_all_normal_train
+                else "not_generated_by_training_stage"
+            ),
             "test_metrics": _json_safe(test_metrics),
         }
         _write_json(metrics_path, report)
@@ -832,11 +984,10 @@ def _score_efficientad_normal_test(config: LabTrainingConfig) -> dict[str, Any]:
                 torch.cuda.empty_cache()
             except (ImportError, RuntimeError):
                 pass
-        expected_count = len(config.views) * 21
-        if len(records) != expected_count:
-            raise ValueError(
-                f"EfficientAD normal_test score count must be {expected_count}, got {len(records)}"
-            )
+        part_ids = {row.part_id for row in records}
+        expected_count = len(config.views) * len(part_ids)
+        if not part_ids or len(records) != expected_count:
+            raise ValueError("EfficientAD normal_test scores must contain every view for each physical part")
         with score_path.open("w", newline="", encoding="utf-8") as stream:
             writer = csv.DictWriter(stream, fieldnames=("part_id", "view_id", "label", "score", "image_path"))
             writer.writeheader()
@@ -853,7 +1004,7 @@ def _score_efficientad_normal_test(config: LabTrainingConfig) -> dict[str, Any]:
         report = {
             "status": "complete",
             "calibration_source": "normal_test_only",
-            "normal_part_count": 21,
+            "normal_part_count": len(part_ids),
             "score_count": len(records),
             "views": list(config.views),
             "scores_csv": str(score_path),
@@ -899,8 +1050,8 @@ def _calibrate_efficientad_normal_thresholds(
                 )
             )
     fit = fit_part_thresholds(rows, views=config.views, target_part_fpr=1 / 21)
-    if fit.normal_part_count != 21:
-        raise ValueError(f"EfficientAD normal-test calibration requires exactly 21 parts, got {fit.normal_part_count}")
+    if fit.normal_part_count <= 0:
+        raise ValueError("EfficientAD normal-test calibration requires at least one complete part")
     output_dir = config.run_dir / "efficientad" / "score_analysis"
     threshold_path = output_dir / "part_thresholds.json"
     report_path = output_dir / "part_threshold_report.json"
@@ -1032,6 +1183,8 @@ def run_efficientad_only_training(
         ("efficientad", efficientad_handler),
         ("score_normal_test", normal_score_handler),
     ):
+        if config.efficientad_all_normal_train and step == "score_normal_test":
+            break
         try:
             result = handler(config)
         except BaseException as error:
@@ -1044,6 +1197,10 @@ def run_efficientad_only_training(
         _write_json(report_path, report)
         if step == "score_normal_test":
             score_result = result
+    if config.efficientad_all_normal_train:
+        report["status"] = "complete"
+        _write_json(report_path, report)
+        return report
     assert score_result is not None
     try:
         threshold_result = normal_threshold_handler(config, score_result)
@@ -1056,6 +1213,51 @@ def run_efficientad_only_training(
     report["steps"].append(
         {"name": "calibrate_normal_thresholds", "status": "complete", "result": threshold_result}
     )
+    report["status"] = "complete"
+    _write_json(report_path, report)
+    return report
+
+
+def run_template_only_training(
+    config: LabTrainingConfig,
+    *,
+    threshold: float,
+    dry_run: bool = False,
+    stage_handler: TemplateOnlyStageHandler | None = None,
+) -> dict[str, Any]:
+    """Train only selected Template views while preserving a fixed threshold."""
+    fixed_threshold = _template_threshold(threshold)
+    plan = build_template_only_plan(config, threshold=fixed_threshold)
+    if dry_run:
+        return {
+            "status": "dry_run",
+            "experimental_only": True,
+            "run_dir": str(config.run_dir),
+            "steps": [
+                {"name": step.name, "parameters": step.parameters, "status": step.status}
+                for step in plan
+            ],
+        }
+    if config.run_dir.exists() or config.run_dir.is_symlink():
+        raise FileExistsError(f"Template-only output already exists; choose a new --run-id: {config.run_dir}")
+    handler = _template_fixed_stage if stage_handler is None else stage_handler
+    config.run_dir.mkdir(parents=True)
+    report: dict[str, Any] = {
+        "status": "running",
+        "experimental_only": True,
+        "run_dir": str(config.run_dir),
+        "steps": [],
+    }
+    report_path = config.run_dir / "run_report.json"
+    try:
+        result = handler(config, fixed_threshold)
+    except BaseException as error:
+        report["status"] = "failed"
+        report["failed_step"] = "template"
+        report["error"] = f"{type(error).__name__}: {error}"
+        _write_json(report_path, report)
+        raise
+    report["steps"].append({"name": "template", "status": "complete", "result": result})
     report["status"] = "complete"
     _write_json(report_path, report)
     return report

@@ -30,6 +30,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-root", type=Path, default=REPO_ROOT / "results/bmw_lab_one_click")
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--efficientad-epochs", type=int, default=30)
+    parser.add_argument(
+        "--efficientad-all-normal-train",
+        action="store_true",
+        help="将全部 normal 样本用于 EfficientAD 训练；只生成 checkpoint，阈值需用独立验证集标定",
+    )
     parser.add_argument("--gpu", type=int, default=0)
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--seed", type=int, default=42)
@@ -46,9 +51,11 @@ def _config(args: argparse.Namespace) -> LeftNormalTrainingConfig:
         training_id=args.training_id,
         output_root=args.output_root,
         run_id=args.run_id,
+        capture_scope="left",
         mask_index=args.mask_index,
         component_policy=args.component_policy,
         efficientad_epochs=args.efficientad_epochs,
+        efficientad_all_normal_train=args.efficientad_all_normal_train,
         gpu=args.gpu,
         workers=args.workers,
         seed=args.seed,

@@ -1,0 +1,150 @@
+{
+  "demo_id": "bmw-eight-view-left-0820-mixed-v1",
+  "capture_config": "../capture/bmw_4cam_eight_view_hdr_v1.json",
+  "roi_config": "../rois/bmw_left_0820_v1.json",
+  "prepared_manifest": "../../../dataset/bmw_lab_prepared/bmw_left_0820_v1/manifests/dataset_manifest.csv",
+  "result_root": "../../../results/bmw_lab_one_click/bmw_eight_view_demo_left_0820_mixed_v1",
+  "experiment_notes": {
+    "template_model": "0820 all-normal output except front_right 0823 retake",
+    "efficientad_model": "0820 all-normal training output",
+    "yolo_model": "0820 combined right-left checkpoint",
+    "bright_streak": "legacy left tracked-profile rule with operator-redrawn 0820 full-image ROI",
+    "efficientad_mask": "operator-redrawn directly on left 0820 public ROI"
+  },
+  "template": {
+    "models": {
+      "front": "../../../results/bmw_lab_one_click/bmw_left_0820_template_efficientad_all_normal_models_v1/template/front/model.json",
+      "front_left": "../../../results/bmw_lab_one_click/bmw_left_0820_template_efficientad_all_normal_models_v1/template/front_left/model.json",
+      "front_right": "../../../results/bmw_lab_one_click/bmw_left_front_right_template_0823_v1/template/front_right/model.json",
+      "front_secondary": "../../../results/bmw_lab_one_click/bmw_left_0820_template_efficientad_all_normal_models_v1/template/front_secondary/model.json",
+      "back": "../../../results/bmw_lab_one_click/bmw_left_0820_template_efficientad_all_normal_models_v1/template/back/model.json",
+      "back_left": "../../../results/bmw_lab_one_click/bmw_left_0820_template_efficientad_all_normal_models_v1/template/back_left/model.json",
+      "back_right": "../../../results/bmw_lab_one_click/bmw_left_0820_template_efficientad_all_normal_models_v1/template/back_right/model.json",
+      "back_secondary": "../../../results/bmw_lab_one_click/bmw_left_0820_template_efficientad_all_normal_models_v1/template/back_secondary/model.json"
+    },
+    "threshold_source": "field_deformation_anchor_20260821",
+    "thresholds": {
+      "front": 0.015,
+      "front_left": 0.011,
+      "front_right": 0.008,
+      "front_secondary": 0.025914377212524414,
+      "back": 0.02549799633026125,
+      "back_left": 0.027542975902557373,
+      "back_right": 0.025085110664367676,
+      "back_secondary": 0.02508725643157959
+    },
+    "weighted_regions": {
+      "enabled": true,
+      "weight": 3.0,
+      "roi_config": "../key_template/bmw_left_0823_key_rois_v1.json",
+      "thresholds": {
+        "front": 0.011145261314028676,
+        "front_left": 0.005135343811192717,
+        "front_right": 0.0054486672193632575,
+        "front_secondary": 0.005552518444693267,
+        "back": 0.02549799633026125,
+        "back_left": 0.027542975902557373,
+        "back_right": 0.025085110664367676,
+        "back_secondary": 0.02508725643157959
+      }
+    }
+  },
+  "bright_streak": {
+    "engine": "tracked_profile_v3_manual_rotated_roi",
+    "rotated_roi": "../../../results/bmw_bright_streak_rotated_roi/bmw_left_0820_manual_v1/roi.json",
+    "geometry": {
+      "candidate_width": 5,
+      "background_width": 10,
+      "background_gap": 3,
+      "smooth_window": 5,
+      "max_step": 2,
+      "step_penalty": 1.0
+    },
+    "thresholds": {
+      "strong_row_score": 158.67499999999998,
+      "weak_row_score": 95.0,
+      "min_presence_coverage_ratio": 0.5546492659053833,
+      "min_longest_run_ratio": 0.4535073409461664,
+      "max_gap_ratio": 0.11092985318107668,
+      "max_gap_count": 1
+    }
+  },
+  "efficientad": {
+    "checkpoints": {
+      "front": "../../../results/bmw_lab_one_click/bmw_left_0820_template_efficientad_all_normal_models_v1/efficientad/front/model.ckpt",
+      "front_left": "../../../results/bmw_lab_one_click/bmw_left_0820_template_efficientad_all_normal_models_v1/efficientad/front_left/model.ckpt",
+      "front_right": "../../../results/bmw_lab_one_click/bmw_left_front_right_efficientad_0823_v2/efficientad/front_right/model.ckpt",
+      "front_secondary": "../../../results/bmw_lab_one_click/bmw_left_0820_template_efficientad_all_normal_models_v1/efficientad/front_secondary/model.ckpt",
+      "back": "../../../results/bmw_lab_one_click/bmw_left_0820_template_efficientad_all_normal_models_v1/efficientad/back/model.ckpt",
+      "back_left": "../../../results/bmw_lab_one_click/bmw_left_0820_template_efficientad_all_normal_models_v1/efficientad/back_left/model.ckpt",
+      "back_right": "../../../results/bmw_lab_one_click/bmw_left_0820_template_efficientad_all_normal_models_v1/efficientad/back_right/model.ckpt",
+      "back_secondary": "../../../results/bmw_lab_one_click/bmw_left_0820_template_efficientad_all_normal_models_v1/efficientad/back_secondary/model.ckpt"
+    },
+    "threshold_source": "field_ok_envelope_20260821",
+    "validation_status": "lab_only_8_train_normal_plus_4_field_ok_pending_independent_validation",
+    "thresholds": {
+      "front": 0.39,
+      "front_left": 0.4,
+      "front_right": 0.43,
+      "front_secondary": 0.5980857074260001,
+      "back": 0.55,
+      "back_left": 0.6018996083740001,
+      "back_right": 0.562432444096,
+      "back_secondary": 0.532633638382
+    },
+    "ignore_mask_index": "../../../results/bmw_efficientad_manual_ignore_masks/bmw_left_0820_manual_ignore_v2/index.json",
+    "component_filter": "../efficientad_component_filter_lab_v1.json"
+  },
+  "yolo": {
+    "checkpoint": "../../../results/bmw_lab_one_click/bmw_right_multisource_left_yolo_0820_v2/yolo/train/weights/best.pt",
+    "candidate_conf": 0.1,
+    "final_threshold": 0.25,
+    "ignore_regions": {
+      "front_secondary": [
+        [
+          1505,
+          628,
+          1681,
+          978
+        ]
+      ]
+    },
+    "ignore_region_coordinate_notes": {
+      "coordinate_system": "roi_local_xyxy",
+      "old_public_roi_xyxy": [
+        1003,
+        219,
+        2759,
+        2838
+      ],
+      "old_ignore_region_xyxy": [
+        1580,
+        450,
+        1756,
+        800
+      ],
+      "full_image_region_xyxy": [
+        2583,
+        669,
+        2759,
+        1019
+      ],
+      "new_public_roi_xyxy": [
+        1078,
+        41,
+        2810,
+        2634
+      ],
+      "converted_ignore_region_xyxy": [
+        1505,
+        628,
+        1681,
+        978
+      ]
+    },
+    "imgsz": 640
+  },
+  "trusted_ok_reference": {
+    "index": "/home/yunjing/anomaly_xingtao_new/dataset/bmw_trusted_ok_reference/bmw_left_0820_train_normal_v1/reference_index.json"
+  }
+}

@@ -15,6 +15,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from bmw_inspection.lab.eight_view_training_data import materialize_training_data  # noqa: E402
+from bmw_inspection.lab.eight_view_dataset import VIEW_ORDER  # noqa: E402
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -37,6 +38,27 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="可选：248张待复核缺陷ROI对应的标准YOLO txt目录；允许空txt表示该视图确认无可见缺陷。",
     )
+    parser.add_argument(
+        "--efficientad-all-normal-train",
+        action="store_true",
+        help="仅对EfficientAD启用：全部normal进入训练，独立验证和阈值拟合留待后续数据。",
+    )
+    parser.add_argument(
+        "--view",
+        action="append",
+        choices=VIEW_ORDER,
+        help="只处理指定视角；可重复传入。默认处理完整八视图。",
+    )
+    parser.add_argument(
+        "--efficientad-only",
+        action="store_true",
+        help="只生成EfficientAD裁图，不生成Template或YOLO分支。",
+    )
+    parser.add_argument(
+        "--template-only",
+        action="store_true",
+        help="只生成Template裁图和训练清单，不生成EfficientAD或YOLO分支。",
+    )
     parser.add_argument("--dry-run", action="store_true")
     return parser
 
@@ -51,6 +73,10 @@ def main(argv: list[str] | None = None) -> int:
             output_root=args.output_root,
             training_id=args.training_id,
             yolo_label_root=args.yolo_label_root,
+            efficientad_all_normal_train=args.efficientad_all_normal_train,
+            views=tuple(args.view) if args.view else VIEW_ORDER,
+            efficientad_only=args.efficientad_only,
+            template_only=args.template_only,
             dry_run=args.dry_run,
         )
     except (FileExistsError, OSError, TypeError, ValueError) as error:

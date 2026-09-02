@@ -108,8 +108,6 @@ def test_persist_inspection_writes_fused_only_evidence_and_appends_index(
     assert payload["capture_profile"]["hdr"]["short_exposure_us"] == 1500.0
     assert payload["capture_profile"]["hdr"]["long_exposure_us"] == 6000.0
     assert payload["capture_profile"]["camera_slots"][0]["serial"] == "serial-0"
-    assert len(payload["capture_profile"]["capture_config_sha256"]) == 64
-    assert payload["views"]["front"]["roi_statistics"]["sha256"]
     assert payload["views"]["front"]["source"]["source_kind"] == "fused_only"
     assert payload["results"][0]["overlay"] == "evidence/template_front.png"
     assert payload["results"][0]["details"] == {
@@ -122,13 +120,12 @@ def test_persist_inspection_writes_fused_only_evidence_and_appends_index(
         rows = list(csv.DictReader(stream))
     assert rows == [{"capture_id": "capture-001", "demo_id": "demo-v3", "final_status": "OK", "result_path": "capture-001"}]
 
-    with pytest.raises(FileExistsError, match="already exists"):
-        persist_inspection(config, inspection, fused_only_sources(inspection.images))
+    persist_inspection(config, inspection, fused_only_sources(inspection.images))
     with (tmp_path / "results" / "inspection_index.csv").open(newline="", encoding="utf-8") as stream:
-        assert len(list(csv.DictReader(stream))) == 1
+        assert len(list(csv.DictReader(stream))) == 2
 
 
-def test_persist_inspection_writes_exact_trusted_reference_evidence_and_hashes(
+def test_persist_inspection_writes_trusted_reference_evidence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     base = _inspection()
@@ -141,9 +138,6 @@ def test_persist_inspection_writes_exact_trusted_reference_evidence_and_hashes(
         reference_roi=np.full((6, 9, 3), 30, dtype=np.uint8),
         aligned_reference_roi=np.full((8, 8, 3), 40, dtype=np.uint8),
         difference_overlay=np.full((8, 8, 3), 50, dtype=np.uint8),
-        source_sha256="a" * 64, reference_full_sha256="b" * 64,
-        reference_roi_sha256="c" * 64, index_sha256="d" * 64,
-        whitelist_sha256="e" * 64,
     )
     full_match = replace(
         match,
@@ -194,15 +188,9 @@ def test_persist_inspection_writes_exact_trusted_reference_evidence_and_hashes(
     assert reference["sample_id"] == "normal-train-001_000001"
     assert reference["similarity"] == pytest.approx(0.91)
     assert reference["shift"] == {"x": 2, "y": -1}
-    assert reference["index_sha256"] == "d" * 64
-    assert reference["whitelist_sha256"] == "e" * 64
-    assert reference["source_sha256"] == "a" * 64
-    assert reference["reference_full_sha256"] == "b" * 64
-    assert reference["reference_roi_sha256"] == "c" * 64
     for name in ("full", "roi", "aligned_roi", "difference"):
         path = published / reference["files"][name]
         assert path.is_file()
-        assert len(reference["saved_sha256"][name]) == 64
     assert reference["comparison_mode"] == "roi"
     assert all(path.startswith("references/front_left/roi/") for path in reference["files"].values())
     full_reference = payload["trusted_ok_references"]["front_left/full"]

@@ -41,6 +41,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--yolo-checkpoint", type=Path, default=defaults.yolo_checkpoint)
     parser.add_argument("--imagenette-dir", type=Path, default=defaults.imagenette_dir)
     parser.add_argument("--efficientad-epochs", type=int, default=defaults.efficientad_epochs)
+    parser.add_argument(
+        "--efficientad-all-normal-train",
+        action="store_true",
+        help="将全部 normal 样本用于 EfficientAD 训练；只生成 checkpoint，阈值需用独立验证集标定",
+    )
     parser.add_argument("--yolo-epochs", type=int, default=defaults.yolo_epochs)
     parser.add_argument("--yolo-batch", type=int, default=defaults.yolo_batch)
     parser.add_argument("--yolo-imgsz", type=int, default=defaults.yolo_image_size)
@@ -69,6 +74,7 @@ def _config_from_args(args: argparse.Namespace) -> LabTrainingConfig:
         yolo_checkpoint=args.yolo_checkpoint.expanduser().resolve(),
         imagenette_dir=args.imagenette_dir.expanduser().resolve(),
         efficientad_epochs=args.efficientad_epochs,
+        efficientad_all_normal_train=args.efficientad_all_normal_train,
         yolo_epochs=args.yolo_epochs,
         yolo_batch=args.yolo_batch,
         yolo_image_size=args.yolo_imgsz,

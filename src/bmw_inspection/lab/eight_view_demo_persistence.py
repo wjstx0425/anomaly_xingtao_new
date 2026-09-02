@@ -3,11 +3,8 @@
 from __future__ import annotations
 
 import csv
-import hashlib
 import json
 import os
-import shutil
-import tempfile
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -16,7 +13,7 @@ import cv2
 import numpy as np
 
 from bmw_inspection.capture.config import load_capture_profile
-from bmw_inspection.lab.eight_view_dataset import VIEW_ORDER, _atomic_publish_noreplace
+from bmw_inspection.lab.eight_view_dataset import VIEW_ORDER
 from bmw_inspection.lab.eight_view_demo import EightViewDemoConfig, EightViewInspection
 from bmw_inspection.lab.eight_view_demo_capture import HdrSourceImages
 from bmw_inspection.lab.eight_view_demo_models import load_part_rois
@@ -41,7 +38,6 @@ def _capture_profile_payload(config: EightViewDemoConfig) -> dict[str, Any]:
     return {
         "settings_origin": "configured_not_camera_readback",
         "capture_config": str(profile.path),
-        "capture_config_sha256": _sha256(profile.path),
         "profile_id": profile.profile_id,
         "camera_slots": [
             {
@@ -107,14 +103,6 @@ def _write_image(path: Path, image: np.ndarray) -> None:
         raise RuntimeError(f"无法保存检测证据图片：{path}")
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        while chunk := stream.read(1024 * 1024):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def _gray(image: np.ndarray) -> np.ndarray:
     if image.ndim == 2:
         return image
@@ -127,7 +115,7 @@ def _gray(image: np.ndarray) -> np.ndarray:
     raise ValueError("ROI image must be grayscale, BGR, or BGRA")
 
 
-def _roi_statistics(path: Path, roi: np.ndarray) -> dict[str, Any]:
+def _roi_statistics(roi: np.ndarray) -> dict[str, Any]:
     gray = _gray(roi)
     return {
         "mean": float(np.mean(gray)),
@@ -136,7 +124,6 @@ def _roi_statistics(path: Path, roi: np.ndarray) -> dict[str, Any]:
         "p99": float(np.percentile(gray, 99)),
         "dark_pixel_ratio": float(np.mean(gray <= 15)),
         "bright_saturation_ratio": float(np.mean(gray >= 250)),
-        "sha256": _sha256(path),
     }
 
 
@@ -168,18 +155,12 @@ def _inspection_payload(
             "sample_id": match.sample_id,
             "similarity": match.similarity,
             "shift": {"x": match.shift_x, "y": match.shift_y},
-            "index_sha256": match.index_sha256,
-            "whitelist_sha256": match.whitelist_sha256,
-            "source_sha256": match.source_sha256,
-            "reference_full_sha256": match.reference_full_sha256,
-            "reference_roi_sha256": match.reference_roi_sha256,
             "files": {
                 "full": f"references/{view}/{mode}/reference_full.png",
                 "roi": f"references/{view}/{mode}/reference_roi.png",
                 "aligned_roi": f"references/{view}/{mode}/aligned_region.png",
                 "difference": f"references/{view}/{mode}/difference.png",
             },
-            "saved_sha256": {},
         }
         for (view, mode), match in inspection.trusted_ok_by_comparison.items()
     }
@@ -257,49 +238,41 @@ def persist_inspection(
     inspection: EightViewInspection,
     source_images: Mapping[str, HdrSourceImages],
 ) -> Path:
-    """Publish raw HDR sources, ROIs, overlays, metrics, and an index row without overwrite."""
+    """Save raw HDR sources, ROIs, overlays, metrics, and an index row."""
     source_kind, validated_sources = _validate_sources(source_images)
     root = Path(config.result_root).expanduser().resolve()
     destination = root / inspection.capture_id
     root.mkdir(parents=True, exist_ok=True)
-    staging = Path(tempfile.mkdtemp(prefix=f".{inspection.capture_id}.", dir=root))
-    try:
-        roi_by_view = load_part_rois(config.roi_config)
-        statistics: dict[str, Mapping[str, Any]] = {}
-        for view in VIEW_ORDER:
-            source = validated_sources[view]
-            _write_image(staging / "images" / f"{view}_short.png", source.short_image)
-            _write_image(staging / "images" / f"{view}_long.png", source.long_image)
-            _write_image(staging / "images" / f"{view}_hdr.png", source.fused_image)
-            roi = _crop_roi(inspection.images[view], roi_by_view[view], view)
-            roi_path = staging / "rois" / f"{view}.png"
-            _write_image(roi_path, roi)
-            statistics[view] = _roi_statistics(roi_path, roi)
-        for result in inspection.results:
-            if result.overlay is not None:
-                _write_image(staging / "evidence" / f"{result.branch.value}_{result.view_id}.png", result.overlay)
-        payload = _inspection_payload(config, inspection, source_kind, validated_sources, statistics)
-        for (view, mode), match in inspection.trusted_ok_by_comparison.items():
-            comparison_id = f"{view}/{mode}"
-            reference_images = {
-                "full": match.reference_full_image,
-                "roi": match.reference_roi,
-                "aligned_roi": match.aligned_reference_roi,
-                "difference": match.difference_overlay,
-            }
-            for name, image in reference_images.items():
-                relative = Path(payload["trusted_ok_references"][comparison_id]["files"][name])
-                target = staging / relative
-                _write_image(target, image)
-                payload["trusted_ok_references"][comparison_id]["saved_sha256"][name] = _sha256(target)
-        (staging / "inspection.json").write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
-            encoding="utf-8",
-        )
-        _atomic_publish_noreplace(staging, destination)
-    except BaseException:
-        shutil.rmtree(staging, ignore_errors=True)
-        raise
+    destination.mkdir(parents=True, exist_ok=True)
+    roi_by_view = load_part_rois(config.roi_config)
+    statistics: dict[str, Mapping[str, Any]] = {}
+    for view in VIEW_ORDER:
+        source = validated_sources[view]
+        _write_image(destination / "images" / f"{view}_short.png", source.short_image)
+        _write_image(destination / "images" / f"{view}_long.png", source.long_image)
+        _write_image(destination / "images" / f"{view}_hdr.png", source.fused_image)
+        roi = _crop_roi(inspection.images[view], roi_by_view[view], view)
+        _write_image(destination / "rois" / f"{view}.png", roi)
+        statistics[view] = _roi_statistics(roi)
+    for result in inspection.results:
+        if result.overlay is not None:
+            _write_image(destination / "evidence" / f"{result.branch.value}_{result.view_id}.png", result.overlay)
+    payload = _inspection_payload(config, inspection, source_kind, validated_sources, statistics)
+    for (view, mode), match in inspection.trusted_ok_by_comparison.items():
+        comparison_id = f"{view}/{mode}"
+        reference_images = {
+            "full": match.reference_full_image,
+            "roi": match.reference_roi,
+            "aligned_roi": match.aligned_reference_roi,
+            "difference": match.difference_overlay,
+        }
+        for name, image in reference_images.items():
+            relative = Path(payload["trusted_ok_references"][comparison_id]["files"][name])
+            _write_image(destination / relative, image)
+    (destination / "inspection.json").write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
+        encoding="utf-8",
+    )
     append_inspection_index(root, inspection, config.demo_id)
     return destination.resolve()
 

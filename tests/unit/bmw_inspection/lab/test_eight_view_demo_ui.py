@@ -24,6 +24,8 @@ from bmw_inspection.lab.eight_view_demo_ui import (
     DemoUiPhase,
     EightViewUiState,
     _demo_font_path,
+    _experiment_threshold_details,
+    _result_timing_lines,
     _trusted_ok_available,
     _trusted_reference_details,
     apply_dashboard_click,
@@ -39,6 +41,7 @@ from bmw_inspection.lab.eight_view_demo_ui import (
     step_actionable_selection,
     toggle_trusted_ok_mode,
 )
+from bmw_inspection.lab.live_cycle_timing import LiveCycleTiming
 from bmw_inspection.lab.trusted_ok_reference import TrustedOkMatch
 
 
@@ -83,6 +86,31 @@ def _inspection() -> EightViewInspection:
     return EightViewInspection("capture", images, rows, DemoFinalStatus.ERROR, 6.0, roi_images=rois)
 
 
+def _cycle_timing() -> LiveCycleTiming:
+    return LiveCycleTiming(
+        capture_id="capture",
+        started_at="2026-08-25T12:00:00.000+08:00",
+        displayed_at="2026-08-25T12:00:12.000+08:00",
+        front_capture_ms=1200.0,
+        flip_wait_ms=2500.0,
+        back_capture_ms=1300.0,
+        front_inference_ms=3900.0,
+        back_inference_ms=3800.0,
+        finalize_ms=200.0,
+        persist_ms=5100.0,
+        result_display_ms=30.0,
+        front_overlap_ms=3800.0,
+        total_cycle_ms=12000.0,
+    )
+
+
+def test_result_timing_lines_show_total_and_compact_breakdown() -> None:
+    assert _result_timing_lines(_cycle_timing()) == (
+        "完整周期 12.000 s",
+        "采F/B 1.20/1.30  翻2.50  推F/B 3.90/3.80  融0.20  存5.10",
+    )
+
+
 def _match(
     inspection: EightViewInspection,
     view: str,
@@ -105,11 +133,6 @@ def _match(
         reference_roi=np.full((12, 16, 3), 60, dtype=np.uint8),
         aligned_reference_roi=np.full((12, 16, 3), 70, dtype=np.uint8),
         difference_overlay=np.full((12, 16, 3), 80, dtype=np.uint8),
-        source_sha256="a" * 64,
-        reference_full_sha256="b" * 64,
-        reference_roi_sha256="c" * 64,
-        index_sha256="d" * 64,
-        whitelist_sha256="e" * 64,
     )
 
 
@@ -147,6 +170,28 @@ def test_actionable_results_and_step_selection_wrap_in_result_order() -> None:
     assert step_actionable_selection(inspection, "front_right", DemoBranch.YOLO, -1) == (
         "back_left",
         DemoBranch.EFFICIENTAD,
+    )
+
+
+def test_efficientad_candidate_metadata_is_visible_in_ui_details() -> None:
+    row = DemoBranchResult(
+        DemoBranch.EFFICIENTAD,
+        "front",
+        BranchStatus.PASS,
+        0.3,
+        0.55,
+        1.0,
+        "candidate",
+        None,
+        details={
+            "threshold_source": "legacy_reuse_for_0820_candidate",
+            "validation_status": "pending_independent_validation",
+        },
+    )
+
+    assert _experiment_threshold_details(row) == (
+        ("阈值来源", "legacy_reuse_for_0820_candidate"),
+        ("验证状态", "pending_independent_validation"),
     )
 
 
@@ -482,16 +527,11 @@ def test_evidence_detail_pairs_keep_algorithm_coordinate_domains() -> None:
         shift_y=full_match.shift_y,
         current_full_image=full_match.current_full_image,
         reference_full_image=reference_full,
-        current_roi=full_match.current_roi,
-        reference_roi=full_match.reference_roi,
-        aligned_reference_roi=full_match.aligned_reference_roi,
-        difference_overlay=full_match.difference_overlay,
-        source_sha256=full_match.source_sha256,
-        reference_full_sha256=full_match.reference_full_sha256,
-        reference_roi_sha256=full_match.reference_roi_sha256,
-        index_sha256=full_match.index_sha256,
-        whitelist_sha256=full_match.whitelist_sha256,
-    )
+            current_roi=full_match.current_roi,
+            reference_roi=full_match.reference_roi,
+            aligned_reference_roi=full_match.aligned_reference_roi,
+            difference_overlay=full_match.difference_overlay,
+        )
     inspection = EightViewInspection(
         base.capture_id,
         base.images,
@@ -549,8 +589,6 @@ def test_bright_streak_reference_uses_same_rotated_perspective() -> None:
         source_height=100,
         output_width=81,
         output_height=613,
-        source_image="trusted.png",
-        source_image_sha256="a" * 64,
     )
     row = DemoBranchResult(
         DemoBranch.BRIGHT_STREAK,

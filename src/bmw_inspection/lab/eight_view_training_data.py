@@ -196,12 +196,17 @@ def _materialize(
     roi_config: EightViewRoiConfig,
     reviewed_labels: Mapping[tuple[str, str, str], str],
     pending_rows: Sequence[dict[str, str]],
+    efficientad_all_normal_train: bool,
+    views: tuple[str, ...],
+    efficientad_only: bool,
+    template_only: bool,
 ) -> dict[str, object]:
     crop_rows: list[dict[str, str]] = []
     template_rows: list[dict[str, str]] = []
     queue_rows: list[dict[str, str]] = []
     yolo_label_count = 0
     yolo_positive_count = 0
+    efficientad_normal_train_counts: Counter[str] = Counter()
     for row in rows:
         stem = _export_stem(row)
         crop_relative = Path("crops") / row["view_id"] / f"{stem}.png"
@@ -224,8 +229,10 @@ def _materialize(
         identity = (row["session_id"], row["sample_id"], row["view_id"])
         yolo_text = reviewed_labels.get(identity)
 
-        if row["source_class"] in {"normal", "no_streak"}:
-            if row["split"] == "train":
+        if not template_only and row["source_class"] in {"normal", "no_streak"}:
+            if row["split"] == "train" or (
+                efficientad_all_normal_train and row["source_class"] == "normal"
+            ):
                 ea_relative = (
                     Path("efficientad")
                     / row["view_id"]
@@ -234,6 +241,7 @@ def _materialize(
                     / "images"
                     / f"{stem}.png"
                 )
+                efficientad_normal_train_counts[row["view_id"]] += 1
             elif row["split"] == "calibration":
                 ea_relative = (
                     Path("efficientad")
@@ -253,7 +261,7 @@ def _materialize(
                     / f"{stem}.png"
                 )
             _relative_symlink(crop_target, staging / ea_relative)
-        elif yolo_text and row["split"] in {"calibration", "final_test"}:
+        elif not template_only and yolo_text and row["split"] in {"calibration", "final_test"}:
             if row["split"] == "calibration":
                 ea_relative = (
                     Path("efficientad")
@@ -276,7 +284,7 @@ def _materialize(
                 )
             _relative_symlink(crop_target, staging / ea_relative)
 
-        template_label = _template_label(row, yolo_text)
+        template_label = None if efficientad_only else _template_label(row, yolo_text)
         if template_label is not None:
             template_relative = (
                 Path("template")
@@ -297,7 +305,9 @@ def _materialize(
                 }
             )
 
-        if row["source_class"] in {"normal", "no_streak"} or identity in reviewed_labels:
+        if not efficientad_only and not template_only and (
+            row["source_class"] in {"normal", "no_streak"} or identity in reviewed_labels
+        ):
             yolo_split = _SPLIT_TO_YOLO[row["split"]]
             image_link = staging / "yolo/images" / yolo_split / f"{stem}.png"
             label_target = staging / "yolo/labels" / yolo_split / f"{stem}.txt"
@@ -307,7 +317,7 @@ def _materialize(
             label_target.write_text(label_text, encoding="utf-8")
             yolo_label_count += 1
             yolo_positive_count += int(bool(label_text))
-        else:
+        elif not efficientad_only and not template_only:
             queue_rows.append(
                 {
                     **row,
@@ -317,14 +327,24 @@ def _materialize(
             )
 
     _write_csv(staging / "manifests/crop_manifest.csv", _CROP_FIELDS, crop_rows)
-    _write_csv(staging / "template/trainer_manifest.csv", _TEMPLATE_FIELDS, template_rows)
-    _write_csv(staging / "yolo/annotation_queue.csv", _QUEUE_FIELDS, queue_rows)
-    if not pending_rows:
-        (staging / "yolo/data.yaml").write_text(
-            "train: images/train\nval: images/val\ntest: images/test\nnames:\n  0: defect\n",
-            encoding="utf-8",
-        )
+    if not efficientad_only:
+        _write_csv(staging / "template/trainer_manifest.csv", _TEMPLATE_FIELDS, template_rows)
+    if not efficientad_only and not template_only:
+        _write_csv(staging / "yolo/annotation_queue.csv", _QUEUE_FIELDS, queue_rows)
+        if not pending_rows:
+            (staging / "yolo/data.yaml").write_text(
+                "train: images/train\nval: images/val\ntest: images/test\nnames:\n  0: defect\n",
+                encoding="utf-8",
+            )
     return {
+        "selected_views": list(views),
+        "branches": (
+            ["efficientad"]
+            if efficientad_only
+            else ["template"]
+            if template_only
+            else ["efficientad", "template", "yolo"]
+        ),
         "crop_count": len(crop_rows),
         "template_row_count": len(template_rows),
         "yolo_label_count": yolo_label_count,
@@ -332,7 +352,28 @@ def _materialize(
         "yolo_pending_count": len(queue_rows),
         "yolo_training_ready": not pending_rows,
         "view_crop_counts": dict(sorted(Counter(row["view_id"] for row in rows).items())),
+        "efficientad_all_normal_train": efficientad_all_normal_train,
+        "efficientad_normal_train_count_by_view": (
+            {}
+            if template_only
+            else {view: efficientad_normal_train_counts[view] for view in views}
+        ),
     }
+
+
+def _normalize_views(views: Sequence[str]) -> tuple[str, ...]:
+    """Return a non-empty canonical-order subset of BMW views."""
+    if isinstance(views, (str, bytes)):
+        raise TypeError("views must be a sequence of view names")
+    selected = tuple(views)
+    if not selected:
+        raise ValueError("views must not be empty")
+    if len(set(selected)) != len(selected) or any(view not in VIEW_ORDER for view in selected):
+        raise ValueError("views must be unique BMW view names")
+    canonical = tuple(view for view in VIEW_ORDER if view in selected)
+    if selected != canonical:
+        raise ValueError("views must follow the canonical BMW view order")
+    return selected
 
 
 def materialize_training_data(
@@ -342,9 +383,22 @@ def materialize_training_data(
     output_root: Path,
     training_id: str,
     yolo_label_root: Path | None = None,
+    efficientad_all_normal_train: bool = False,
+    views: Sequence[str] = VIEW_ORDER,
+    efficientad_only: bool = False,
+    template_only: bool = False,
     dry_run: bool = False,
 ) -> dict[str, object]:
     """Build one immutable ROI-crop release and three branch adapters."""
+    if not isinstance(efficientad_all_normal_train, bool):
+        raise TypeError("efficientad_all_normal_train must be bool")
+    if not isinstance(efficientad_only, bool):
+        raise TypeError("efficientad_only must be bool")
+    if not isinstance(template_only, bool):
+        raise TypeError("template_only must be bool")
+    if efficientad_only and template_only:
+        raise ValueError("efficientad_only and template_only are mutually exclusive")
+    selected_views = _normalize_views(views)
     if not isinstance(training_id, str) or not _TRAINING_ID.fullmatch(training_id):
         raise ValueError("training_id contains unsupported characters")
     prepared = Path(prepared_root).expanduser().resolve()
@@ -354,15 +408,17 @@ def materialize_training_data(
         raise FileExistsError(f"training dataset release already exists: {destination}")
     roi_config = load_roi_config(roi_config_path)
     manifest_path = prepared / "manifests/dataset_manifest.csv"
-    rows = _read_dataset_manifest(manifest_path)
+    all_rows = _read_dataset_manifest(manifest_path)
+    rows = [row for row in all_rows if row["view_id"] in selected_views]
     manifest_sha256 = _sha256(manifest_path)
-    if roi_config.binding_mode == "prepared_manifest" and (
+    isolated_branch = efficientad_only or template_only
+    if not isolated_branch and roi_config.binding_mode == "prepared_manifest" and (
         prepared.name != roi_config.dataset_id
         or manifest_path.resolve() != roi_config.source_manifest
         or manifest_sha256 != roi_config.source_manifest_sha256
     ):
         raise ValueError("ROI config is bound to a different prepared dataset")
-    if roi_config.binding_mode == "fixed_setup":
+    if not isolated_branch and roi_config.binding_mode == "fixed_setup":
         report_path = prepared / "report.json"
         try:
             prepared_report = json.loads(report_path.read_text(encoding="utf-8"))
@@ -373,7 +429,9 @@ def materialize_training_data(
             raise ValueError(
                 "fixed_setup ROI capture_scope differs from the prepared report capture_scope"
             )
-    reviewed_labels, pending_rows = _reviewed_yolo_labels(rows, yolo_label_root)
+    reviewed_labels, pending_rows = (
+        ({}, []) if isolated_branch else _reviewed_yolo_labels(rows, yolo_label_root)
+    )
     base_report: dict[str, object] = {
         "schema_version": 1,
         "training_id": training_id,
@@ -385,8 +443,34 @@ def materialize_training_data(
         "roi_binding_mode": roi_config.binding_mode,
         "roi_capture_scope": roi_config.capture_scope,
         "source_row_count": len(rows),
+        "selected_views": list(selected_views),
+        "branches": (
+            ["efficientad"]
+            if efficientad_only
+            else ["template"]
+            if template_only
+            else ["efficientad", "template", "yolo"]
+        ),
         "materialization": "canonical_png_plus_relative_branch_symlinks",
         "experimental_only": True,
+        "efficientad_all_normal_train": efficientad_all_normal_train,
+        "efficientad_normal_train_count_by_view": (
+            {}
+            if template_only
+            else {
+                view: sum(
+                    1
+                    for row in rows
+                    if row["view_id"] == view
+                    and row["source_class"] in {"normal", "no_streak"}
+                    and (
+                        row["split"] == "train"
+                        or (efficientad_all_normal_train and row["source_class"] == "normal")
+                    )
+                )
+                for view in selected_views
+            }
+        ),
     }
     if dry_run:
         for row in rows:
@@ -413,6 +497,10 @@ def materialize_training_data(
             roi_config=roi_config,
             reviewed_labels=reviewed_labels,
             pending_rows=pending_rows,
+            efficientad_all_normal_train=efficientad_all_normal_train,
+            views=selected_views,
+            efficientad_only=efficientad_only,
+            template_only=template_only,
         )
         report = {**base_report, **branch_report, "release_status": "published"}
         (staging / "report.json").write_text(

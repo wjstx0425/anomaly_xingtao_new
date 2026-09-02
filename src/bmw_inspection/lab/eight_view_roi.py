@@ -203,7 +203,8 @@ def select_representative_images(
         path = Path(row["source_path"]).expanduser().resolve()
         if not path.is_file() or path.is_symlink():
             raise ValueError(f"representative source image is missing or a symlink: {path}")
-        if _sha256(path) != row["source_sha256"]:
+        expected_source_sha256 = row["source_sha256"]
+        if expected_source_sha256 and _sha256(path) != expected_source_sha256:
             raise ValueError(f"representative source image SHA-256 mismatch: {path}")
         image = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
         if image is None or image.size == 0:

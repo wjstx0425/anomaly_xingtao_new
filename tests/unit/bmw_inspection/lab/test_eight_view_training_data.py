@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import shutil
 from pathlib import Path
 
 import cv2
@@ -143,6 +144,112 @@ def test_materializes_exact_crops_and_truthful_branch_layouts(tmp_path: Path) ->
     queue = list(csv.DictReader((output / "yolo/annotation_queue.csv").open()))
     assert len(queue) == 8
     assert {row["source_class"] for row in queue} == {"edge"}
+
+
+def test_all_normal_train_mode_only_changes_efficientad_layout(tmp_path: Path) -> None:
+    release, roi_path, _source_paths = _release(tmp_path)
+    manifest = release / "manifests/dataset_manifest.csv"
+    rows = list(csv.DictReader(manifest.open(newline="", encoding="utf-8")))
+    for row in rows:
+        if row["sample_id"] == "no-streak-sample":
+            row.update(source_class="normal", business_label="OK")
+        elif row["sample_id"] == "edge-sample":
+            row.update(source_class="normal", business_label="OK", split="final_test")
+    with manifest.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=FIELDS)
+        writer.writeheader()
+        writer.writerows(rows)
+    manifest_hash = hashlib.sha256(manifest.read_bytes()).hexdigest()
+    save_roi_config(
+        roi_path,
+        EightViewRoiConfig(
+            dataset_id=release.name,
+            source_manifest=manifest,
+            source_manifest_sha256=manifest_hash,
+            representative_sample_id="normal-sample",
+            image_width=12,
+            image_height=10,
+            part_rois={view: (1, 2, 9, 8) for view in VIEW_ORDER},
+        ),
+        force=True,
+    )
+
+    report = materialize_training_data(
+        prepared_root=release,
+        roi_config_path=roi_path,
+        output_root=tmp_path / "training",
+        training_id="bmw-all-normal-train-v1",
+        efficientad_all_normal_train=True,
+    )
+
+    output = tmp_path / "training/bmw-all-normal-train-v1"
+    efficientad_images = sorted((output / "efficientad/front/normal").rglob("*.png"))
+    assert len(efficientad_images) == 3
+    assert not (output / "efficientad/front/normal_test").exists()
+    assert not (output / "efficientad/held_out/front/good").exists()
+    template_rows = list(csv.DictReader((output / "template/trainer_manifest.csv").open()))
+    assert {row["split"] for row in template_rows} == {"train", "calibration", "final_test"}
+    assert len(list((output / "yolo/images/train").glob("*.png"))) == 8
+    assert len(list((output / "yolo/images/val").glob("*.png"))) == 8
+    assert len(list((output / "yolo/images/test").glob("*.png"))) == 8
+    assert report["efficientad_all_normal_train"] is True
+    assert report["efficientad_normal_train_count_by_view"] == {view: 3 for view in VIEW_ORDER}
+
+
+def test_materializes_only_selected_efficientad_view(tmp_path: Path) -> None:
+    bound_release, roi_path, _source_paths = _release(tmp_path)
+    release = tmp_path / "bmw-new-capture-v1"
+    shutil.copytree(bound_release, release)
+
+    report = materialize_training_data(
+        prepared_root=release,
+        roi_config_path=roi_path,
+        output_root=tmp_path / "training",
+        training_id="bmw-front-right-efficientad-v1",
+        views=("front_right",),
+        efficientad_only=True,
+    )
+
+    output = tmp_path / "training/bmw-front-right-efficientad-v1"
+    assert report["selected_views"] == ["front_right"]
+    assert report["branches"] == ["efficientad"]
+    assert report["source_row_count"] == 3
+    assert report["crop_count"] == 3
+    assert report["view_crop_counts"] == {"front_right": 3}
+    assert report["efficientad_normal_train_count_by_view"] == {"front_right": 1}
+    assert sorted(path.name for path in (output / "crops").glob("*")) == ["front_right"]
+    assert (output / "efficientad/front_right/normal").is_dir()
+    assert (output / "efficientad/front_right/normal_test").is_dir()
+    assert not (output / "template").exists()
+    assert not (output / "yolo").exists()
+
+
+def test_materializes_only_selected_template_view(tmp_path: Path) -> None:
+    bound_release, roi_path, _source_paths = _release(tmp_path)
+    release = tmp_path / "bmw-new-template-capture-v1"
+    shutil.copytree(bound_release, release)
+
+    report = materialize_training_data(
+        prepared_root=release,
+        roi_config_path=roi_path,
+        output_root=tmp_path / "training",
+        training_id="bmw-front-right-template-v1",
+        views=("front_right",),
+        template_only=True,
+    )
+
+    output = tmp_path / "training/bmw-front-right-template-v1"
+    assert report["selected_views"] == ["front_right"]
+    assert report["branches"] == ["template"]
+    assert report["source_row_count"] == 3
+    assert report["crop_count"] == 3
+    assert report["template_row_count"] == 2
+    assert report["view_crop_counts"] == {"front_right": 3}
+    assert report["efficientad_normal_train_count_by_view"] == {}
+    assert sorted(path.name for path in (output / "crops").glob("*")) == ["front_right"]
+    assert (output / "template/trainer_manifest.csv").is_file()
+    assert not (output / "efficientad").exists()
+    assert not (output / "yolo").exists()
 
 
 def test_complete_yolo_review_publishes_training_yaml(tmp_path: Path) -> None:

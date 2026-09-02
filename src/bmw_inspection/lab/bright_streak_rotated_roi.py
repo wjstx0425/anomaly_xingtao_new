@@ -1,21 +1,13 @@
-"""Versioned asset and perspective rectification for a rotated bright-streak ROI."""
+"""Editable perspective ROI used by the BMW laboratory light-streak detector."""
 
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-import hashlib
 import json
-import os
 from pathlib import Path
-import re
-import tempfile
 
 import cv2
 import numpy as np
-
-
-_SCHEMA = "bmw.bright_streak_rotated_roi/1.0"
-_SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,8 +19,6 @@ class RotatedBrightStreakRoi:
     source_height: int
     output_width: int
     output_height: int
-    source_image: str
-    source_image_sha256: str
 
     def __post_init__(self) -> None:
         for name in ("source_width", "source_height", "output_width", "output_height"):
@@ -37,13 +27,8 @@ class RotatedBrightStreakRoi:
                 raise ValueError(f"{name} must be a positive integer")
         if (self.output_width, self.output_height) != (81, 613):
             raise ValueError("output dimensions must be 81x613")
-        if not isinstance(self.source_image, str) or not self.source_image:
-            raise ValueError("source_image must be a non-empty string")
-        if not isinstance(self.source_image_sha256, str) or not _SHA256_RE.fullmatch(self.source_image_sha256):
-            raise ValueError("source_image_sha256 must be a lowercase 64-character SHA-256")
         if len(self.points_xy) != 4:
             raise ValueError("points_xy must contain four points")
-
         points: list[tuple[int, int]] = []
         for point in self.points_xy:
             if not isinstance(point, tuple) or len(point) != 2:
@@ -54,19 +39,17 @@ class RotatedBrightStreakRoi:
             if not 0 <= x < self.source_width or not 0 <= y < self.source_height:
                 raise ValueError("points_xy must be in source image bounds")
             points.append((x, y))
-
-        cross_products = []
+        crosses = []
         for index in range(4):
-            first = points[index]
-            second = points[(index + 1) % 4]
-            third = points[(index + 2) % 4]
-            cross_products.append(
+            first, second, third = points[index], points[(index + 1) % 4], points[(index + 2) % 4]
+            crosses.append(
                 (second[0] - first[0]) * (third[1] - second[1])
                 - (second[1] - first[1]) * (third[0] - second[0])
             )
-        if any(cross == 0 for cross in cross_products) or not (all(cross > 0 for cross in cross_products) or all(cross < 0 for cross in cross_products)):
-            raise ValueError("points_xy must form a convex quadrilateral (凸四边形)")
-
+        if any(value == 0 for value in crosses) or not (
+            all(value > 0 for value in crosses) or all(value < 0 for value in crosses)
+        ):
+            raise ValueError("points_xy must form a convex quadrilateral")
         signed_area_twice = sum(
             points[index][0] * points[(index + 1) % 4][1]
             - points[(index + 1) % 4][0] * points[index][1]
@@ -74,36 +57,19 @@ class RotatedBrightStreakRoi:
         )
         if signed_area_twice <= 0:
             raise ValueError("points_xy must be clockwise")
-        top_midpoint_y = (points[0][1] + points[1][1]) / 2
-        bottom_midpoint_y = (points[2][1] + points[3][1]) / 2
         if (
-            top_midpoint_y >= bottom_midpoint_y
+            (points[0][1] + points[1][1]) / 2 >= (points[2][1] + points[3][1]) / 2
             or points[0][0] >= points[1][0]
             or points[3][0] >= points[2][0]
             or max(points[0][1], points[1][1]) >= min(points[2][1], points[3][1])
         ):
             raise ValueError(
-                "points_xy point order (点序) must be left-top, right-top, right-bottom, left-bottom"
+                "points_xy point order must be left-top, right-top, right-bottom, left-bottom"
             )
 
 
-_ASSET_FIELDS = frozenset({"schema", *RotatedBrightStreakRoi.__dataclass_fields__})
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
-def _asset_payload(asset: RotatedBrightStreakRoi) -> dict[str, object]:
-    return {"schema": _SCHEMA, **asdict(asset)}
-
-
 def rectify_bright_streak_roi(image: np.ndarray, asset: RotatedBrightStreakRoi) -> np.ndarray:
-    """Rectify ``asset``'s source quadrilateral into its 81 by 613 pixel image."""
+    """Rectify the configured quadrilateral into an 81 by 613 pixel image."""
     if not isinstance(image, np.ndarray) or image.ndim < 2:
         raise TypeError("image must be a numpy array with at least two dimensions")
     if image.shape[:2] != (asset.source_height, asset.source_width):
@@ -119,73 +85,35 @@ def rectify_bright_streak_roi(image: np.ndarray, asset: RotatedBrightStreakRoi) 
     )
 
 
-def load_rotated_bright_streak_roi(
-    path: Path,
-    *,
-    expected_sha256: str,
-) -> RotatedBrightStreakRoi:
-    """Load a verified ROI asset and verify its referenced source image."""
-    asset_path = Path(path)
-    if not asset_path.is_file() or asset_path.is_symlink():
-        raise ValueError("ROI asset must be a regular file")
-    actual_sha256 = _sha256(asset_path)
-    if not isinstance(expected_sha256, str) or not _SHA256_RE.fullmatch(expected_sha256):
-        raise ValueError("expected_sha256 must be a lowercase 64-character SHA-256")
-    if actual_sha256 != expected_sha256:
-        raise ValueError("ROI asset SHA-256 does not match expected_sha256")
+def load_rotated_bright_streak_roi(path: Path) -> RotatedBrightStreakRoi:
+    """Load only the geometry used during inference."""
+    resolved = Path(path).expanduser().resolve()
     try:
-        payload = json.loads(asset_path.read_text(encoding="utf-8"))
+        payload = json.loads(resolved.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise ValueError("ROI asset must be valid UTF-8 JSON") from error
-    if not isinstance(payload, dict) or set(payload) != _ASSET_FIELDS:
-        raise ValueError("ROI asset fields must exactly match the schema")
-    if payload["schema"] != _SCHEMA:
-        raise ValueError(f"ROI asset schema must be {_SCHEMA}")
+        raise ValueError(f"无法读取光痕旋转ROI：{resolved}: {error}") from error
+    if not isinstance(payload, dict):
+        raise ValueError("光痕旋转ROI必须是JSON对象")
     try:
-        raw_points = payload["points_xy"]
-        if not isinstance(raw_points, list):
-            raise ValueError("points_xy must be an array")
-        asset = RotatedBrightStreakRoi(
-            points_xy=tuple(tuple(point) for point in raw_points),
+        points = payload["points_xy"]
+        if not isinstance(points, list):
+            raise ValueError("points_xy必须是数组")
+        return RotatedBrightStreakRoi(
+            points_xy=tuple(tuple(point) for point in points),
             source_width=payload["source_width"],
             source_height=payload["source_height"],
             output_width=payload["output_width"],
             output_height=payload["output_height"],
-            source_image=payload["source_image"],
-            source_image_sha256=payload["source_image_sha256"],
         )
-    except (TypeError, ValueError) as error:
-        raise ValueError("ROI asset fields are invalid") from error
-
-    source_path = Path(asset.source_image)
-    if not source_path.is_absolute():
-        source_path = asset_path.parent / source_path
-    if not source_path.is_file() or source_path.is_symlink() or _sha256(source_path) != asset.source_image_sha256:
-        raise ValueError("ROI source image SHA-256 does not match")
-    source_image = cv2.imread(str(source_path), cv2.IMREAD_UNCHANGED)
-    if source_image is None or source_image.shape[:2] != (asset.source_height, asset.source_width):
-        raise ValueError("ROI source image dimensions do not match")
-    return asset
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError("光痕旋转ROI字段无效") from error
 
 
 def write_rotated_bright_streak_roi(path: Path, asset: RotatedBrightStreakRoi) -> Path:
-    """Atomically publish one ROI JSON object without replacing an existing asset."""
+    """Write one directly editable ROI JSON file."""
     if not isinstance(asset, RotatedBrightStreakRoi):
         raise TypeError("asset must be RotatedBrightStreakRoi")
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    encoded = (json.dumps(_asset_payload(asset), ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode()
-    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent)
-    temporary = Path(temporary_name)
-    try:
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(encoded)
-            stream.flush()
-            os.fsync(stream.fileno())
-        try:
-            os.link(temporary, destination)
-        except FileExistsError:
-            raise FileExistsError(f"ROI asset already exists: {destination}") from None
-    finally:
-        temporary.unlink(missing_ok=True)
+    destination.write_text(json.dumps(asdict(asset), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return destination

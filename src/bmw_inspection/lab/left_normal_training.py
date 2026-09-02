@@ -32,11 +32,13 @@ class LeftNormalTrainingConfig:
     training_id: str
     output_root: Path
     run_id: str
+    capture_scope: str = "left"
     mask_index: Path | None = None
     component_policy: Path | None = None
     views: tuple[str, ...] = VIEW_ORDER
     efficientad_epochs: int = 30
     efficientad_image_size: tuple[int, int] = (256, 256)
+    efficientad_all_normal_train: bool = False
     gpu: int = 0
     workers: int = 8
     seed: int = 42
@@ -46,6 +48,10 @@ class LeftNormalTrainingConfig:
             object.__setattr__(self, field, Path(getattr(self, field)).expanduser().resolve())
         if self.views != VIEW_ORDER:
             raise ValueError("left normal-only training requires the canonical eight-view order")
+        if self.capture_scope not in {"left", "right"}:
+            raise ValueError("capture_scope must be left or right")
+        if not isinstance(self.efficientad_all_normal_train, bool):
+            raise TypeError("efficientad_all_normal_train must be bool")
         for field in ("training_id", "run_id"):
             if not _IDENTIFIER.fullmatch(getattr(self, field)):
                 raise ValueError(f"{field} contains unsupported characters")
@@ -85,18 +91,43 @@ def _read_object(path: Path, label: str) -> dict[str, Any]:
     return value
 
 
-def _left_sha(path: Path, label: str) -> str:
-    if _read_object(path, label).get("capture_scope") != "left":
-        raise ValueError(f"{label} capture_scope must be left: {Path(path).expanduser().resolve()}")
+def _capture_scope_sha(path: Path, label: str, expected_scope: str) -> str:
+    if _read_object(path, label).get("capture_scope") != expected_scope:
+        raise ValueError(
+            f"{label} capture_scope must be {expected_scope}: {Path(path).expanduser().resolve()}"
+        )
     return _sha256(path)
+
+
+def _roi_identity_sha(
+    config: LeftNormalTrainingConfig,
+    prepared_report: Mapping[str, Any],
+) -> str:
+    payload = _read_object(config.roi_config, "ROI config")
+    if payload.get("capture_scope") is not None:
+        return _capture_scope_sha(config.roi_config, "ROI config", config.capture_scope)
+
+    from bmw_inspection.lab.eight_view_roi import load_roi_config
+
+    roi = load_roi_config(config.roi_config)
+    expected_manifest = (config.prepared_root / "manifests/dataset_manifest.csv").resolve()
+    if roi.binding_mode != "prepared_manifest" or roi.source_manifest != expected_manifest:
+        raise ValueError("ROI config must be bound to the selected prepared manifest")
+    if roi.dataset_id != prepared_report.get("dataset_id"):
+        raise ValueError("ROI config dataset_id differs from the selected prepared release")
+    return _sha256(config.roi_config)
 
 
 def validate_left_normal_inputs(config: LeftNormalTrainingConfig) -> dict[str, str]:
     """Validate all cross-hand-sensitive identities before any stage may run."""
 
+    prepared_report_path = config.prepared_root / "report.json"
+    prepared_report = _read_object(prepared_report_path, "prepared release report")
     return {
-        "prepared_report_sha256": _left_sha(config.prepared_root / "report.json", "prepared release report"),
-        "roi_config_sha256": _left_sha(config.roi_config, "ROI config"),
+        "prepared_report_sha256": _capture_scope_sha(
+            prepared_report_path, "prepared release report", config.capture_scope
+        ),
+        "roi_config_sha256": _roi_identity_sha(config, prepared_report),
     }
 
 
@@ -104,9 +135,29 @@ def build_left_normal_plan(config: LeftNormalTrainingConfig) -> tuple[LeftTraini
     """Return the exact five-stage plan; it intentionally contains no YOLO or bright streak."""
 
     return (
-        LeftTrainingStep("materialize", {"prepared_root": str(config.prepared_root), "training_release": str(config.training_release)}),
+        LeftTrainingStep(
+            "materialize",
+            {
+                "prepared_root": str(config.prepared_root),
+                "training_release": str(config.training_release),
+                "efficientad_all_normal_train": config.efficientad_all_normal_train,
+            },
+        ),
         LeftTrainingStep("template", {"train_split": "train", "fit_split": "calibration", "views": list(config.views)}),
-        LeftTrainingStep("efficientad", {"views": list(config.views), "batch": 1, "epochs": config.efficientad_epochs}),
+        LeftTrainingStep(
+            "efficientad",
+            {
+                "views": list(config.views),
+                "batch": 1,
+                "epochs": config.efficientad_epochs,
+                "all_normal_train": config.efficientad_all_normal_train,
+                "validation": (
+                    "pending_external_validation"
+                    if config.efficientad_all_normal_train
+                    else "materialized_normal_test"
+                ),
+            },
+        ),
         LeftTrainingStep("score_component_maps", {"score_source": "accepted_component_max_p95"}),
         LeftTrainingStep("calibrate_component_thresholds", {"fit_split": "calibration", "target_part_fpr": TARGET_PART_FPR}),
     )
@@ -203,6 +254,7 @@ def materialize_left_normal_data(config: LeftNormalTrainingConfig) -> dict[str, 
     return materialize_training_data(
         prepared_root=config.prepared_root, roi_config_path=config.roi_config,
         output_root=config.training_root, training_id=config.training_id,
+        efficientad_all_normal_train=config.efficientad_all_normal_train,
     )
 
 
@@ -249,7 +301,7 @@ def _lab_config(config: LeftNormalTrainingConfig):
     from dataclasses import replace
     from bmw_inspection.lab.eight_view_train_all import LabTrainingConfig
     defaults = LabTrainingConfig.defaults(config.repo_root)
-    return replace(defaults, prepared_root=config.prepared_root, roi_config=config.roi_config, training_root=config.training_root, training_id=config.training_id, output_root=config.output_root, run_id=config.run_id, efficientad_epochs=config.efficientad_epochs, gpu=config.gpu, workers=config.workers, seed=config.seed)
+    return replace(defaults, prepared_root=config.prepared_root, roi_config=config.roi_config, training_root=config.training_root, training_id=config.training_id, output_root=config.output_root, run_id=config.run_id, efficientad_epochs=config.efficientad_epochs, efficientad_all_normal_train=config.efficientad_all_normal_train, gpu=config.gpu, workers=config.workers, seed=config.seed)
 
 
 def score_component_maps(
@@ -325,16 +377,20 @@ def run_left_normal_training(config: LeftNormalTrainingConfig, *, dry_run: bool 
     """Run real default train handlers; calibration is a separate post-mask stage."""
     if stage not in {"all", "train", "calibrate"}:
         raise ValueError("stage must be one of: all, train, calibrate")
+    if config.efficientad_all_normal_train and stage != "train":
+        raise ValueError(
+            "all-normal EfficientAD mode supports only --stage train until an external validation release is provided"
+        )
     identities = validate_left_normal_inputs(config)
     plan = build_left_normal_plan(config)
     selected = plan[:3] if stage == "train" else plan[3:] if stage == "calibrate" else plan
     if dry_run:
         if stage in {"all", "calibrate"} and (config.mask_index is None or config.component_policy is None):
             raise ValueError("calibrate stage requires --mask-index and --component-policy")
-        return {"status": "dry_run", "candidate_only": True, "gpu_work_started": False, "run_dir": str(config.run_dir), "identities": identities, "steps": [{"name": step.name, "parameters": dict(step.parameters), "status": "planned"} for step in selected]}
+        return {"status": "dry_run", "capture_scope": config.capture_scope, "candidate_only": True, "gpu_work_started": False, "run_dir": str(config.run_dir), "identities": identities, "steps": [{"name": step.name, "parameters": dict(step.parameters), "status": "planned"} for step in selected]}
     if stage in {"train", "all"}:
         if config.run_dir.exists() or config.run_dir.is_symlink():
-            raise FileExistsError(f"left normal-only output already exists; choose a new --run-id: {config.run_dir}")
+            raise FileExistsError(f"normal-only output already exists; choose a new --run-id: {config.run_dir}")
         config.run_dir.mkdir(parents=True)
     elif not config.run_dir.is_dir():
         raise ValueError("calibrate stage requires the completed train run directory")
@@ -346,7 +402,7 @@ def run_left_normal_training(config: LeftNormalTrainingConfig, *, dry_run: bool 
         "calibrate_component_thresholds": calibrate_component_thresholds,
     }
     handlers.update(stage_handlers or {})
-    report: dict[str, Any] = {"status": "running", "candidate_only": True, "run_dir": str(config.run_dir), "identities": identities, "steps": []}
+    report: dict[str, Any] = {"status": "running", "capture_scope": config.capture_scope, "candidate_only": True, "run_dir": str(config.run_dir), "identities": identities, "steps": []}
     state: dict[str, Any] = {}
     report_path = config.run_dir / "run_report.json"
     for step_item in selected:

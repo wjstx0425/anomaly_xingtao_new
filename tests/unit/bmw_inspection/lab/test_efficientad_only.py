@@ -127,6 +127,70 @@ def test_efficientad_only_preflight_ignores_yolo_ready_release_gate(tmp_path: Pa
     assert report["views"] == list(VIEW_ORDER)
 
 
+def test_efficientad_only_preflight_accepts_one_selected_view(tmp_path: Path) -> None:
+    config = replace(_config(tmp_path), views=("front_right",))
+    release = config.training_release
+    for split in ("normal", "normal_test"):
+        image_dir = release / "efficientad/front_right" / split
+        image_dir.mkdir(parents=True)
+        (image_dir / "sample.png").write_bytes(b"placeholder")
+
+    report = train_all.preflight_efficientad_only(config)
+    plan = train_all.build_efficientad_only_plan(config)
+
+    assert report["views"] == ["front_right"]
+    assert set(report["image_counts"]) == {"front_right"}
+    assert plan[0].parameters["views"] == ["front_right"]
+
+
+def test_efficientad_only_cli_selects_front_right() -> None:
+    script = REPO_ROOT / "pipeline/bmw_lab_train_efficientad_only.py"
+    spec = importlib.util.spec_from_file_location("bmw_lab_train_efficientad_only_view_cli", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    args = module.build_parser().parse_args(["--view", "front_right"])
+    config = module._config_from_args(args)
+
+    assert config.views == ("front_right",)
+
+
+def test_all_normal_single_view_run_skips_scoring_and_threshold_fit(tmp_path: Path) -> None:
+    config = replace(
+        _config(tmp_path),
+        views=("front_right",),
+        efficientad_all_normal_train=True,
+    )
+    calls: list[str] = []
+
+    report = train_all.run_efficientad_only_training(
+        config,
+        stage_handler=lambda _config: calls.append("efficientad") or {"status": "complete"},
+        score_handler=lambda _config: pytest.fail("all-normal run must not score normal_test"),
+        threshold_handler=lambda _config, _scores: pytest.fail("all-normal run must not fit thresholds"),
+    )
+
+    assert calls == ["efficientad"]
+    assert [step.name for step in train_all.build_efficientad_only_plan(config)] == ["efficientad"]
+    assert [step["name"] for step in report["steps"]] == ["efficientad"]
+    assert report["status"] == "complete"
+
+
+def test_efficientad_only_cli_enables_all_normal_training() -> None:
+    script = REPO_ROOT / "pipeline/bmw_lab_train_efficientad_only.py"
+    spec = importlib.util.spec_from_file_location("bmw_lab_train_efficientad_all_normal_cli", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    args = module.build_parser().parse_args(
+        ["--view", "front_right", "--efficientad-all-normal-train"]
+    )
+
+    assert module._config_from_args(args).efficientad_all_normal_train is True
+
+
 def test_efficientad_only_writes_a_21_part_normal_only_threshold_asset(tmp_path: Path) -> None:
     calibrate = getattr(train_all, "_calibrate_efficientad_normal_thresholds", None)
     assert calibrate is not None, "normal-only threshold calibration stage must exist"
@@ -154,6 +218,31 @@ def test_efficientad_only_writes_a_21_part_normal_only_threshold_asset(tmp_path:
     assert payload["normal_false_positive_count"] <= 1
     assert payload["defect_metrics"] == "not_evaluated"
     assert set(payload["thresholds"]) == set(VIEW_ORDER)
+
+
+def test_efficientad_normal_thresholds_accept_actual_ten_part_calibration(tmp_path: Path) -> None:
+    calibrate = getattr(train_all, "_calibrate_efficientad_normal_thresholds", None)
+    assert calibrate is not None
+    config = _config(tmp_path)
+    score_dir = config.run_dir / "efficientad" / "score_analysis"
+    score_dir.mkdir(parents=True)
+    score_csv = score_dir / "efficientad_normal_test_scores.csv"
+    rows = ["part_id,view_id,label,score,image_path"]
+    for part_index in range(10):
+        for view_index, view in enumerate(VIEW_ORDER):
+            part_id = f"bmw_normal_group{part_index:03d}"
+            image_path = score_dir / f"session__{part_id}_000001__{view}.png"
+            rows.append(f"{part_id},{view},normal,{0.1 + part_index / 1000 + view_index / 10000},{image_path}")
+            checkpoint = config.run_dir / "efficientad" / view / "model.ckpt"
+            checkpoint.parent.mkdir(parents=True, exist_ok=True)
+            checkpoint.write_bytes(view.encode("utf-8"))
+    score_csv.write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+    report = calibrate(config, {"scores_csv": str(score_csv)})
+
+    assert report["normal_part_count"] == 10
+    assert report["allowed_normal_false_positive_count"] == 0
+
 
 
 def test_efficientad_only_runner_refuses_existing_output_directory(tmp_path: Path) -> None:

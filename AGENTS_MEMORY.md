@@ -1,5 +1,76 @@
 # AGENTS Memory
 
+## BMW worktree 合并前整理（2026-09-02）
+
+- `agent/bmw-21only-diagnostics` 的 2026-08-20 至 2026-08-25 未提交 BMW 改动已作为待合并快照整理；`*.orig` 临时备份不纳入版本控制。
+- 八视图运行时精简已删除 `pipeline/bmw_lab_snapshot_reproducibility.py`，因此同步删除其孤儿单元测试；旧 receipt/SHA/publisher 机制不恢复。
+- `template40_outside05` 左右手候选配置已同步当前 rollback 配置的普通 Template 阈值及四个后视角 weighted 阈值，继续保证候选只改变四个前视角的 `outside_weight=0.5` 权重与其校准阈值。
+- BMW 聚焦回归结果为 `560 passed`；另有 3 个仅由独立 worktree 路径和旧 worktree `pyproject.toml`/`uv.lock` 引起的合并前失败，需在合入主工作区后用主分支依赖文件复验。
+
+## BMW 实时 GUI 完整检测周期计时（2026-08-25）
+
+- 实时 GUI 现在用 `time.perf_counter_ns()` 记录从第一次空格键被接受、即将采集正面，到第一帧 RESULT 画面的 `cv2.imshow()` 返回的完整软件周期。该边界不声称包含显示器扫描或人眼感知时间。
+- 每次实时检测在 `<result_root>/<capture_id>/cycle_timing.json` 保存 `front_capture_ms`、`flip_wait_ms`、`back_capture_ms`、正/反面推理、finalize/可信OK、原有结果保存、结果显示延迟、正面推理重叠时间与 `total_cycle_ms`。`total_cycle_ms` 只到第一帧 RESULT 返回；后台保存耗时另记 `persist_ms`。文件不含 SHA、receipt、provenance 或发布 schema。
+- RESULT 状态卡显示完整周期总时间，并紧凑显示正/反采集、翻面、正/反推理、融合对比和保存时间。该计时只在真实相机 GUI 路径生成；离线 `--no-gui`/回放不伪造采集或翻面数值。
+- 单 worker 时序已优化为：正面推理可与翻面/反面采集重叠，正/反推理仍串行；finalize 完成后先显示 RESULT，再由同一 worker 保存完整图片、证据、JSON和索引。保存期间禁止启动下一件，保存失败会明确进入 ERROR。未修改 Template、光痕、YOLO、EfficientAD、阈值、ROI、mask、HDR 参数或融合。
+- 优化前左手现场 `bmw_demo_20260825_103344` 实测完整可见周期 `17701.495 ms`，其中保存 `5911.947 ms`。因此类似工况下本次调度优化预计把结果显示提前约 `5.9 s`，但不提高连续件吞吐；必须再拍一件读取新 `cycle_timing.json` 才是优化后现场实测。
+- TDD 受控时钟回归验证了结果帧先于保存、可见周期由 `1120.0 ms` 降为 `970.0 ms`，并保留 `300.0 ms` 正面推理重叠；最终聚焦回归为 `50 passed`。
+
+## BMW 右手0820可信OK图库更新（2026-08-21）
+
+- 右手可信OK库已从旧的20260810图库切换为 `/home/yunjing/anomaly_xingtao_new/dataset/bmw_trusted_ok_reference/bmw_right_0820_train_normal_v1/reference_index.json`。新库使用右手0820 train/normal/OK 的 `group002/003/006/008/009/010/011/013` 八个完整零件，共64条八视图参考；全图直接引用 prepared manifest 原图，并按 `configs/bmw/rois/bmw_right_0820_v1.json` 生成64张 ROI。
+- `configs/bmw/experiments/bmw_eight_view_demo_right_0820_mixed_v1.json` 已指向上述绝对路径。新库无SHA、receipt、publisher或provenance绑定；仍保留八视图完整、文件存在、图片可读、uint8、尺寸和ROI边界检查。`TrustedOkMatcher.preload()` 实测成功，相关聚焦回归12项通过。
+- 右手 EfficientAD 阈值保持恢复后的原值 `0.5502086162570001/0.5500145435330002/0.549995529652`，本次没有修改任何阈值、模型、mask、ROI或融合规则。
+- 加载旧右手可信库的 PID `666937/666950` 已TERM退出；加载新右手0820可信库的GUI于21:59启动，PID `849653/849666`，控制台确认可信OK预热完成和模型加载完成。
+
+## BMW 右手0820 EfficientAD比例调整已回退（2026-08-21）
+
+- 用户曾要求把左手相对放宽比例应用到右手，短暂得到 `front/front_left/front_right=0.6502465464855457/0.6111272705922224/0.639183993919892`；随后明确要求恢复原值。当前 `configs/bmw/experiments/bmw_eight_view_demo_right_0820_mixed_v1.json` 已恢复为 `0.5502086162570001/0.5500145435330002/0.549995529652`，阈值来源恢复 `legacy_reuse_for_0820_candidate`，验证状态恢复 `pending_independent_validation`。
+- 其他五个 EfficientAD 阈值、Template、YOLO、光痕、ROI、mask和融合规则在调整及回退过程中均未修改。比例调整期的 `bmw_right_normal_group002_000001` 25项全PASS结果只作为历史实验记录，不能代表当前原阈值进程的现场检测。
+- 比例阈值右手GUI PID `606915/606928` 已TERM退出；恢复原值后的右手GUI于21:27启动，PID `666937/666950`，控制台确认可信OK预热完成和模型加载完成。配置契约聚焦测试为5项通过；Qt字体目录提示不影响窗口启动。
+
+## BMW 左手0820可信OK图库与EfficientAD现场误拒修正（2026-08-21）
+
+- 新可信OK图库为 `/home/yunjing/anomaly_xingtao_new/dataset/bmw_trusted_ok_reference/bmw_left_0820_train_normal_v1/reference_index.json`。它从 left 0820 manifest 的 train/normal/OK 中固定选择 `group002/004/005/006/008/011/012/013` 八个完整零件，共64条八视图参考；全图直接引用原始 fused 图，按当前 `configs/bmw/rois/bmw_left_0820_v1.json` 生成64张 ROI。运行时 index 只保留 `physical_part_id/sample_id/view_id/full_image_path/roi_image_path`，没有 SHA、receipt、provenance 或 publisher。
+- 生成器为 `pipeline/bmw_lab_build_trusted_ok_reference.py`，默认输出上述新目录。它保留文件存在、图片可读、uint8/尺寸、ROI边界、train normal OK及八视图完整检查。生成器与 matcher 聚焦回归为6项通过；真实图库64 references已通过 `TrustedOkMatcher.preload()`。
+- 当前左手配置 `configs/bmw/experiments/bmw_eight_view_demo_left_0820_mixed_v1.json` 已切换到新图库。前三视角 EfficientAD 部署阈值从 `0.33/0.36/0.37` 放宽为 `front=0.39`、`front_left=0.40`、`front_right=0.43`；其余五视角不变。依据是8个训练正常件的最终组件分数上界 `0.318326/0.309631/0.342541`，以及4次“Template/YOLO/光痕均通过、仅EA误拒”的现场件上界 `0.362178/0.376671/0.406091`，再保留约0.02现场余量。标记为 `field_ok_envelope_20260821`，仍是实验室阈值而非独立验证结论。
+- 已知小脚形变件的 EfficientAD 分数与现场正常分数重叠，不能同时靠单一EA阈值区分；该形变继续由已收紧的 Template 与新YOLO兜底。EfficientAD overlay 不改计算，但最终NG的 accepted component 现在用红框/红轮廓，rejected维持橙色，并直接写出 `P95/threshold/exceedance/area/reason`，避免把绿色宽连通域误解为真实缺陷框。
+- 保存记录 `bmw_demo_20260821_201034` 原来只有 `front_right EfficientAD=0.403831/0.37` 为NG；用新配置CPU离线回放得到25 PASS / 0 NG / 0 ERROR，模型耗时 `4368.194 ms`。结果目录为 `results/bmw_lab_one_click/bmw_eight_view_demo_left_0820_mixed_v1/bmw-left-201034-new-ok-replay.n5ofHy/`，截图为同一结果根的 `replay_201034_new_ok_bank.png`。
+- 19:54启动的旧进程 PID `135207/135210` 已TERM退出。新左手GUI于20:34启动，PID `367133/367146`，控制台已确认“可信OK参考库预热完成”“模型加载完成”；Qt字体目录提示仍不影响窗口启动。启动命令保持显式 left 0820 mixed config，不要使用默认右手配置。
+
+## BMW 0820 左右手混合模型接入（2026-08-20）
+
+- 新增互不覆盖的实验配置：`configs/bmw/experiments/bmw_eight_view_demo_right_0820_mixed_v1.json` 与 `bmw_eight_view_demo_left_0820_mixed_v1.json`。两者分别使用 `configs/bmw/rois/bmw_right_0820_v1.json`、`bmw_left_0820_v1.json`，直接加载各手 0820 run 下八个 `template/<view>/model.json` 和八个顶层 `efficientad/<view>/model.ckpt`；共享旧 YOLO `bmw_right_multisource_left_yolo_v1/yolo/train/weights/best.pt`，并保留各手旧版全图光痕规则与旋转四点 ROI。
+- Template 判定继续使用配置中的旧部署阈值，但结果同时记录模型 JSON 内的 `model_threshold`、`deployment_threshold`、`risk` 和 `threshold_exceedance`。EfficientAD 结果显式记录 `threshold_source=legacy_reuse_for_0820_candidate` 与 `validation_status=pending_independent_validation`，不可将一次离线可运行解释为阈值已适配新 checkpoint。
+- 同一视角仅裁剪一次 0820 公共 ROI，Template、YOLO、EfficientAD 收到同一个 NumPy 数组对象；光痕仍收到完整 `front_left` HDR 图。左右旧光痕四点均位于对应 0820 `front_left` 公共 ROI 范围内。左手 YOLO `front_secondary` 固定忽略框确认是旧 ROI 局部坐标，按全图位置不变从 `[1580,450,1756,800]` 转为新 ROI 局部 `[1505,628,1681,978]`，转换前后坐标均写入左配置说明。
+- 操作者随后直接在 0820 ROI 上重画 EfficientAD mask：右手 `results/bmw_efficientad_manual_ignore_masks/bmw_right_0820_manual_ignore_v1/index.json`，左手 `.../bmw_left_0820_manual_ignore_v1/index.json`。两套混合配置的 `efficientad.ignore_mask_index` 已切换到对应新 index；八张 mask 均可读、仅含 `0/255`，尺寸逐视角精确匹配 0820 ROI，因此 EfficientAD 不再需要运行时缩放。右手 Template 仍独立使用旧 `bmw_right_manual_ignore_v3` 并按 `INTER_NEAREST` 适配，左手 Template 不使用 mask；左手 EfficientAD 组件过滤策略保持不变。此前记录的两次离线分数产生于切换前，尚未用新 mask 重放。
+- 右手离线样本 `bmw_right_normal_group001_000001`：25 项为 20 PASS / 5 NG / 0 ERROR，最终 NG，模型耗时 `6142.605 ms`。8 个 EfficientAD 全 PASS，分数范围 `0.314678-0.409941`，旧阈值范围 `0.549995-0.550209`。结果目录为 `results/bmw_lab_one_click/bmw_eight_view_demo_right_0820_mixed_v1/bmw_right_normal_group001_000001/`，截图为根目录 `replay_right_group001.png`。
+- 左手离线样本 `bmw_left_normal_group001_000001`：25 项为 22 PASS / 3 NG / 0 ERROR，最终 NG，模型耗时 `4994.287 ms`。8 个 EfficientAD 全 PASS，分数范围 `0-0.405828`，旧阈值范围 `0.507070-0.601900`。结果目录为 `results/bmw_lab_one_click/bmw_eight_view_demo_left_0820_mixed_v1/bmw_left_normal_group001_000001/`，截图为根目录 `replay_left_group001.png`。两侧各保存 24 张输入图、8 张 ROI、25 张分支证据；结果包含全部分数和阈值。
+- 0820 checkpoint 的教师 mean/std 已写入，但 map quantiles 因 all-normal 训练未运行内部验证而仍为零；一次正常样本上分数与旧阈值处于同一 0.x 数量级且全部低于阈值，只能作为接入 smoke，仍待独立正常/缺陷集验证。当前环境 NVML/GPU 不可用，未验证 GPU 推理或四相机实时采集。聚焦回归为 `45 passed`。
+- `pipeline/bmw_lab_select_bright_streak_rotated_roi.py` 已同步精简后的 `RotatedBrightStreakRoi` 接口：四点选择器只写 `points_xy/source_width/source_height/output_width/output_height`，不再传已删除的 `source_image/source_image_sha256`，也不再计算或打印 ROI SHA。修复回归为 `5 passed`；Qt 字体目录提示不影响 OpenCV 点击和保存。
+- 操作者重新选择了左右手光痕四点 ROI，并已切入对应 0820 mixed 配置。右手 `results/bmw_bright_streak_rotated_roi/bmw_right_0820_manual_v1/roi.json` 点位为 `[(1838,1444),(1899,1437),(2010,2000),(1956,2017)]`；左手 `.../bmw_left_0820_manual_v1/roi.json` 点位为 `[(1929,1113),(1973,1117),(1956,1710),(1909,1707)]`。两者均为完整 4024×3036 `front_left` HDR 坐标，可矫正为 81×613，且四点位于对应 0820 `front_left` 公共 ROI 内。光痕 geometry 和判定阈值未改；此前离线光痕结果产生于旧 ROI，尚未用新 ROI 重放。切换聚焦验证为 `7 passed`。
+
+## BMW 八视图实验室运行时精简（2026-08-20）
+
+- 当前唯一活跃入口是 `pipeline/bmw_lab_eight_view_demo.py`。默认右手配置为 `configs/bmw/experiments/bmw_eight_view_demo_v6_right_normal_20260814_v1.json`；左手显式使用 `configs/bmw/experiments/bmw_eight_view_demo_left_normal_20260814_v1.json`。两套配置直接列出 Template 模型与阈值、光痕 geometry/thresholds/旋转 ROI、8 个 EfficientAD checkpoint 与阈值/mask/组件过滤、YOLO checkpoint/阈值、ROI、可信 OK 索引和结果目录。
+- Demo 活跃链路不再计算或校验 SHA-256，不再读取 training-run receipt、composition、manifest identity、source release identity 或 publisher rebind 产物。修改阈值只改当前配置中的 `template.thresholds`、`bright_streak.thresholds`、`efficientad.thresholds`、`yolo.candidate_conf/final_threshold`；替换模型、ROI、mask 或可信 OK 索引只改对应路径。
+- 检测计算仍是 8 Template + `front_left` 光痕 + 8 YOLO + 8 EfficientAD，共 25 项；所有分支都会执行，融合保持 `ERROR > NG > OK`。EfficientAD 仍保留手工 ignore mask 和左手 component policy，中文 UI、真实 YOLO 框、Template/EfficientAD 热力图、光痕中心线、可信 OK 对比及每次图片/结果保存均保留。
+- 运行时仍检查配置/JSON/文件可读、八视角完整、ROI 边界、二值 mask 尺寸、模型加载、相机采集和推理异常转 ERROR。旧 V1-V5 Demo 配置、composition/rebind publisher、可信 OK 发布 CLI 和不可覆盖保存层已删除；历史结果与模型/数据资产未清理。
+- uv 离线回放 `bmw_normal_group001_000001`（右手 V6）实测为 `OK`，25 PASS / 0 NG / 0 ERROR，模型检测耗时 `4832.444 ms`。结果保存在 `results/bmw_lab_one_click/bmw_eight_view_demo_v6_right_normal_20260814_v1/bmw_normal_group001_000001/`，截图为同一根目录下 `lab_simplify_group001.png`。本次环境无可用 GPU，未验证实时四相机采集。
+
+## BMW 四算法卡片点击切换修复（2026-08-13）
+
+- 修复提交 `c8f56ab0`。OpenCV 4.13 Qt 的 `setMouseCallback` 已经把窗口事件映射到原始 `1600x900` 图像坐标，入口旧逻辑又按 `getWindowImageRect` 做了一次缩放，导致右侧四张算法卡片的点击落到错误区域。现在直接使用 Qt 回调的图像像素坐标，同时修复八视角卡片和证据面板的同源偏移。
+- TDD 回归覆盖 Template、光痕、YOLO、EfficientAD 四个卡片中心点；干净提交快照的 UI/V3 聚焦回归为 `183 passed`。
+- 四相机重启时 `DA9805574` 返回独占占用 `0x80000203`，因此未声称真机运行成功。已改用保存记录 `211302` 启动离线 GUI 会话 `16688` 供现场点击验证。
+
+## BMW 光痕 V3 与可点击 UI 真机整合（2026-08-12）
+
+- 整合提交为 `37172148` 和 Qt 中文窗口兼容修复 `642a37c6`：四算法卡片、八视角卡片、证据详情页与光痕 V3 现在位于同一运行入口。
+- OpenCV 4.13 Qt 后端无法用中文窗口名查找 `setMouseCallback` 句柄；运行时改用 ASCII 内部句柄 `BMW_EIGHT_VIEW_DEMO`，再用 `setWindowTitle` 显示全中文标题。
+- 干净提交快照的 UI/V3 聚焦回归为 `182 passed`。真实保存记录 `bmw_demo_20260812_211302` 离线重放仍为光痕 `PASS/OK`，其余 24 项逐字段完全一致，SHA256 为 `03c50c877762f9bc1943ab7a0b4d23616bcbc858bd2f3886244cf2674d97e8e0`。
+- 四相机 Demo 已在会话 `8809` 真实启动：模型和可信 OK 库预热完成，越过原鼠标回调崩溃点并保持在四相机主循环。未自动触发拍摄，因此不将本次启动声称为新零件检测结果。
+
 ## BMW 光痕 tracked-profile V3 最终验收（2026-08-12）
 
 - 光痕 V3 已完成到 `1ca4f471`：固定全图 ROI `[1792,1180,1873,1793]`，在 `81x613` 区域内追踪斜向中心线，并用强/弱阈值、覆盖率、最长连续段、内部最大断点和断点数判定；旧 `raw_profile_v2` 仍保留用于回退。
@@ -8,6 +79,98 @@
 - V3 启动时失败关闭：重算算法、评估器、manifest、ROI 与全部评估产物哈希；强制固定 ROI、可容纳的 geometry、唯一确认现场样本 `211302=OK` 及其四个源文件哈希，并逐条核对 metrics、61 个 NPZ、8 个 no-streak、20 个 final-test 和 20 条 replay 的身份及语义一致性。
 - 证据色彩：绿色是强响应，橙色是弱阈值桥接，红色只表示有效光痕范围内的内部断点，灰色是前后背景。不要把灰色背景解释成断续。
 - 当前没有真实“有光痕但断续”的 NG 样本（`real_broken_samples=0`）；断续能力只有合成测试保障，不能声称真实断续召回率。补充真实断续样本后需要重新做独立验证。
+
+## BMW clickable evidence UI handoff (2026-08-12)
+
+- The completed UI is readable in `/home/yunjing/anomaly_xingtao_new/.worktrees/bmw-eight-view-handoff` on branch
+  `agent/bmw-21only-diagnostics`. It adds clickable four-algorithm cards, clickable eight-view cards, evidence-panel
+  detail navigation, and an in-window trusted-OK/current-evidence comparison page. `Esc` returns from detail to the
+  dashboard, dashboard `Esc` is a no-op, and `Q` exits.
+- UI-only commits, in cherry-pick order, are `31da1aab`, `8ae921ee`, `548c2439`, `bda9c434`, and `ee4ece91`. Do not
+  cherry-pick the continuous range because algorithm commit `70ace398` is interleaved between the fourth and fifth UI
+  commits. Every listed UI commit changes only the renderer/entrypoint and their two unit-test files.
+- Template detail compares an aligned trusted reference against the selected Template model overlay; YOLO and
+  EfficientAD compare the trusted ROI against the selected ROI overlay; bright-streak crops the same `roi_xyxy` from
+  the trusted full image and rotates both sides 90 degrees clockwise. PASS details never expose a reference selected
+  for another NG branch, and missing references never fall back to unapproved normal images.
+- Fresh final UI verification was `25 passed` for the two focused test files; both implementation files compiled and
+  `git diff --check` passed. This is code/headless verification only: no real OpenCV display, camera, or GPU run was
+  claimed. The target environment uses OpenCV 4.13 Qt, whose mouse callback coordinates are local to the image viewport.
+
+## BMW EfficientAD manual ignore masks (2026-08-12)
+
+- User rejected automatic foreground segmentation and selected the minimum operator workflow: each of the eight saved
+  ROI images may have zero or multiple polygons, and only those polygons are excluded from EfficientAD anomaly-map
+  scoring. EfficientAD still receives the unchanged ROI image. Template, bright-streak, YOLO, HDR, and the public
+  rectangular ROI remain unchanged.
+- Selector: `pipeline/bmw_lab_select_efficientad_ignore_masks.py`. Controls are left-click add point, right-click/Enter
+  close polygon, `S` save view, `N` no mask, `U` undo, `R` reset, and Esc cancel the whole no-overwrite publication.
+  The asset contract in `src/bmw_inspection/lab/efficientad_ignore_mask.py` uses `0=inspect`, `255=ignore`, permits empty
+  masks, and verifies source ROI, individual mask, index, and public ROI SHA values.
+- Human-selected asset:
+  `results/bmw_efficientad_manual_ignore_masks/bmw_right_manual_ignore_v1/index.json`, SHA-256
+  `6c338107770030b550374cd66fbe21ac57b218d8e24f808ecf63756a5d263d83`. Active polygons are `back=1`
+  (`2.3254%` ROI ignored), `back_left=1` (`2.2217%`), and `back_secondary=1` (`18.9240%`); the other five views have
+  explicit empty masks and retain their V3 `pred_score` behavior.
+- V4 lab config is `configs/bmw/experiments/bmw_eight_view_demo_v4_manual_ignore_mask.json`, SHA-256
+  `88644f1dc40a7ccb36d201ca781c7fbc849f09e30fc6180060723d07896e0b09`. For the three active views, status uses the
+  maximum returned anomaly-map value outside the manual mask; evidence retains the original `pred_score`, raw map max,
+  score source, ignored pixel counts, and mask-index SHA. The heatmap and hotspot are also restricted to the inspect
+  region. Empty-mask views remain byte-for-byte on the original scoring path.
+- Saved-map A/B report:
+  `results/bmw_efficientad_manual_ignore_ab/bmw_v3_vs_v4_representative_v1/report.json`. On 11 captures / 88 rows,
+  33 rows used an active mask and only three decisions changed, all `back` NG to PASS: `203036` (`0.577622 ->
+  0.337733`), `204352` (`0.573523 -> 0.381002`), and `204447` (`0.773533 -> 0.351794`). Trusted OK group002 stayed
+  zero NG; strong multi-view samples `171815`, `173050`, and `205326` kept the same EfficientAD NG counts.
+- V4 deliberately reuses the V3 numeric thresholds as a laboratory candidate. `pred_score` and returned map values have
+  distinct Anomalib normalization contracts, so this is not calibrated production evidence. No new training or GPU
+  live V4 run was performed. Focused verification is `79 passed`; V3 config loading remains compatible.
+
+### Manual ignore-mask expansion v2 (2026-08-13)
+
+- The selector now defaults to `--from-index .../bmw_right_manual_ignore_v1/index.json`, reconstructs every saved
+  polygon, verifies exact equality with the SHA-bound v1 mask and source ROI, then preloads it for editing. The default
+  no-overwrite output is `bmw_right_manual_ignore_v2`; `S` preserves seeded polygons, additions expand the union, and
+  `R`/`N` deliberately clear the current view.
+- Human-expanded asset:
+  `results/bmw_efficientad_manual_ignore_masks/bmw_right_manual_ignore_v2/index.json`, SHA-256
+  `50860b70316fad79e9ca2e19b555036fd2f882abce684a2fa53b543c53bc10bb`. All eight views now have masks, with
+  polygon counts `front=3`, `front_left=2`, `front_right=3`, `front_secondary=2`, `back=4`, `back_left=4`,
+  `back_right=3`, `back_secondary=2`. Ignored ROI fractions are respectively `25.0648%`, `42.9707%`, `30.5420%`,
+  `24.9138%`, `26.7288%`, `42.8829%`, `26.7384%`, and `30.7070%`. A pixel-wise check proved v2 is a superset of
+  v1 in every view with zero removed v1 pixels.
+- Independent config:
+  `configs/bmw/experiments/bmw_eight_view_demo_v4_manual_ignore_mask_v2.json`, SHA-256
+  `b5afed34c289a99705753fd6f3be325a582f01578590725e5b5d1d6ddea814af`. It writes to the separate result root
+  `results/bmw_eight_view_demo_v4_manual_ignore_mask_v2` and leaves v1/V3/V4-mask-v1 unchanged.
+- Saved-map A/B:
+  `results/bmw_efficientad_manual_ignore_ab/bmw_v3_vs_v4_manual_ignore_v2_representative_v1/report.json`, SHA-256
+  `8119df96226fdfc4ccfb24907e4fcc931e233f7d18f5f73fbcbead2422276f2b`. On 11 captures / 88 rows, all 88 rows
+  used manual masks and five EfficientAD decisions changed from NG to PASS: the three earlier `back` rows plus
+  `170451/front_right` and `205326/front_secondary`. Fail-close remains for those two additions because `170451` has
+  Template/front_right NG, while `205326` has all eight Template views NG and retains three EfficientAD NG views.
+  Trusted OK group002 remains zero EfficientAD NG. This is still an uncalibrated saved-map laboratory candidate.
+- Fresh focused verification after v2 expansion: `98 passed`; v2 config load, mask SHA binding, A/B count assertions,
+  `py_compile`, and `git diff --check` passed. No new inference, training, camera run, commit, merge, or push occurred.
+
+### Manual ignore-mask expansion v3 (2026-08-13)
+
+- The operator continued from the SHA-verified v2 asset and published the no-overwrite v3 asset at
+  `results/bmw_efficientad_manual_ignore_masks/bmw_right_manual_ignore_v3/index.json`, SHA-256
+  `fa5cf8eb6ff9cfa9a9c6d187a9aff58c8101b51dd5d3cef3a2576a7745b1bc58`. Polygon counts are `front=5`,
+  `front_left=4`, `front_right=5`, `front_secondary=4`, `back=6`, `back_left=5`, `back_right=5`, and
+  `back_secondary=4`. Ignored ROI fractions are `25.4079%`, `43.8898%`, `30.8862%`, `25.2620%`, `27.0462%`,
+  `43.2217%`, `27.2266%`, and `31.2031%`. Pixel-wise verification proved v3 is a strict superset of v2 in every
+  view, with zero removed v2 pixels.
+- Independent config is `configs/bmw/experiments/bmw_eight_view_demo_v4_manual_ignore_mask_v3.json`, SHA-256
+  `71bfcc5ab31ae906af5dd804321d8ccb6430346a7c1fcee96882484fb61dc305`, with independent result root
+  `results/bmw_eight_view_demo_v4_manual_ignore_mask_v3`.
+- Saved-map A/B report is
+  `results/bmw_efficientad_manual_ignore_ab/bmw_v3_vs_v4_manual_ignore_v3_representative_v1/report.json`, SHA-256
+  `0e39e48e5959e80e7a040c30e008c22ea582a74593efbe8ae09d4414df063d7d`. It remains 11 captures / 88 rows / all
+  88 rows masked / five EfficientAD NG-to-PASS changes, exactly the same changed identities as v2. The additional v3
+  area produced no additional decision changes on saved maps. Focused verification is `98 passed`; config load, mask
+  and report SHA binding, and `git diff --check` passed. This remains an uncalibrated, no-new-inference lab candidate.
 
 ## BMW trusted-OK reference comparison Task-5 handoff (2026-08-12)
 
@@ -64,6 +227,38 @@
   physical HDR short/long pair.
 - Persistence is covered by the current v3 focused verification gate; its earlier transient cross-task collection
   concern was resolved when the UI and entrypoint integration landed.
+
+## BMW normal-only fast retraining entrypoint (2026-08-14)
+
+- The operator corrected the capture identity to right-hand. The authoritative prepared release is
+  `dataset/bmw_lab_prepared/bmw_right_normal_20260814_v1`; the earlier left-named release is obsolete and must not be
+  used. It contains session
+  `20260814_091058_791487`: 50 complete normal parts, 400 HDR fused images, split 30 train / 10 calibration /
+  10 final-test; the incomplete group051 attempt is excluded.
+- Use `pipeline/bmw_lab_retrain_normal_only.py` with `bmw_right_hdr_eight_view_v1.json` to derive a right fixed-setup
+  ROI from existing coordinates, materialize a
+  fresh ROI release, retrain eight Template and eight EfficientAD models, then calibrate EfficientAD thresholds from
+  the actual normal-test part count. The former exactly-21-part calibration restriction is removed while the target
+  whole-part FPR remains `1/21`.
+- Historical data contributes only `no_streak` rows to the legacy bright-streak recalibration manifest. It never enters
+  the new Template/EfficientAD training release. The stage order contains no YOLO stage and reports
+  `yolo_trained=false`.
+- This is an experimental candidate generator. It does not modify a Demo config and its legacy calibrated-rule
+  bright-streak output is not a replacement for the V5 rotated tracked-profile V3 asset.
+- The selective retrainer is resumable after a failed run: an identical derived ROI, matching published ROI training
+  release, and identical combined bright-streak manifest are reused. A run directory is resumable only when its
+  `run_report.json` status is `failed`; completed or unknown directories remain protected.
+
+## BMW generic defect capture compatibility (2026-08-20)
+
+- The 2026-08-20 left/right generic-defect sessions were captured under the legacy layout `defect/defect`.
+- `bmw_inspection.lab.eight_view_dataset` maps that exact layout to the canonical prepared `source_class=others`.
+  Existing `normal`, `deform`, `edge`, `others`, and `no_streak` meanings are unchanged, and source images/manifests are
+  not moved or rewritten.
+- Prepared releases created with `--skip-image-hash` intentionally contain blank `source_sha256` fields. The ROI
+  representative selector skips source-content comparison only for those blank fields while retaining strict mismatch
+  rejection whenever a hash is populated. The real `bmw_right_0820_v1` representative preflight selected eight
+  4024x3036 views successfully after this compatibility fix.
 
 ## BMW right multisource models integrated into eight-view Demo (2026-08-11)
 
@@ -722,6 +917,226 @@
   broken-but-present samples, so broken-path handling is synthetic regression evidence only and real broken-streak
   recall remains unverified.
 
+## BMW Template manual ignore-mask V5 candidate (2026-08-13)
+
+- `configs/bmw/experiments/bmw_eight_view_demo_v5_template_manual_ignore_mask_v1.json` is an independent lab candidate. It reuses the exact EfficientAD manual-mask v3 index SHA-256 `fa5cf8eb6ff9cfa9a9c6d187a9aff58c8101b51dd5d3cef3a2576a7745b1bc58`; public ROI, Template model images, YOLO, bright-streak, HDR, EfficientAD checkpoints, and V1-V4 configs are not overwritten.
+- Template masks follow the same aspect-fit and `BORDER_REFLECT_101` translation geometry as the query; masked CCOEFF_NORMED excludes selected pixels at every shift. Runtime details retain raw unmasked risk/shift plus masked risk/shift, valid fraction, mask SHA, threshold-asset SHA, and a diagnostic-only masked heatmap. Empty masks retain the exact legacy path.
+- Calibration-only thresholds are in `results/bmw_template_manual_ignore_ab/bmw_right_manual_ignore_v3_template_ab_v1/template_masked_thresholds.json`, SHA-256 `ea7a57fcc27741793e8176aff21a8f9457eaf20405a0e932b240ebf94d5a3027`. `final_test_used_for_selection=false`; model JSON hashes and mask SHA are fail-closed in config loading.
+- Offline A/B is pinned to the first 41 records (328 views) of `results/bmw_eight_view_demo_v3_ng_evidence_v1`, index-prefix SHA-256 `c4707c81b1bd145dd8b108b297394face234b7e5f5298af9faff663438deaf63`. View decisions: 38 old NG, 36 masked NG, 4 NG-to-PASS, 2 PASS-to-NG. Template capture decisions: 17 old NG, 14 masked NG, 3 NG-to-PASS, 0 PASS-to-NG.
+- Calibration balanced accuracy improves `0.916319 -> 0.951781` (normal false rejects `29 -> 23`, defect false accepts `3 -> 1`). Untouched final-test balanced accuracy is slightly worse `0.836742 -> 0.832055` (normal false rejects `56 -> 59`, defect false accepts unchanged `5`). This remains a lab candidate, not production acceptance.
+- The pose/absence pressure record `bmw_demo_20260812_205326` remains Template NG in all eight views. `bmw_demo_20260812_170451/front_right` becomes Template PASS and also becomes EfficientAD PASS under manual mask v3; its business truth is still uncertain, so V5 can make that capture OK and must not be called a verified defect-recall success.
+- The worktree `.venv` lacks `ultralytics`; the root workspace environment has `ultralytics 8.4.89`. From an activated root environment, use `uv run --active --no-sync ...` so uv does not switch to the worktree environment.
+
+## BMW V5 manual rotated bright-streak ROI (2026-08-13)
+
+- V5 now selects `tracked_profile_v3_manual_rotated_roi` and keeps the existing tracked-profile v3 report and all geometry/threshold values unchanged. The report SHA-256 remains `6b43690af67702333646fa7a88a2a5053a0afae6d19cb343bf6d3abb193c17d4`.
+- The accepted manual ROI asset is `results/bmw_bright_streak_rotated_roi/bmw_demo_20260813_164043_v3/roi.json`, SHA-256 `6ea49dacfae8d7d090bded6f8d67187d13fe00246c502a35813b77ce28aba4c8`. Its source-image points are LT `(1761,1548)`, RT `(1818,1528)`, RB `(1943,2108)`, LB `(1875,2135)` and it perspective-rectifies the full HDR image directly to the v3 contract `81x613` without Template alignment.
+- The first two narrow manual selections were preserved as rejected diagnostic assets. Their roughly 27-pixel source widths stretched the white streak across the 81-pixel output and reduced the five-pixel local-contrast response below the unchanged strong threshold, yielding `NG_NO_STREAK`; do not bind V1 or V2.
+- Full offline V5 replay is `results/bmw_eight_view_demo_v5_template_manual_ignore_mask_v1/bmw_demo_20260813_164043_rotated_v3`. The user identified the source as a real present-but-broken streak; runtime returned `NG_BROKEN`, presence true, coverage `0.4143556281`, longest run `108` pixels (`0.1761827080`), maximum gap `184` pixels (`0.3001631321`), and 7 gaps. The unchanged v3 limits are coverage `0.0848287113`, longest-run ratio `0.0440456770`, maximum-gap ratio `0.1060358891`, and maximum gap count 2.
+- The full replay completed all 25 checks with 20 PASS, 5 NG, and 0 ERROR in about 6.47 seconds of model execution on CPU. Process exit 1 is the expected business NG result. Only the bright-streak row is acceptance evidence for this task; the other four NG rows belong to unchanged YOLO/EfficientAD branches.
+
+### Rotated HDR weak-response recalibration v1 (2026-08-13)
+
+- V5 keeps the SHA-bound original tracked-profile v3 report and the accepted rotated ROI, but explicitly deploys `weak_row_score_override=95.0` for `tracked_profile_v3_manual_rotated_roi`. The report value remains `128.2`; the strong threshold remains `136.85`; coverage, longest-run, maximum-gap and gap-count limits are unchanged.
+- Root cause: the old weak threshold was fitted on fixed rectangular HDR crops, while the perspective-rectified ROI changes the row-response distribution. `bmw_demo_20260813_184658` had five tiny gaps of 9/8/3/4/4 pixels, and `184751` had a visually continuous but weak HDR segment; neither ROI was misplaced.
+- Acceptance through the actual V5 config/predictor: `184658` and `184751` are now `PASS/OK`; all 33 manifest normal rows reprocessed through the rotated ROI are `OK`; all 8 no-streak rows remain `NG_NO_STREAK`; confirmed broken sample `164043` remains `NG_BROKEN` with maximum-gap ratio `0.1419249592` and gap count 3.
+- Runtime evidence records `threshold_calibration=rotated_hdr_field_recalibration_v1`, `report_weak_row_score=128.2`, and deployed `weak_row_score=95.0`. This is an HDR field recalibration, not model retraining and not a change to Template, YOLO, EfficientAD, or whole-part fusion.
+
+## BMW right-hand rotated bright-streak fast retraining (2026-08-14)
+
+- The current right-hand normal release is `dataset/bmw_lab_prepared/bmw_right_normal_20260814_v1`: session `20260814_091058_791487`, 50 complete normal parts / 400 fused HDR images. The obsolete `bmw_left_normal_20260814_v1` name must not be used.
+- The new no-streak capture is session `20260814_094431_343851`. Only `front_left` participates in bright-streak fitting: `dataset/bmw_lab_raw_clean/right/front_left/defect/no_streak/20260814_094431_343851/images/right_front_left_defect_no_streak_bmw_no_streak_group001_000001_fused.png`. It is one complete HDR-fused sample; no short/long source images were saved.
+- `pipeline/bmw_lab_retrain_rotated_bright_streak.py` and `src/bmw_inspection/lab/bright_streak_rotated_retraining.py` implement the minimal tracked-profile V3 retraining path. They reuse the accepted SHA-bound rotated ROI and do not train or modify Template, EfficientAD, or YOLO.
+- Candidate output is `results/bmw_bright_streak_rotated_retrain/bmw_right_normal50_no_streak1_20260814_v2`; report SHA-256 is `9d7b52a10726db45fd5f89776b5311be3e223916d9bd9a89939844efec7a5265`. The newly fitted strong threshold is `124.025`; the accepted rotated-HDR field weak threshold remains `95.0`. Normal-derived continuity limits are minimum coverage `0.3735725938`, minimum longest run `0.2365415987`, maximum gap ratio `0.5513866232`, and maximum gap count `4`.
+- In-sample replay is 50/50 normal PASS and 1/1 no-streak rejected. The previously user-confirmed broken capture `bmw_demo_20260813_164043_rotated_v3` independently replays as `NG_BROKEN` because gap count is 6 above the new maximum 4. The sole no-streak image was used for fitting, so `no_streak_independent_test_count=0`; this is a lab candidate, not independent no-streak generalization evidence. It is not automatically wired into V5 because the existing Demo loader is pinned to the older report contract and runtime weak override.
+
+## BMW right-hand normal-only selective retraining (2026-08-14)
+
+- `pipeline/bmw_lab_retrain_normal_only.py` consumes the 50-part right-hand prepared release, reuses the existing fixed-setup ROI coordinates, trains Template and EfficientAD, recalibrates the legacy bright-streak rule with historical `no_streak`, and never invokes YOLO. Failed runs can be resumed only when completed ROI, release, Template, and bright-streak artifacts match their recorded paths and SHA-256 identities.
+- A normal-only Template release cannot use the legacy risk-threshold fitter because that fitter requires both normal and defect calibration rows. The selective trainer now rebuilds all eight template banks from the new normal images while retaining the numeric per-view thresholds from `bmw_right_batch_20260810_21_v3_ng_evidence_demo_v1/template`.
+- The current run `results/bmw_lab_one_click/bmw_right_normal_20260814_models_v1` already contains all eight rebuilt Template models. Its legacy bright-streak candidate has final-test balanced accuracy `0.45`, with 6 normal false rejects and 2 no-streak false accepts across 14 final-test rows; do not deploy that legacy candidate into V5. The tracked-profile V3 rotated retraining remains a separate contract.
+
 ## BMW V6 one-command handoff (2026-08-14)
 
 - `pipeline/bmw_lab_prepare_normal_20260814_v6_demo.py` invokes `publish_v6_demo` with no-overwrite V6 output defaults, emits a Chinese JSON error on publication failure, and prints the exact experiment-mode launch command after the receipt. It delegates source validation and rebinding to `src/bmw_inspection/lab/v6_demo_publisher.py`; no training or live inference is performed by this CLI.
+
+## BMW left-hand minimal retraining workflow (2026-08-14)
+
+- The runnable handoff is `docs/bmw/LEFT_HAND_QUICKSTART.md`. Work from `.worktrees/bmw-eight-view-handoff`, but use absolute dataset/result paths under `/home/yunjing/anomaly_xingtao_new`.
+- Select a new left `fixed_setup` eight-view ROI from raw normal data, then run `pipeline/bmw_lab_train_left_normal.py`: `train` materializes data and trains only Template plus EfficientAD; `calibrate` scores normal calibration images with the deployment component policy. This flow has no YOLO or bright-streak training stage.
+- EfficientAD deployment score is `accepted_component_max_p95`, not the anomaly-map single-pixel maximum. The experimental policy filters small and shallow isolated components while keeping hard peaks, long thin regions, and larger regions; calibration and runtime must use the same mask, policy, checkpoint and score domain.
+- `pipeline/bmw_lab_select_efficientad_ignore_masks.py --training-release ...` supports a blank left-hand mask without seeding from the right-hand asset. The ROI, mask, policy, checkpoint and threshold artifacts remain linked by their recorded identities.
+- Reuse the existing joint left/right YOLO checkpoint at `results/bmw_lab_one_click/bmw_right_multisource_left_yolo_v1/yolo/train/weights/best.pt` (SHA-256 `0e9591f2fa2487ad12000847f1d80137901ed69989e0e95cb5c8907b95ba3913`); do not retrain YOLO for this normal-only experiment.
+- Bright-streak retraining remains separate until left-hand normal and no-streak captures exist. No real left GPU training, live camera run, or model-quality acceptance was performed while preparing this workflow.
+- Left normal session `20260814_124313_743121` contains 52 complete parts; group017 and group018 are byte-identical in all eight views. Its `bmw_left_normal_20260814_v2` release therefore uses `--skip-image-hash`. Materialization now treats an empty `source_sha256` as the explicit unverified experimental mode while continuing to verify every non-empty digest; the real left `--stage train --dry-run` passed after this compatibility fix.
+
+## BMW left-hand Demo composition v1 (2026-08-14)
+
+- `pipeline/bmw_lab_prepare_left_20260814_demo.py` publishes `results/bmw_lab_one_click/bmw_left_normal_20260814_demo_v1` and `configs/bmw/experiments/bmw_eight_view_demo_left_normal_20260814_v1.json` without changing the common Demo schema or the completed source training run.
+- The composite run links `template` and `efficientad` from `bmw_left_normal_20260814_models_v3` and links `yolo` from `bmw_right_multisource_left_yolo_v1`; shared YOLO checkpoint SHA-256 remains `0e9591f2fa2487ad12000847f1d80137901ed69989e0e95cb5c8907b95ba3913`.
+- The config binds left ROI v2 SHA `2119e90a14074206ff9484b4e43c1b581ef4a8a88abd46eb73f85d8fed214a13`, left EA mask/policy/component thresholds, and bright engine `tracked_profile_v3_manual_rotated_candidate` with the left candidate report and rotated ROI. It omits the Template block because thresholds are embedded in each left model.json, and omits trusted-OK because no approved left reference bank exists.
+- The generated config passed `load_demo_config()` and composition tests, but GPU inference, live four-camera capture, and model-quality acceptance remain separate field tests.
+
+## BMW left-hand YOLO fixed fixture ignore region (2026-08-14)
+
+- `configs/bmw/experiments/bmw_eight_view_demo_left_normal_20260814_v1.json` configures a YOLO-only ignore rectangle for `front_secondary`: `[1580, 450, 1756, 800]` in ROI coordinates. It does not change the shared ROI or affect Template, EfficientAD, or bright-streak processing.
+- The trigger was six repeatable live detections of the same fixture at approximately `[1641, 521, 1756, 724]`, confidence `0.293` to `0.377`. A box is ignored only when its center lies inside a configured rectangle for the current view; identical coordinates in another view remain eligible.
+- Ignored boxes remain in YOLO diagnostics with `is_ignored=true` and `ignore_reason=fixed_yolo_ignore_region`, but do not contribute to decision score or final NG count. Saved-image replay of `bmw_demo_20260814_143530/front_secondary` changed the YOLO result to PASS with one candidate, one ignored box and zero final boxes. The two focused Demo test files pass with `122 passed`.
+
+## BMW left-hand trusted-OK reference bank (2026-08-14)
+
+- The user approved the current left normal release for trusted evidence. `pipeline/bmw_lab_publish_manifest_trusted_ok.py` published all 52 complete parts / 416 views from `bmw_left_normal_20260814_v2`, recomputing the intentionally omitted source hashes and binding ROI SHA `2119e90a14074206ff9484b4e43c1b581ef4a8a88abd46eb73f85d8fed214a13`.
+- The immutable reference bank is `/home/yunjing/anomaly_xingtao_new/dataset/bmw_trusted_ok_reference/bmw_left_normal_20260814_approved_v1`; `reference_index.json` SHA-256 is `9e38b125d0ed1ab1207c6eb7f4951f214090824568608f99a1b4788113f4865d`, whitelist SHA-256 is `ee820269d37530a96bfca25fdc57a05e55a122d89009a84e9f6f3a0a6df2b449`, and every view has 52 references.
+- Schema v1 retains the frozen right-hand identity/session/exact-50 contract. Schema v2 permits an index-declared positive part count while still requiring equal view counts, complete eight-view parts, consistent per-part session/split, source/full/ROI SHA validation and index-SHA config binding.
+- `bmw_eight_view_demo_left_normal_20260814_v1.json` uses the absolute main-workspace index path because the worktree dataset only symlinks selected dataset branches. Real preload completed for all eight ROI banks plus front-left full-image bank; it took about 28 seconds and did not run detectors or cameras.
+
+## BMW EfficientAD all-normal checkpoint training (2026-08-20)
+
+- `--efficientad-all-normal-train` is available on the materialization, full-training, and left-normal training CLIs. It sends every current `normal` row to each view's EfficientAD `normal` directory while leaving Template and YOLO on the prepared release's public train/calibration/final-test split.
+- This mode is deliberately checkpoint-only: EfficientAD gets no internal validation/test directory, `engine.test` is skipped, and reports record `validation_status=pending_external_validation`. The left workflow accepts only `--stage train` in this mode.
+- Do not deploy or compare the new checkpoints with old numeric thresholds. Collect an independent normal/defect validation release, apply the same ROI, ignore mask, and component-score policy, then fit new per-view and whole-part thresholds.
+
+## BMW 0820 bilateral Template and all-normal EfficientAD command (2026-08-20)
+
+- `pipeline/bmw_lab_train_bilateral_normal.py` sequentially runs right then left with `stage=train`. Each hand materializes its own ROI release, trains Template, and trains eight EfficientAD checkpoints with `efficientad_all_normal_train=true`; any right-hand failure prevents left-hand training.
+- Defaults bind `bmw_right_0820_v1` to `configs/bmw/rois/bmw_right_0820_v1.json` and `bmw_left_0820_v1` to `configs/bmw/rois/bmw_left_0820_v1.json`. The prepared-manifest ROI contract is verified through dataset identity, source-manifest path, and manifest SHA rather than a fixed-setup `capture_scope` field.
+- Current manifests contain 89 right normal parts and 90 left normal parts, so each of the eight right checkpoints receives 89 images and each left checkpoint receives 90 images. Template retains its train/calibration split. YOLO, bright-streak, internal EfficientAD validation, and threshold fitting are not invoked.
+- Preflight with `UV_CACHE_DIR=/tmp/bmw-uv-cache uv run --no-sync python pipeline/bmw_lab_train_bilateral_normal.py --dry-run`; remove `--dry-run` to train. The generated checkpoints remain pending independent validation and must not reuse old thresholds.
+
+## BMW left-hand Template / EfficientAD NG review package (2026-08-16)
+
+- The no-overwrite review package is `results/bmw_template_efficientad_ng_review_left_20260816_v1`. It scans 96 valid inspection records from `results/bmw_lab_one_click/bmw_eight_view_demo_left_normal_20260814_v1` and contains 111 review rows from 46 captures: 32 Template NG and 79 EfficientAD NG.
+- Every row has the current ROI, detector evidence overlay, a newly matched same-view reference from `bmw_left_normal_20260814_approved_v1`, and an aligned current-versus-OK difference image. Review identities are `T001..T032` and `E001..E079`; human decisions belong in `review_cases.csv` and no detector threshold or model was changed while generating this diagnostic package.
+- `pipeline/bmw_lab_review_ng_cases.py` is the local Tkinter reviewer for this package. It groups all problems by `capture_id`, records per-problem decisions (`误判`, `真实缺陷`, `不确定`), supports undecided-only per-part batch actions and keyboard navigation, and atomically updates the original CSV while preserving its schema and row order. Run it from the handoff worktree with `env UV_CACHE_DIR=/tmp/bmw-uv-cache uv run --no-sync python pipeline/bmw_lab_review_ng_cases.py`; use `--check` for a non-GUI package preflight.
+- The reviewer must use Tk's actually available `song ti` family for both classic Tk and ttk widgets; requesting `Noto Sans CJK SC` silently falls back to unreadable `fixed` on this workstation. EfficientAD keeps its same-size anomaly overlay. Template is a whole-ROI similarity detector rather than a pixel-localizer, and its saved absolute-difference composite contains both current and template edges plus reflected padding; the reviewer therefore hides that misleading composite and shows the original ROI under the explicit label `Template整体匹配异常（原始ROI）`. This changes no score, threshold, or detector decision.
+
+## BMW live front-round inference overlap (2026-08-20)
+
+- Live GUI inference is split without changing detector calculations: the front round runs 4 Template + 1 full-image `front_left` bright-streak + 4 YOLO + 4 EfficientAD checks (13 total), and the back round runs 4 Template + 4 YOLO + 4 EfficientAD checks (12 total).
+- `pipeline/bmw_lab_eight_view_demo.py` keeps all camera capture and OpenCV HighGUI work on the main thread. A single `ThreadPoolExecutor(max_workers=1)` owns both model rounds, final fusion, trusted-OK matching, and persistence. Back HDR capture may begin while front inference is still running, but front/back model calls never run concurrently.
+- `EightViewModelSuite.finalize_rounds()` restores the original canonical order (8 Template, 1 bright-streak, 8 YOLO, 8 EfficientAD), then performs the unchanged `ERROR > NG > OK` fusion and trusted-OK comparisons. Only the complete 25-result inspection is persisted. Space is ignored in `PROCESSING`; reset advances a generation token so a stale completed result cannot replace the current UI state.
+- Focused verification passed: 51 unit tests across the active pipeline/models/config/persistence/UI chain, including the worker-before-camera shutdown order, plus Python compilation and `git diff --check`. A real CPU single-worker replay of right sample `bmw_right_normal_group001_000001` produced 13 + 12 = 25 results, 0 ERROR, final NG, and about 5.88 seconds accumulated model time. Its saved capture is `results/bmw_lab_one_click/bmw_eight_view_demo_right_0820_mixed_v1/bmw_right_normal_group001_000001_front_overlap_smoke_v1`.
+- The replay used CPU because NVML/CUDA was unavailable. Actual CUDA worker-thread behavior, four-camera timing, and the amount of field-cycle-time improvement remain unverified and require one live smoke test.
+
+## BMW 0820 EfficientAD reduced ignore masks v2 (2026-08-20)
+
+- The operator revised both hands' EfficientAD masks to ignore less of every ROI. The active assets are `results/bmw_efficientad_manual_ignore_masks/bmw_right_0820_manual_ignore_v2/index.json` and the corresponding `bmw_left_0820_manual_ignore_v2/index.json`; each contains eight readable binary masks whose dimensions exactly match the 0820 public ROI crops.
+- `bmw_eight_view_demo_right_0820_mixed_v1.json` and `bmw_eight_view_demo_left_0820_mixed_v1.json` now reference these v2 EfficientAD indexes directly. The right Template branch still uses its separate legacy Template mask and was not changed.
+- Both configs and all 16 masks loaded through the active Demo loader. The two focused config test files pass with 5 tests. Detector replay, score changes, and live camera behavior with v2 remain unverified.
+
+## BMW 0820 combined left/right YOLO deployment (2026-08-21)
+
+- The shared one-class detector is now `results/bmw_lab_one_click/bmw_right_multisource_left_yolo_0820_v2/yolo/train/weights/best.pt`. It is an Ultralytics detect checkpoint with the single class `0: defect`; the training YAML combines the previous shared release with the reviewed right and left 0820 ROI crops.
+- Both active mixed configs reference that checkpoint directly: `bmw_eight_view_demo_right_0820_mixed_v1.json` keeps `configs/bmw/rois/bmw_right_0820_v1.json`, while `bmw_eight_view_demo_left_0820_mixed_v1.json` keeps `configs/bmw/rois/bmw_left_0820_v1.json`. The left `front_secondary` ROI-local ignore region remains `[1505, 628, 1681, 978]`. YOLO confidence thresholds remain candidate `0.1` and final `0.25`.
+- The completed training validation reported 816 images / 198 instances, precision `0.578`, recall `0.373`, mAP50 `0.396`, and mAP50-95 `0.180`. These are training-run validation metrics, not live-camera acceptance.
+- Focused regression verification passed with 24 tests. CPU offline replay loaded the complete four-branch suite for both hands: right `bmw_right_0820_new_yolo_replay_DYkNdn` produced 25 checks, 0 ERROR, 8 YOLO PASS and final NG only because `front_left` Template exceeded its unchanged threshold; left `bmw_left_0820_new_yolo_replay_V8hxPM` produced 25 PASS, 0 ERROR. CUDA inference and live four-camera capture remain unverified.
+
+## BMW left front-view deformation thresholds (2026-08-21)
+
+- The operator confirmed visible small-foot deformation in the latest left现场 capture `bmw_demo_20260821_192534` and requested stricter Template plus EfficientAD decisions only for `front`, `front_left`, and `front_right`.
+- Active left Template thresholds are now `0.015`, `0.011`, and `0.008` in that view order. Active left EfficientAD `accepted_component_max_p95` thresholds are now `0.33`, `0.36`, and `0.37`. The remaining five views, all models, ROI, masks, YOLO, bright-streak, HDR, and fusion are unchanged.
+- Threshold metadata is `field_deformation_anchor_20260821`; EfficientAD validation status is `lab_field_tuned_single_defect_anchor_pending_normal_recheck`. These values are a single confirmed defect-anchor adjustment, not independent normal/defect calibration.
+- CPU replay `bmw_left_192534_strict_front_replay_LrHWyw` produced 25 checks, 19 PASS, 6 NG, and 0 ERROR. All three targeted Template rows changed PASS→NG with identical scores; all three targeted EfficientAD rows changed PASS→NG. The other 19 rows had no status or threshold changes. Focused active-chain verification passed with 28 tests; CUDA and new live-camera captures remain unverified.
+
+## BMW 0823 front_right-only EfficientAD retraining (2026-08-23)
+
+- New clean normal captures are right session `20260823_144248_477990` with 87 complete parts and left sessions `20260823_161606_428291` plus `20260823_164432_522052` with 88 complete samples. Incomplete trailing samples are excluded. Sampled first/middle/last `front_right` images no longer show the reported foreign object.
+- New prepared releases are `dataset/bmw_lab_prepared/bmw_right_front_right_0823_v1` and `bmw_left_front_right_0823_v1`. The ROI training releases are `dataset/bmw_lab_training/bmw_right_front_right_0823_v1` and the corresponding left release. They contain only `crops/front_right` and `efficientad/front_right`; no Template, YOLO, or other-view crops/models were generated.
+- `pipeline/bmw_lab_materialize_training_data.py` now accepts repeatable `--view` and `--efficientad-only`. The fast EfficientAD-only path reuses the explicitly supplied ROI geometry on a new prepared release without requiring the old prepared-manifest identity/SHA binding, while image readability, dimensions, and ROI crop checks remain active.
+- `pipeline/bmw_lab_train_efficientad_only.py` now accepts repeatable `--view` and `--efficientad-all-normal-train`. A selected all-normal run trains only the requested checkpoint and skips unavailable `normal_test` scoring/threshold fitting; the default full-view validated workflow remains unchanged.
+- Completed CUDA runs are `results/bmw_lab_one_click/bmw_right_front_right_efficientad_0823_v2` and `bmw_left_front_right_efficientad_0823_v2`. Each contains exactly one `efficientad/front_right/model.ckpt`, trained for 30 epochs with batch 1 and image size 256. Checkpoints are 76,869,373 bytes and each loaded for a real one-image GPU prediction with finite score and a finite 256x256 anomaly map.
+- These are all-normal checkpoint candidates with `pending_external_validation`; no threshold was fitted and neither active Demo config was changed. Do not reuse the old `front_right` threshold without a separate score replay. The failed right `...0823_v1` run only records the initial sandbox GPU-detection failure and has no accepted checkpoint.
+- Focused verification: 29 unit tests passed across materialization, EfficientAD-only orchestration, and shared training contracts; Python compilation and `git diff --check` passed.
+
+## BMW 0823 front_right EfficientAD Demo integration (2026-08-23)
+
+- The active mixed configs now replace only `efficientad.checkpoints.front_right`: right uses `results/bmw_lab_one_click/bmw_right_front_right_efficientad_0823_v2/efficientad/front_right/model.ckpt`; left uses the corresponding `bmw_left_front_right_efficientad_0823_v2` checkpoint. The other seven EfficientAD checkpoints, all Template/YOLO/bright-streak assets, ROI, masks, HDR settings, and fusion are unchanged.
+- Per the operator's explicit request, the old numeric deployment thresholds are retained without recalibration: right `front_right=0.549995529652`, left `front_right=0.43`. Existing global threshold-source/validation metadata is also unchanged; these values remain lab candidates rather than independently validated thresholds.
+- Focused config contracts passed with 9 tests. Full GPU offline replay on clean 0823 normal group001 loaded all four branches and the trusted-OK bank for both hands. Right `bmw-right-0823-new-ea-replay-v1` was 25 PASS / 0 NG / 0 ERROR, with new front-right EA score `0.3124246299 < 0.549995529652`. Left `bmw-left-0823-new-ea-replay-v1` was also 25 PASS / 0 NG / 0 ERROR, with score `0.2961165607 < 0.43`.
+- Replay inputs are fused-only saved captures, not a live camera run. The live GUI must be restarted after this config change because model paths and thresholds are loaded only once at process startup.
+
+## BMW 0823 front_right-only Template retraining and integration (2026-08-23)
+
+- `pipeline/bmw_lab_materialize_training_data.py` now also supports `--template-only` with repeatable `--view`. For this mode it writes only the selected canonical crops and `template/trainer_manifest.csv`; it does not create EfficientAD or YOLO branch data. The new `pipeline/bmw_lab_train_template_only.py` trains only the selected Template view using the existing fixed-threshold trainer, so an all-normal retake does not attempt invalid normal-versus-defect threshold fitting.
+- The right release `dataset/bmw_lab_training/bmw_right_front_right_template_0823_v1` contains 87 `front_right` crops; the left counterpart contains 88. Completed model runs are `results/bmw_lab_one_click/bmw_right_front_right_template_0823_v1` and `bmw_left_front_right_template_0823_v1`; each contains only `template/front_right`, five 512x512 grayscale templates, and one model.json whose input size matches the hand-specific 0820 ROI.
+- Only `template.models.front_right` changed in the two active mixed configs. Right points to `bmw_right_front_right_template_0823_v1/template/front_right/model.json` and keeps the exact old threshold `0.012455999851226807`; left points to the corresponding left run and keeps `0.008`. The other seven Template models/thresholds, all EfficientAD/YOLO/bright-streak assets, ROI, masks, HDR, and fusion remain unchanged.
+- Full GPU replay loaded all 25 checks with no ERROR. Left `bmw-left-0823-new-template-replay-v1` was 25 PASS and final OK; its new Template score was `0.0038328767 < 0.008`. Right `bmw-right-0823-new-template-replay-v1` was 24 PASS / 1 NG and final NG solely because the new masked Template score `0.0126539469` was slightly above the explicitly retained old threshold `0.0124559999` by `0.0001979470`. Do not silently loosen it: the operator explicitly requested the old threshold.
+- Focused verification passed with 31 tests across Template-only materialization/training, existing EfficientAD-only behavior, and active mixed-config contracts; Python compilation and `git diff --check` passed. The replay used saved fused images; live four-camera capture remains to be tested after restarting the GUI.
+
+## BMW key-region Template secondary checks approved design (2026-08-23)
+
+- Approved design: `docs/bmw/BMW_KEY_TEMPLATE_SUBROI_DESIGN_20260823.md` (commit `c9bb71c4`). It keeps the existing whole-ROI Template and adds an optional `key_template` aggregate result only for views with at least one configured key ROI.
+- Right and left maintain separate ROI selections, models, and thresholds. Every canonical view may contain zero or multiple public-ROI-local rectangles named `roi_01`, `roi_02`, etc. Empty views produce no SKIPPED row, so checks are `25 + enabled view count`.
+- Each sub-ROI is scored independently; per-view aggregation and final fusion use `ERROR > NG > PASS`. Any key ROI NG makes the part NG, while all remaining checks continue and persist evidence.
+- Initial per-ROI thresholds use the calibration-normal maximum risk; final_test normals are reporting only. Thresholds remain directly editable JSON values with no SHA/publisher/rebind layer. Implementation has not started and requires user review of the written design first.
+
+## BMW key-region Template secondary checks implementation (2026-08-23)
+
+- The optional infrastructure is implemented without activating either hand. `pipeline/bmw_lab_select_key_template_rois.py` selects zero or multiple public-ROI-local rectangles for every canonical view; `pipeline/bmw_lab_train_key_templates.py` trains only those regions and writes direct `model.json`, `metrics.json`, and `runtime.json` paths without SHA, receipt, publisher, or rebind metadata.
+- `src/bmw_inspection/lab/key_template.py` accepts missing/empty views, validates only the necessary JSON/path/image/ROI/model contracts, selects up to five normal-train templates, fits each deployment threshold as the next float above the calibration-normal maximum risk, and reports final-test false rejects without using final-test rows for selection.
+- A Demo profile may optionally add top-level `key_template_config`. When absent, the original 25 checks and front 13/back 12 scheduling remain unchanged. When present, each enabled view contributes one aggregate `key_template` row after the whole-ROI Template rows; every configured sub-ROI runs, and per-view plus final fusion use `ERROR > NG > PASS`.
+- The Chinese UI adds a conditional `关键区模板` card and K shortcut only when key results exist. Evidence is one public-ROI overlay with each key rectangle/status, while per-region scores, thresholds, reasons, and Template diagnostics remain in `inspection.json`. Existing persistence and trusted-OK ROI comparison are reused.
+- Focused verification passed: 56 tests across key config/training, Demo config/models/UI/persistence/pipeline; Python compilation, CLI help, and `git diff --check` passed. A no-key left offline replay of `bmw_left_normal_group002_000001` produced 25 PASS / 0 NG / 0 ERROR in 4307 ms on CPU. Actual key ROI selection, model training, active-config wiring, GPU key inference, and live cameras remain pending operator-selected ROI files.
+
+## BMW 0823 key-region Template activation (2026-08-23)
+
+- Operator selections are `configs/bmw/key_template/bmw_right_0823_key_rois_v1.json` and `bmw_left_0823_key_rois_v1.json`. Both hands enable two regions in each of `front`, `front_left`, `front_right`, and `front_secondary` (8 regions per hand); all four back views are empty. An exact duplicate left `front_left` box was removed before training.
+- Trained direct assets are `results/bmw_lab_one_click/bmw_right_key_template_0823_v1/runtime.json` and the corresponding left directory. Each contains eight region `model.json` files, five 512x512 templates per region, metrics, and editable thresholds fitted as the next float above calibration-normal maximum risk. No SHA, receipt, publisher, or rebind metadata was generated.
+- The two active mixed configs now set top-level `key_template_config` to their hand-specific runtime JSON. Enabled runs produce 29 rows: original 25 plus four aggregate key-template view rows. Each aggregate evidence image shows all public-ROI-local rectangles and the worst sub-ROI Template heatmap; full per-region scores remain in `inspection.json`.
+- Final-test normal reporting shows some expected false rejects under the deliberately strict calibration-max thresholds: right region totals by final-test false rejects are `1,0,0,0,0,2,1,0`; left are `1,1,0,3,0,2,2,0` in canonical enabled-view/region order. Thresholds were not loosened automatically.
+- CPU full-suite replay produced 29 rows and 0 ERROR for both hands. Right 0823 final group007 had one key NG (`front/roi_01`, 0.03303 > 0.03013) plus two pre-existing-module NGs; left 0823 final group005 session1 had one key NG (`front_right/roi_02`, 0.02713 > 0.02607). This validates wiring and strict behavior, not live-camera acceptance. CUDA and cameras remain unverified.
+
+## BMW key-region Template feature removed (2026-08-23)
+
+- The operator judged the sub-ROI Template branch too sensitive and explicitly requested removal. Both active mixed configs no longer contain `key_template_config`; the Demo enum/config loader, model predictor/round ordering/fusion, UI card/K shortcut, selector/trainer CLIs, implementation tests, and design/plan docs were removed.
+- The active detector is restored to the established four modules and fixed 25 checks: front 13 plus back 12, ordered as 8 whole-ROI Template, 1 bright-streak, 8 YOLO, and 8 EfficientAD. No key-template symbols or active config references remain under `src`, `pipeline`, active experiment configs, or focused tests.
+- Previously generated selection JSON, model directories under `results/bmw_lab_one_click/bmw_{left,right}_key_template_0823_v1`, and historical 29-row replay results were intentionally retained because project boundaries prohibit deleting models/results/data. They are inactive and are not loaded by the Demo.
+- Focused verification after removal passed with 53 tests, Python compilation, `git diff --check`, and an active-source residual search. CPU left replay `bmw_left_normal_group004_000001` produced 25 PASS / 0 NG / 0 ERROR in 4313 ms. CUDA and live cameras remain unverified.
+
+## BMW weighted Template regions approved design (2026-08-23)
+
+- After removing the independent key-template branch, the operator approved reusing the saved hand-specific ROI selections only as pixel weights inside the existing whole-ROI Template result. The detector must remain fixed at 25 checks with no new branch or one-vote veto.
+- Approved initial weight is `3.0` inside selected regions and `1.0` elsewhere; Template ignore-mask pixels override both with weight `0`. The existing whole-ROI Template still selects the template and shift first, then a weighted normalized correlation recomputes the single active risk.
+- Existing `template.thresholds` remain unchanged for rollback. A new `template.weighted_regions` block will hold `enabled`, ROI path, weight, and separately recalibrated thresholds. Disabling it restores exact legacy scoring after restart.
+- Weighted thresholds will use each view's 0823 calibration-normal maximum weighted risk plus 10% margin; final-test normal only reports false rejects. Formal spec is `docs/superpowers/specs/2026-08-23-bmw-weighted-template-regions-design.md`, committed as `8dc28aff`. No production code or active threshold was changed during design.
+
+## BMW weighted Template regions implementation and calibration (2026-08-23)
+
+- The saved hand-specific selections are now weights inside the existing whole-ROI Template branch, not an independent detector. `src/bmw_inspection/lab/template_region_weighting.py` maps public-ROI-local rectangles through the same aspect-fit/alignment geometry, applies weight `3.0` versus base `1.0`, uses max in overlaps, and gives Template ignore-mask pixels final weight `0.0`. The active chain remains front 13 + back 12 = 25 rows.
+- Right uses `configs/bmw/key_template/bmw_right_0823_key_rois_v1.json`; left uses `configs/bmw/key_template/bmw_left_0823_key_rois_v1.json`. Both contain two regions in each of the four front views and no back-view regions. Empty back views continue the exact legacy score and threshold.
+- Legacy rollback thresholds remain unchanged under each active config's `template.thresholds`. Weighted thresholds are under `template.weighted_regions.thresholds`; rollback is only `enabled=false` plus a full Demo restart. No SHA, receipt, provenance, publisher, or rebind path was added.
+- Right weighted thresholds in `front, front_left, front_right, front_secondary` order are `0.012498484389187015`, `0.005421768437248353`, `0.01583567259539418`, and `0.010992674875391907`. Its 18 final-test normals had one false reject in each weighted view under the fixed calibration-max-plus-10% rule.
+- Left weighted thresholds in the same order are `0.011145261314028676`, `0.005135343811192717`, `0.0054486672193632575`, and `0.005552518444693267`. Its 18 final-test normals had zero false rejects in all four weighted views.
+- Calibration reports are `results/bmw_lab_one_click/bmw_weighted_template_calibration_right_0823_v1/report.json` and the corresponding left report. The CLI is `pipeline/bmw_lab_calibrate_weighted_template.py`; `--write-config` modifies only the weighted threshold object and never the legacy threshold object.
+- Final focused regression passed with 47 tests. Fresh CPU full-suite replays on 0823 group001 were both 25 PASS / 0 NG / 0 ERROR: `bmw-right-weighted-replay-final-20260823` in 4864 ms and `bmw-left-weighted-replay-final-20260823` in 4169 ms. Four-camera capture and CUDA inference for this weighting change remain unverified.
+
+## BMW 20-template manual review workflow approved design (2026-08-23)
+
+- The operator requested expanding every Template view from five stored templates to up to twenty: right and left remain independent, all eight views are included, and the initial review package therefore contains 320 ROI crops.
+- Candidates come only from each hand's 0823 normal train split and prioritize distinct physical parts. Left duplicate sample IDs are disambiguated by capture session. The review package defaults every candidate to approved; deleting a copied candidate rejects it, and rejected candidates are not automatically replaced.
+- Each view must retain 3–20 reviewed images. Training consumes exactly the surviving reviewed images without a second selection pass, writes new versioned model roots, and leaves the current active configs/models untouched until review, retraining, threshold calibration, and offline replay are complete.
+- Both ordinary and weight-3.0 Template thresholds must be recalibrated from calibration normal with a 10% margin; final_test remains reporting-only. The approved specification is `docs/superpowers/specs/2026-08-23-bmw-template-20-review-design.md`, commit `4bec9962`.
+
+## BMW 40-template manual review package (2026-08-23)
+
+- The operator superseded the 20-candidate plan with 40 candidates for every canonical view of both hands. The current design is `docs/superpowers/specs/2026-08-23-bmw-template-40-review-design.md`; implementation steps are in `docs/superpowers/plans/2026-08-23-bmw-template-40-review.md`.
+- `pipeline/bmw_lab_prepare_template_review.py` uses the right and left 0823 prepared manifests plus their hand-specific 0820 public ROI configs. It selects only `train/normal/OK`, prioritizes previously unseen physical parts, then uses a deterministic farthest-point diversity order. It does not train or modify active Demo configs.
+- The generated review package is `/home/yunjing/anomaly_xingtao_new/dataset/bmw_lab_labeling/bmw_template_40_review_0823_v1`: 640 readable color ROI PNGs, 16 contact sheets, `candidate_manifest.csv`, and `review_instructions.txt`. Right has 40 unique physical parts per view from session `20260823_144248_477990`; left has 28 unique physical parts per view and uses both sessions `20260823_161606_428291` and `20260823_164432_522052` to reach 40.
+- Manual review is delete-to-reject: delete only unsuitable `candidate_*.png` copies. Do not edit/delete source images or `candidate_manifest.csv`. Deleted candidates are not refilled and number gaps are valid. Training must wait for the operator to confirm review completion and must consume exactly the surviving copies, with at least 3 per view.
+- Current 5-template models, legacy thresholds, weight-3.0 thresholds, and active left/right mixed configs remain unchanged in this phase. Adding the reviewed templates later requires recalibrating both ordinary and weighted Template thresholds before any candidate config is activated.
+
+## BMW reviewed Template-40 training and candidate configs (2026-08-23)
+
+- The operator completed delete-to-reject review. Ten of 640 candidate copies were removed and were not refilled. Right retained counts in canonical view order are `39,39,40,40,40,40,40,40` (319 total); left retained `38,37,39,38,40,40,40,40` (311 total).
+- `pipeline/bmw_lab_train_reviewed_templates.py` and `src/bmw_inspection/lab/template_review_training.py` consume exactly the surviving review copies and perform no second selection. New roots are `results/bmw_lab_one_click/bmw_right_template_40_reviewed_0823_v1` and the corresponding left root. Every retained crop became one 512x512 resident template; the new model JSON files and directories contain no SHA sidecars or SHA fields.
+- Both ordinary runtime Template risk and weight-3.0 risk were scored in one pass over each hand's 0823 calibration/final-test normal rows. Thresholds use calibration-normal maximum plus 10%; final_test is reporting only. Exact values and per-view false rejects are in each model root's `calibration_report.json`.
+- Rollback configs `bmw_eight_view_demo_{right,left}_0820_mixed_v1.json` remained byte-identical. New integrated candidates are `configs/bmw/experiments/bmw_eight_view_demo_right_0823_template40_v1.json` and the corresponding left config. They switch only all eight Template model paths, ordinary Template thresholds, weighted Template thresholds, the prepared manifest, and an independent result root; EfficientAD, YOLO, bright-streak, ROI, masks, trusted OK, HDR, and fusion are inherited unchanged.
+- CPU full-suite replay with the right candidate on `bmw_right_normal_retake_group007_000001` produced 25 rows / 0 ERROR / 24 PASS / 1 NG; the sole NG was unchanged EfficientAD `back_left`, while all eight new Template rows passed. Left session `20260823_161606_428291` group005 replay produced 25 PASS / 0 NG / 0 ERROR. These are saved-image replays; CUDA and live four-camera operation remain unverified.
+
+## BMW Template ROI-outside 0.5 weighting candidate (2026-08-24)
+
+- The existing rollback configs `configs/bmw/experiments/bmw_eight_view_demo_{left,right}_0823_template40_v1.json` remain unchanged. New candidates are `bmw_eight_view_demo_{left,right}_0823_template40_outside05_v1.json`, with independent result roots. Switching versions requires selecting the desired config at startup; a running GUI does not reload it.
+- The existing weighted Template branch now accepts optional `template.weighted_regions.outside_weight`, defaulting to `1.0` for backward compatibility. The candidate uses ROI weight `3.0`, outside weight `0.5`, and ignore-mask weight `0.0`, so the effective ROI-to-outside ratio is `6:1`. Only the four front views contain regions; the four back views keep their exact legacy scores and thresholds.
+- Left candidate weighted thresholds in `front, front_left, front_right, front_secondary` order are `0.010475272808328773`, `0.003943851201103199`, `0.005322204567186717`, and `0.006334702633248857`. Right values are `0.011022074315514753`, `0.0045888184310348586`, `0.01314845384400194`, and `0.006763783384760403`.
+- Thresholds use calibration-normal maximum plus 10%. Final-test is reporting-only: each hand has one false reject in `front` and one in `front_left`, with zero in `front_right` and `front_secondary`. Reports are under each new result root at `calibration/weighted_template_outside05_report.json`.
+- Focused regression passed with 40 tests. CPU replay `bmw_right_normal_retake_group001_000001` using the right candidate produced 25 PASS / 0 NG / 0 ERROR in 9172 ms; its front Template evidence records weights `3.0/0.5` and effective ratio `6.0`. This is saved-image verification; CUDA behavior for the new weighting and live four-camera capture remain unverified.

@@ -26,6 +26,7 @@ from bmw_inspection.lab.eight_view_demo import (
     DemoFinalStatus,
     EightViewInspection,
 )
+from bmw_inspection.lab.live_cycle_timing import LiveCycleTiming
 from bmw_inspection.lab.ui import _fit_image, _rgb_to_bgr
 
 
@@ -75,6 +76,7 @@ class EightViewUiState:
     source_images: Mapping[str, Any] | None = None
     trusted_ok_mode: bool = False
     page: DemoUiPage = DemoUiPage.DASHBOARD
+    cycle_timing: LiveCycleTiming | None = None
 
 
 _WHITE = (255, 255, 255)
@@ -119,6 +121,19 @@ _BRANCH_CARD_WIDTH = 232
 _BRANCH_CARD_HEIGHT = 108
 _BRANCH_CARD_STEP_X = 250
 _BRANCH_CARD_STEP_Y = 132
+
+
+def _result_timing_lines(timing: LiveCycleTiming) -> tuple[str, str]:
+    """Format the exact cycle total and a compact operator breakdown."""
+    return (
+        f"完整周期 {timing.total_cycle_ms / 1000.0:.3f} s",
+        (
+            f"采F/B {timing.front_capture_ms / 1000.0:.2f}/{timing.back_capture_ms / 1000.0:.2f}  "
+            f"翻{timing.flip_wait_ms / 1000.0:.2f}  "
+            f"推F/B {timing.front_inference_ms / 1000.0:.2f}/{timing.back_inference_ms / 1000.0:.2f}  "
+            f"融{timing.finalize_ms / 1000.0:.2f}  存{timing.persist_ms / 1000.0:.2f}"
+        ),
+    )
 
 
 @lru_cache(maxsize=2)
@@ -309,6 +324,19 @@ def _trusted_reference_details(state: EightViewUiState) -> tuple[tuple[str, str]
     )
 
 
+def _experiment_threshold_details(row: DemoBranchResult) -> tuple[tuple[str, str], ...]:
+    """Expose candidate threshold provenance without turning it into an asset check."""
+    rows: list[tuple[str, str]] = []
+    for label, key in (
+        ("阈值来源", "threshold_source"),
+        ("验证状态", "validation_status"),
+    ):
+        value = row.details.get(key)
+        if isinstance(value, str) and value:
+            rows.append((label, value))
+    return tuple(rows)
+
+
 def _source_image(state: EightViewUiState, kind: str) -> np.ndarray | None:
     sources = state.source_images
     if sources is None:
@@ -419,8 +447,6 @@ def _bright_streak_reference_roi(match: Any, row: DemoBranchResult) -> np.ndarra
                 source_height=reference.shape[0],
                 output_width=81,
                 output_height=613,
-                source_image="trusted_ok_reference",
-                source_image_sha256="0" * 64,
             )
             return rectify_bright_streak_roi(reference, asset)
         except (TypeError, ValueError):
@@ -581,18 +607,23 @@ def render_eight_view_dashboard(state: EightViewUiState) -> np.ndarray:
         border_color = _status(selected_row.status)[1] if index == 3 and selected_row is not None else _GRID
         cv2.rectangle(canvas, (x, 610), (x + 229, 839), _rgb_to_bgr(border_color), 2 if index == 3 else 1)
 
+    timing_detail: str | None = None
     if state.phase is DemoUiPhase.RESULT and state.inspection is not None:
         final = state.inspection.final_status
         status_title, status_detail, color = {
-            DemoFinalStatus.OK: ("检测通过", "25 项检测全部通过", _GREEN),
+            DemoFinalStatus.OK: ("检测通过", f"{len(state.inspection.results)} 项检测全部通过", _GREEN),
             DemoFinalStatus.NG: ("检测不通过", "至少一个检测项目判定为不通过", _RED),
             DemoFinalStatus.ERROR: ("检测异常", "至少一个模型未能完成推理", _MAGENTA),
         }[final]
+        if state.cycle_timing is not None:
+            status_detail, timing_detail = _result_timing_lines(state.cycle_timing)
+        elif state.message.startswith("完整周期"):
+            status_detail = state.message
     else:
         status_title, status_detail, color = {
             DemoUiPhase.IDLE: ("等待检测", "按空格键拍摄正面", _BLUE),
             DemoUiPhase.WAITING_FLIP: ("请翻转零件", "固定反面后按空格键继续", _AMBER),
-            DemoUiPhase.PROCESSING: ("正在检测", "正在运行四类模型", _BLUE),
+            DemoUiPhase.PROCESSING: ("正在检测", "正在运行检测模块", _BLUE),
             DemoUiPhase.ERROR: ("运行异常", state.message, _MAGENTA),
             DemoUiPhase.RESULT: ("检测完成", state.message, _BLUE),
         }[state.phase]
@@ -633,6 +664,8 @@ def render_eight_view_dashboard(state: EightViewUiState) -> np.ndarray:
         draw.text((x + 44, y + 3), _VIEW_LABELS[view], font=_demo_font(17), fill=_INK)
     draw.text((1104, 112), status_title, font=_demo_font(33, "bold"), fill=color)
     draw.text((1104, 170), status_detail[:24], font=_demo_font(17), fill=_MUTED)
+    if timing_detail is not None:
+        draw.text((1104, 199), timing_detail, font=_demo_font(12), fill=_MUTED)
     for branch, x, y in branch_rectangles:
         branch_status = _aggregate(tuple(row for row in results if row.branch is branch))
         label, branch_color = _status(branch_status)
@@ -701,6 +734,7 @@ def render_eight_view_dashboard(state: EightViewUiState) -> np.ndarray:
                 ("阈值余量", "不可用" if margin is None else f"{float(margin):.6g}"),
             )
         detail_rows.extend(numeric_rows)
+        detail_rows.extend(_experiment_threshold_details(selected_row))
     detail_rows.extend(_trusted_reference_details(state))
     for index, (label, value) in enumerate(detail_rows):
         y = detail_y + index * 20

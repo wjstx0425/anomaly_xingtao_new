@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import sys
 from pathlib import Path
 
@@ -35,14 +34,6 @@ DEFAULT_OUTPUT = REPO_ROOT / (
 )
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
 def _source_point(
     display_point: tuple[int, int],
     display_shape: tuple[int, int],
@@ -68,6 +59,22 @@ def _display_point(
     return (
         round(source_point[0] * display_width / source_width),
         round(source_point[1] * display_height / source_height),
+    )
+
+
+def _asset_from_points(
+    points: list[tuple[int, int]],
+    *,
+    image_shape: tuple[int, int],
+) -> RotatedBrightStreakRoi:
+    """Build the geometry-only ROI asset used by the simplified runtime."""
+    image_height, image_width = image_shape
+    return RotatedBrightStreakRoi(
+        points_xy=tuple(points),
+        source_width=image_width,
+        source_height=image_height,
+        output_width=81,
+        output_height=613,
     )
 
 
@@ -144,15 +151,7 @@ def main(argv: list[str] | None = None) -> int:
             cv2.imshow(window, _render(displayed, source_shape=image.shape[:2], points=points))
             if len(points) == 4 and not preview_shown:
                 try:
-                    selected_asset = RotatedBrightStreakRoi(
-                        points_xy=tuple(points),
-                        source_width=image.shape[1],
-                        source_height=image.shape[0],
-                        output_width=81,
-                        output_height=613,
-                        source_image=str(image_path),
-                        source_image_sha256=_sha256(image_path),
-                    )
+                    selected_asset = _asset_from_points(points, image_shape=image.shape[:2])
                 except ValueError as error:
                     print(f"点位无效：{error}。请按 R 清空后依次重选。")
                 else:
@@ -182,7 +181,6 @@ def main(argv: list[str] | None = None) -> int:
                 destination = write_rotated_bright_streak_roi(args.output.expanduser().resolve(), selected_asset)
                 print(f"已保存 ROI：{destination}")
                 print(f"最终点位：{points}")
-                print(f"资产 SHA-256：{_sha256(destination)}")
                 return 0
     finally:
         try:

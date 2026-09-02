@@ -161,6 +161,39 @@ def test_selects_one_complete_normal_train_sample_for_all_views(tmp_path: Path) 
     ).hexdigest()
 
 
+def test_selects_representative_when_experimental_source_hashes_are_blank(tmp_path: Path) -> None:
+    release = _prepared_release(tmp_path)
+    manifest = release / "manifests/dataset_manifest.csv"
+    with manifest.open(newline="", encoding="utf-8") as stream:
+        rows = list(csv.DictReader(stream))
+    for row in rows:
+        row["source_sha256"] = ""
+    with manifest.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=DATASET_FIELDS)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    selection = select_representative_images(release)
+
+    assert selection.sample_id == "sample-000"
+    assert tuple(selection.images) == VIEW_ORDER
+
+
+def test_rejects_representative_when_populated_source_hash_is_wrong(tmp_path: Path) -> None:
+    release = _prepared_release(tmp_path)
+    manifest = release / "manifests/dataset_manifest.csv"
+    with manifest.open(newline="", encoding="utf-8") as stream:
+        rows = list(csv.DictReader(stream))
+    rows[0]["source_sha256"] = "0" * 64
+    with manifest.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=DATASET_FIELDS)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    with pytest.raises(ValueError, match="representative source image SHA-256 mismatch"):
+        select_representative_images(release)
+
+
 def test_selects_raw_right_representative_for_reusable_roi(tmp_path: Path) -> None:
     manifest, sample_id = _raw_right_release(tmp_path)
 
