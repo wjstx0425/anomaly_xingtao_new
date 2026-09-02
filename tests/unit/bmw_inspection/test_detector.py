@@ -74,6 +74,122 @@ def _broken_streak_image() -> np.ndarray:
     return image
 
 
+def _curved_streak_image() -> np.ndarray:
+    yy, xx = np.indices((120, 160))
+    image = (76 + ((3 * xx + 5 * yy) % 9)).astype(np.uint8)
+    for y in range(15, 105):
+        center = 80 + int(round(5 * np.sin(y / 18.0)))
+        half_width = 1 + int(y % 17 == 0)
+        image[y, center - half_width : center + half_width + 1] = 210
+    return image
+
+
+def _gradually_drifting_streak_image() -> np.ndarray:
+    yy, xx = np.indices((120, 160))
+    image = (76 + ((3 * xx + 5 * yy) % 9)).astype(np.uint8)
+    for y in range(15, 105):
+        center = 73 + int(round(14 * (y - 15) / 89))
+        image[y, center - 1 : center + 2] = 210
+    return image
+
+
+def _two_pixel_step_streak_image() -> np.ndarray:
+    yy, xx = np.indices((120, 160))
+    image = (76 + ((3 * xx + 5 * yy) % 9)).astype(np.uint8)
+    for y in range(15, 105):
+        center = 78 + 2 * ((y - 15) % 2)
+        image[y, center - 1 : center + 2] = 210
+    return image
+
+
+def _laterally_jumping_streak_image() -> np.ndarray:
+    yy, xx = np.indices((120, 160))
+    image = (76 + ((3 * xx + 5 * yy) % 9)).astype(np.uint8)
+    image[15:45, 72:75] = 210
+    image[45:105, 86:89] = 210
+    return image
+
+
+def test_curved_variable_width_streak_is_tracked(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+    _write_synthetic_config(config_path)
+    decision = detect_bright_streak_evidence(_curved_streak_image(), load_config(config_path))
+    assert decision.status is DemoStatus.OK
+    assert decision.metrics is not None
+    assert decision.metrics.coverage_ratio >= 0.75
+
+
+def test_evidence_overlay_follows_the_curved_decision_mask(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+    _write_synthetic_config(config_path)
+    image = _curved_streak_image()
+    decision = detect_bright_streak_evidence(image, load_config(config_path))
+
+    overlay = render_evidence(image, decision)
+
+    x1, y1, x2, y2 = decision.result.roi_xyxy
+    accepted = decision.mask.astype(bool)
+    accepted_rows = np.flatnonzero(accepted.any(axis=1))
+    tracked_columns = np.array(
+        [int(np.flatnonzero(accepted[row])[0]) for row in accepted_rows],
+        dtype=np.int32,
+    )
+    assert np.ptp(tracked_columns) >= 6
+    overlay_roi = overlay[y1:y2, x1:x2]
+    accepted_green = np.all(overlay_roi == np.array([0, 255, 0], dtype=np.uint8), axis=2)
+    accepted_below_status_text = accepted.copy()
+    accepted_below_status_text[:20] = False
+    assert accepted_below_status_text.any()
+    assert accepted_green[accepted_below_status_text].all()
+
+
+def test_gradual_drift_beyond_width_allowance_is_tracked(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+    _write_synthetic_config(config_path)
+    decision = detect_bright_streak_evidence(
+        _gradually_drifting_streak_image(),
+        load_config(config_path),
+    )
+    assert decision.status is DemoStatus.OK
+    assert decision.metrics is not None
+    assert decision.metrics.coverage_ratio >= 0.75
+
+
+def test_two_pixel_local_steps_within_allowance_are_tracked(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+    _write_synthetic_config(config_path)
+    config = load_config(config_path)
+    assert config.max_component_width_px >= 2
+
+    decision = detect_bright_streak_evidence(_two_pixel_step_streak_image(), config)
+
+    assert decision.status is DemoStatus.OK
+    assert decision.metrics is not None
+    assert decision.metrics.coverage_ratio >= 0.75
+
+
+def test_contiguous_lateral_jump_does_not_start_a_false_ridge(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+    _write_synthetic_config(config_path)
+    config = load_config(config_path)
+
+    decision = detect_bright_streak_evidence(_laterally_jumping_streak_image(), config)
+
+    assert decision.status is DemoStatus.NG_NO_STREAK
+    assert decision.metrics is not None
+    assert decision.metrics.coverage_ratio < config.min_coverage_ratio
+    assert not decision.mask[35:].any()
+
+
+def test_unstructured_center_texture_is_not_a_streak(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+    _write_synthetic_config(config_path)
+    image = np.full((120, 160), 80, dtype=np.uint8)
+    image[15:105:7, 73:88] = 150
+    decision = detect_bright_streak_evidence(image, load_config(config_path))
+    assert decision.status is DemoStatus.NG_NO_STREAK
+
+
 def test_complete_new_dataset_has_the_locked_demo_labels() -> None:
     config = load_config(DEMO_CONFIG)
     labeled_paths = {

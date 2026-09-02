@@ -182,6 +182,26 @@ def test_reader_capture_scope_keeps_only_right_samples_and_audit_counts(tmp_path
     assert audit.incomplete_sample_count == 1
 
 
+def test_reader_maps_generic_defect_layout_to_others(tmp_path: Path) -> None:
+    _write_session(
+        tmp_path,
+        session_id="20260820_153342_329257",
+        source_class="defect",
+        groups=1,
+        hand="right",
+    )
+
+    rows, audit = read_complete_capture_rows(
+        tmp_path,
+        capture_scope="right",
+        session_ids=("20260820_153342_329257",),
+    )
+
+    assert len(rows) == len(VIEW_ORDER)
+    assert {row.source_class for row in rows} == {"others"}
+    assert audit.complete_sample_count == 1
+
+
 def test_reader_session_filter_keeps_only_requested_manifests(tmp_path: Path) -> None:
     selected_session = "20260810_100000_000011"
     _write_session(

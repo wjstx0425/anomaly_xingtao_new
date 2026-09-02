@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+from dataclasses import replace
 from pathlib import Path
 
 from bmw_inspection.lab.eight_view_dataset import VIEW_ORDER
@@ -104,6 +105,29 @@ def test_one_click_cli_uses_confirmed_laboratory_defaults() -> None:
     assert args.yolo_epochs == 100
     assert args.yolo_batch == 32
     assert args.yolo_imgsz == 640
+
+    all_normal_args = module.build_parser().parse_args(["--efficientad-all-normal-train"])
+    assert all_normal_args.efficientad_all_normal_train is True
+
+
+def test_all_normal_train_mode_disables_internal_efficientad_validation(tmp_path: Path) -> None:
+    from bmw_inspection.lab import eight_view_train_all as training
+
+    config = replace(LabTrainingConfig.defaults(tmp_path), efficientad_all_normal_train=True)
+
+    options = training._efficientad_data_options(config)
+
+    assert options == {
+        "normal_test_dir": None,
+        "test_split_mode": "none",
+        "val_split_mode": "none",
+        "run_test": False,
+        "limit_val_batches": 0,
+        "validation_status": "pending_external_validation",
+    }
+    efficientad_step = next(step for step in build_training_plan(config) if step.name == "efficientad")
+    assert efficientad_step.parameters["all_normal_train"] is True
+    assert efficientad_step.parameters["validation"] == "pending_external_validation"
 
 
 def test_bright_streak_fit_keeps_explicit_continuity_gates() -> None:

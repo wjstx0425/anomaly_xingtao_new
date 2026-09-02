@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- 🚀 **pipeline**: Add the BMW four-camera/eight-view laboratory workflow with HDR capture, ROI preparation, Template/YOLO/EfficientAD training, center-ridge bright-streak inspection, whole-part EfficientAD threshold calibration, and a Chinese Demo dashboard.
+
 - 🚀 **pipeline**: Add a unified right-hand ZS32 Stage 32 runtime that verifies and retains six PatchCore models plus one batched YOLO model, preserves continuous hashed evidence, runs the template gate first, and delegates final release only to a new 36-group right-only strict Stage 18 profile.
 
 - 🚀 **pipeline**: Add a model-bundle and template-hash-verified ZS32 six-view template-first gate that short-circuits PatchCore, YOLO, and geometry on REVIEW or NG_TEMPLATE, exports same-source Stage 31 calibration rows, and retains continuous evidence for Stage 18.

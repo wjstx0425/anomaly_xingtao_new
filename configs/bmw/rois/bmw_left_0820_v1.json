@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "coordinate_system": "pixel_xyxy_half_open",
+  "representative_sample_id": "bmw_left_normal_group002_000001",
+  "image_width": 4024,
+  "image_height": 3036,
+  "part_rois": {
+    "front": [
+      1218,
+      166,
+      3353,
+      2980
+    ],
+    "front_left": [
+      1575,
+      91,
+      2517,
+      2866
+    ],
+    "front_right": [
+      1442,
+      481,
+      3216,
+      3014
+    ],
+    "front_secondary": [
+      1078,
+      41,
+      2810,
+      2634
+    ],
+    "back": [
+      842,
+      273,
+      2924,
+      2911
+    ],
+    "back_left": [
+      1658,
+      220,
+      2385,
+      2566
+    ],
+    "back_right": [
+      1890,
+      159,
+      4024,
+      2888
+    ],
+    "back_secondary": [
+      1602,
+      425,
+      3186,
+      3036
+    ]
+  },
+  "dataset_id": "bmw_left_0820_v1",
+  "source_manifest": "/home/yunjing/anomaly_xingtao_new/dataset/bmw_lab_prepared/bmw_left_0820_v1/manifests/dataset_manifest.csv",
+  "source_manifest_sha256": "673dabb05b763ed7e4c871c9a5155f57b0280d7f41635f14b28c611ab2333b53"
+}

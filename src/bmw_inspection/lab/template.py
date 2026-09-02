@@ -9,6 +9,7 @@ import csv
 import hashlib
 import json
 import math
+import re
 import shutil
 import tempfile
 from collections.abc import Mapping, Sequence
@@ -27,6 +28,7 @@ from bmw_inspection.lab.contracts import BranchEvidence, BranchName, BranchStatu
 
 _SPLITS = frozenset({"train", "calibration", "final_test"})
 _LABELS = frozenset({"normal", "defect"})
+_SOURCE_SESSION = re.compile(r"(?P<session_id>[0-9]{8}_[0-9]{6}_[0-9]{6})__")
 _CALIBRATION_FIELDS = (
     "sample_id",
     "part_id",
@@ -200,6 +202,31 @@ def load_template_manifest(path: Path, *, path_root: Path | None = None) -> tupl
         raise ValueError("template manifest must not be empty")
     _validate_part_split_isolation(samples)
     return tuple(samples)
+
+
+def validate_template_source_sessions(
+    rows: Sequence[TemplateSample],
+    allowed_session_ids: Sequence[str],
+) -> tuple[str, ...]:
+    """Fail closed unless every manifest crop is named by an allowed capture session."""
+    allowed = tuple(allowed_session_ids)
+    if not allowed or len(set(allowed)) != len(allowed) or any(
+        not isinstance(session_id, str) or not _SOURCE_SESSION.fullmatch(f"{session_id}__")
+        for session_id in allowed
+    ):
+        raise ValueError("allowed session IDs must be unique capture session IDs")
+    sources: set[str] = set()
+    for row in rows:
+        match = _SOURCE_SESSION.match(row.image_path.name)
+        if match is None:
+            raise ValueError(f"template crop filename does not encode a source session: {row.image_path}")
+        session_id = match.group("session_id")
+        if session_id not in allowed:
+            raise ValueError(f"template source session {session_id} is not in the allowed session list")
+        sources.add(session_id)
+    if not sources:
+        raise ValueError("template source session validation requires at least one row")
+    return tuple(sorted(sources))
 
 
 def _read_image(path: Path) -> np.ndarray:
@@ -400,6 +427,7 @@ def _write_group(
     target_size: tuple[int, int],
     max_shift: int,
     template_count: int,
+    fixed_threshold: float | None = None,
 ) -> None:
     if not rows:
         raise ValueError("template group rows must not be empty")
@@ -410,11 +438,21 @@ def _write_group(
     view_id = next(iter(view_ids))
     if isinstance(max_shift, bool) or not isinstance(max_shift, int) or max_shift < 0:
         raise ValueError("max_shift must be a non-negative integer")
-    train_rows = sorted((row for row in rows if row.split == "train"), key=lambda item: item.sample_id)
-    if any(row.label != "normal" for row in train_rows):
+    all_train_rows = [row for row in rows if row.split == "train"]
+    if fixed_threshold is None and any(row.label != "normal" for row in all_train_rows):
         raise ValueError("Template train split may contain only normal rows")
-    calibration_rows = [row for row in rows if row.split == "calibration"]
-    final_rows = [row for row in rows if row.split == "final_test"]
+    train_rows = sorted(
+        (row for row in all_train_rows if row.label == "normal"),
+        key=lambda item: item.sample_id,
+    )
+    calibration_rows = [
+        row for row in rows if row.split == "calibration" and (fixed_threshold is None or row.label == "normal")
+    ]
+    final_rows = [
+        row for row in rows if row.split == "final_test" and (fixed_threshold is None or row.label == "normal")
+    ]
+    if fixed_threshold is not None and (not calibration_rows or not final_rows):
+        raise ValueError("fixed-threshold Template scoring requires normal calibration and final_test rows")
     x1, y1, x2, y2 = roi
     target_width, target_height = target_size
     train_images = [
@@ -448,14 +486,22 @@ def _write_group(
         resident_templates,
         max_shift,
     )
-    fit = fit_risk_threshold([(str(record["label"]), float(record["risk"])) for record in calibration_records])
+    threshold = _finite(fixed_threshold, "fixed Template threshold") if fixed_threshold is not None else None
+    if threshold is not None and threshold < 0.0:
+        raise ValueError("fixed Template threshold must be non-negative")
+    fit = (
+        None
+        if threshold is not None
+        else fit_risk_threshold([(str(record["label"]), float(record["risk"])) for record in calibration_records])
+    )
+    resolved_threshold = threshold if threshold is not None else fit.threshold
     for record in calibration_records:
-        record["threshold"] = fit.threshold
-        record["prediction"] = "normal" if float(record["risk"]) <= fit.threshold else "defect"
+        record["threshold"] = resolved_threshold
+        record["prediction"] = "normal" if float(record["risk"]) <= resolved_threshold else "defect"
     final_records = _score_samples(final_rows, roi, target_size, resident_templates, max_shift)
     for record in final_records:
-        record["threshold"] = fit.threshold
-        record["prediction"] = "normal" if float(record["risk"]) <= fit.threshold else "defect"
+        record["threshold"] = resolved_threshold
+        record["prediction"] = "normal" if float(record["risk"]) <= resolved_threshold else "defect"
     model = {
         "schema_version": 1,
         "view_id": view_id.value,
@@ -470,13 +516,15 @@ def _write_group(
             "padding": "BORDER_REFLECT_101",
             "max_shift": max_shift,
         },
-        "threshold": fit.threshold,
+        "threshold": resolved_threshold,
         "threshold_fit": {
-            "split": "calibration",
-            "metric": "balanced_accuracy",
-            "balanced_accuracy": fit.balanced_accuracy,
-            "normal_false_rejects": fit.normal_false_rejects,
-            "defect_false_accepts": fit.defect_false_accepts,
+            "split": "baseline_fixed" if fit is None else "calibration",
+            "metric": "fixed_baseline_threshold" if fit is None else "balanced_accuracy",
+            "balanced_accuracy": None if fit is None else fit.balanced_accuracy,
+            "normal_false_rejects": _metrics(calibration_records, resolved_threshold)["normal_false_rejects"]
+            if fit is None
+            else fit.normal_false_rejects,
+            "defect_false_accepts": None if fit is None else fit.defect_false_accepts,
             "final_test_used": False,
         },
         "templates": template_metadata,
@@ -493,9 +541,10 @@ def _write_group(
         {
             "schema_version": 1,
             "view_id": view_id.value,
-            "threshold": fit.threshold,
-            "calibration": _metrics(calibration_records, fit.threshold),
-            "final_test": _metrics(final_records, fit.threshold),
+            "threshold": resolved_threshold,
+            "calibration": _metrics(calibration_records, resolved_threshold),
+            "calibration_rows": calibration_records,
+            "final_test": _metrics(final_records, resolved_threshold),
             "final_test_rows": final_records,
         },
     )
@@ -551,6 +600,41 @@ def train_template_group(
         max_shift=max_shift,
         template_count=template_count,
     )
+
+
+def train_template_group_fixed_threshold(
+    rows: Sequence[TemplateSample],
+    roi: tuple[int, int, int, int],
+    output_dir: Path,
+    *,
+    threshold: float,
+    target_size: tuple[int, int] = (512, 512),
+    max_shift: int = 12,
+    template_count: int = 5,
+) -> Path:
+    """Train immutable templates from train/normal rows and reuse a fixed threshold."""
+    template_count = _validate_template_count(template_count)
+    _validate_part_split_isolation(rows)
+    destination = Path(output_dir).expanduser().resolve()
+    if destination.exists():
+        raise FileExistsError(f"refuse to overwrite existing template model directory: {destination}")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = Path(tempfile.mkdtemp(prefix=f".{destination.name}.", dir=destination.parent))
+    try:
+        _write_group(
+            rows,
+            roi,
+            temporary,
+            target_size=target_size,
+            max_shift=max_shift,
+            template_count=template_count,
+            fixed_threshold=threshold,
+        )
+        temporary.replace(destination)
+    except BaseException:
+        shutil.rmtree(temporary, ignore_errors=True)
+        raise
+    return destination / "model.json"
 
 
 def train_template_groups(

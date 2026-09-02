@@ -161,6 +161,39 @@ def test_selects_one_complete_normal_train_sample_for_all_views(tmp_path: Path) 
     ).hexdigest()
 
 
+def test_selects_representative_when_experimental_source_hashes_are_blank(tmp_path: Path) -> None:
+    release = _prepared_release(tmp_path)
+    manifest = release / "manifests/dataset_manifest.csv"
+    with manifest.open(newline="", encoding="utf-8") as stream:
+        rows = list(csv.DictReader(stream))
+    for row in rows:
+        row["source_sha256"] = ""
+    with manifest.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=DATASET_FIELDS)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    selection = select_representative_images(release)
+
+    assert selection.sample_id == "sample-000"
+    assert tuple(selection.images) == VIEW_ORDER
+
+
+def test_rejects_representative_when_populated_source_hash_is_wrong(tmp_path: Path) -> None:
+    release = _prepared_release(tmp_path)
+    manifest = release / "manifests/dataset_manifest.csv"
+    with manifest.open(newline="", encoding="utf-8") as stream:
+        rows = list(csv.DictReader(stream))
+    rows[0]["source_sha256"] = "0" * 64
+    with manifest.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=DATASET_FIELDS)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    with pytest.raises(ValueError, match="representative source image SHA-256 mismatch"):
+        select_representative_images(release)
+
+
 def test_selects_raw_right_representative_for_reusable_roi(tmp_path: Path) -> None:
     manifest, sample_id = _raw_right_release(tmp_path)
 
@@ -170,6 +203,7 @@ def test_selects_raw_right_representative_for_reusable_roi(tmp_path: Path) -> No
         capture_scope="right",
         source_class="others",
         sample_id=sample_id,
+        session_id="20260810_164527_229315",
     )
 
     assert selection.dataset_id == "bmw-right-hdr-v1"
@@ -180,6 +214,15 @@ def test_selects_raw_right_representative_for_reusable_roi(tmp_path: Path) -> No
     assert selection.image_width == 100
     assert selection.image_height == 80
 
+    with pytest.raises(ValueError, match="no complete raw eight-view"):
+        eight_view_roi.select_raw_representative_images(
+            tmp_path,
+            profile_id="bmw-right-hdr-v1",
+            capture_scope="right",
+            source_class="others",
+            sample_id=sample_id,
+            session_id="different-session",
+        )
 
 def test_display_mapping_returns_half_open_source_roi() -> None:
     source = np.zeros((3036, 4024, 3), dtype=np.uint8)

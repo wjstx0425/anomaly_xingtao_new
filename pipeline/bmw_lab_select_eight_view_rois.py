@@ -69,6 +69,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hand", choices=("left", "right"), default="right")
     parser.add_argument("--source-class", choices=SOURCE_CLASSES)
     parser.add_argument("--sample-id", help="raw模式下可选：指定一个完整八视图sample。")
+    parser.add_argument("--session-id", help="raw模式下可选：限定采集会话，避免同名sample选到旧数据。")
     parser.add_argument("--profile-id", default="bmw-right-hdr-eight-view-v1")
     parser.add_argument("--max-display-width", type=int, default=1280)
     parser.add_argument("--max-display-height", type=int, default=720)
@@ -97,6 +98,7 @@ def main(argv: list[str] | None = None) -> int:
                 capture_scope=args.hand,
                 source_class=args.source_class,
                 sample_id=args.sample_id,
+                session_id=args.session_id,
             )
             output = args.output or DEFAULT_RAW_OUTPUT
             binding_mode = "fixed_setup"
