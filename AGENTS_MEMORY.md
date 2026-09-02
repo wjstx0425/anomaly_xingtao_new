@@ -2281,3 +2281,11 @@
 - Historical benchmark artifact `results/zs32_classical_operator_benchmark_v1` used 30 full-resolution ROIs and reported p50 `0.1691 s` for `thin_line`, `0.2429 s` for `pit_spot`, `2.8204 s` for a six-image serial round, and `1.5489 s` for a two-worker round.
 - Visual quality was not accepted: fixed geometry, normal texture, high-contrast hole edges, and angled-view backgrounds produced false evidence. Add per-view material/ignore masks and region-level target labels before considering runtime integration.
 - Detailed limitations and commands are in `docs/ZS32_CLASSICAL_OPERATORS_PROTOTYPE.md`.
+
+## Worktree consolidation (2026-09-02)
+
+- BMW branch `agent/bmw-21only-diagnostics` was snapshotted at `fedeb4ba` and merged into `feat/zs32-strict-eight-view-commissioning` as `6b619bba`. The BMW subsystem uses the worktree's latest simplified runtime/config/tests; current ZS32 memory was retained and BMW-only memory sections were appended.
+- ZS32 branch `feat/zs32-classical-operators-prototype` was merged as `40ce26b1`. The classical operators remain offline diagnostic tools and are not wired into Stage 32, Stage 18, Dashboard, v10, model configs, or threshold artifacts.
+- Post-merge verification was `563 passed` for BMW-focused tests and `74 passed` for the classical-operator/wrapper tests. Both runs emitted the existing NVML initialization warning; no CUDA, camera, live GUI, or production acceptance was performed.
+- Unique ignored BMW assets were preserved before cleanup: `dataset/bmw_trusted_ok_review`, `dataset/bmw_trusted_ok_reference/bmw_right_20260810_21_train_normal_approved_v1`, and three `artifacts/bmw_*` directories were moved from the worktree into the root checkout. The duplicate approved-v2 bank had identical index bytes and exact path/size inventory in both locations.
+- Two unstaged `.orig` backups were moved to `/tmp/anomaly-worktree-orig-backup-20260902/`. Worktree removal was not executed because the safety gate rejected deleting about 11 GB without a separate explicit deletion authorization; both worktrees and their branch refs remain available.
