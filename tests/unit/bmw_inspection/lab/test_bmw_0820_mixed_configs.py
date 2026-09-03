@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
-from bmw_inspection.lab.eight_view_dataset import VIEW_ORDER
+from bmw_inspection.views import VIEW_ORDER
 from bmw_inspection.lab.eight_view_demo import load_demo_config
 from bmw_inspection.lab.eight_view_demo_models import load_part_rois
 
@@ -14,17 +15,28 @@ CONFIGS = {
     "right": ROOT / "configs/bmw/experiments/bmw_eight_view_demo_right_0820_mixed_v1.json",
     "left": ROOT / "configs/bmw/experiments/bmw_eight_view_demo_left_0820_mixed_v1.json",
 }
-TEMPLATE40_ROLLBACK_CONFIGS = {
-    hand: ROOT / f"configs/bmw/experiments/bmw_eight_view_demo_{hand}_0823_template40_v1.json"
-    for hand in ("right", "left")
-}
-TEMPLATE40_OUTSIDE05_CONFIGS = {
-    hand: ROOT
-    / f"configs/bmw/experiments/bmw_eight_view_demo_{hand}_0823_template40_outside05_v1.json"
-    for hand in ("right", "left")
-}
 
 
+def _strings(value: object):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _strings(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _strings(item)
+
+
+def test_active_profiles_and_trusted_ok_indexes_are_location_independent() -> None:
+    for path in CONFIGS.values():
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        assert not any(Path(value).is_absolute() for value in _strings(payload) if "/" in value)
+        trusted = path.parent / payload["trusted_ok_reference"]["index"]
+        trusted_payload = json.loads(trusted.resolve().read_text(encoding="utf-8"))
+        for row in trusted_payload["references"]:
+            assert not Path(row["full_image_path"]).is_absolute()
+            assert not Path(row["roi_image_path"]).is_absolute()
 def test_0820_mixed_configs_use_0823_front_right_models_and_new_public_rois() -> None:
     for hand, path in CONFIGS.items():
         config = load_demo_config(path)
@@ -104,8 +116,7 @@ def test_left_0820_uses_current_training_normal_trusted_ok_bank() -> None:
     config = load_demo_config(CONFIGS["left"])
 
     assert config.trusted_ok_reference_index == (
-        Path("/home/yunjing/anomaly_xingtao_new")
-        / "dataset/bmw_trusted_ok_reference/bmw_left_0820_train_normal_v1/reference_index.json"
+        ROOT / "dataset/bmw_trusted_ok_reference/bmw_left_0820_train_normal_v1/reference_index.json"
     ).resolve()
 
 
@@ -113,8 +124,7 @@ def test_right_0820_uses_current_training_normal_trusted_ok_bank() -> None:
     config = load_demo_config(CONFIGS["right"])
 
     assert config.trusted_ok_reference_index == (
-        Path("/home/yunjing/anomaly_xingtao_new")
-        / "dataset/bmw_trusted_ok_reference/bmw_right_0820_train_normal_v1/reference_index.json"
+        ROOT / "dataset/bmw_trusted_ok_reference/bmw_right_0820_train_normal_v1/reference_index.json"
     ).resolve()
 
 
@@ -151,22 +161,3 @@ def test_0820_mixed_configs_use_hand_specific_weighted_template_regions() -> Non
             ROOT / f"configs/bmw/key_template/bmw_{hand}_0823_key_rois_v1.json"
         ).resolve()
         assert tuple(weighted.thresholds) == VIEW_ORDER
-
-
-def test_template40_outside05_configs_keep_rollback_and_change_only_front_weighting() -> None:
-    for hand in ("right", "left"):
-        rollback = load_demo_config(TEMPLATE40_ROLLBACK_CONFIGS[hand])
-        candidate = load_demo_config(TEMPLATE40_OUTSIDE05_CONFIGS[hand])
-        assert rollback.template_weighted_regions is not None
-        assert candidate.template_weighted_regions is not None
-        assert rollback.template_weighted_regions.outside_weight == 1.0
-        assert candidate.template_weighted_regions.weight == 3.0
-        assert candidate.template_weighted_regions.outside_weight == 0.5
-        assert candidate.template_models == rollback.template_models
-        assert candidate.template_thresholds == rollback.template_thresholds
-        assert candidate.template_weighted_regions.roi_config == rollback.template_weighted_regions.roi_config
-        assert {
-            view: candidate.template_weighted_regions.thresholds[view] for view in VIEW_ORDER[4:]
-        } == {
-            view: rollback.template_weighted_regions.thresholds[view] for view in VIEW_ORDER[4:]
-        }

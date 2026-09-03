@@ -13,7 +13,7 @@ from types import MappingProxyType
 import cv2
 import numpy as np
 
-from bmw_inspection.lab.eight_view_dataset import VIEW_ORDER
+from bmw_inspection.views import VIEW_ORDER
 from bmw_inspection.lab.template_ignore_mask import prepare_template_inspect_mask
 
 

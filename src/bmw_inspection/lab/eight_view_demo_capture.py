@@ -83,7 +83,7 @@ class FourCameraHdrSession:
         self.last_sources: Mapping[str, HdrSourceImages] = MappingProxyType({})
 
     def __enter__(self) -> FourCameraHdrSession:
-        from capture_data.collect_multicamera_dataset import GroupedTriggerPacer, HikvisionAdapter, open_cameras
+        from bmw_inspection.capture.hardware import GroupedTriggerPacer, HikvisionAdapter, open_cameras
 
         adapter = HikvisionAdapter.load()
         available = {device.serial: device for device in adapter.list_devices()}
@@ -105,7 +105,7 @@ class FourCameraHdrSession:
             raise ValueError("round_id必须是front或back")
         if self._handles is None:
             raise RuntimeError("四相机尚未打开")
-        from capture_data.collect_multicamera_dataset import capture_hdr_round
+        from bmw_inspection.capture.hardware import capture_hdr_round
 
         results = capture_hdr_round(
             self._handles,

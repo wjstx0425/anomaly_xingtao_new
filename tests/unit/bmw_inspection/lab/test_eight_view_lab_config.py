@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from bmw_inspection.lab.eight_view_dataset import VIEW_ORDER
+from bmw_inspection.views import VIEW_ORDER
 from bmw_inspection.lab.eight_view_demo import load_demo_config
 
 
@@ -115,6 +115,16 @@ def test_lab_profile_loads_direct_paths_and_thresholds_without_sha(tmp_path: Pat
     assert config.trusted_ok_reference_index == tmp_path / "reference_index.json"
     assert config.template_weighted_regions is None
     assert not any("sha256" in name for name in config.__dataclass_fields__)
+
+
+def test_lab_profile_allows_missing_manifest_for_live_or_capture_set_mode(tmp_path: Path) -> None:
+    path, payload = _simple_profile(tmp_path)
+    manifest = Path(str(payload["prepared_manifest"]))
+    manifest.unlink()
+
+    config = load_demo_config(path)
+
+    assert config.prepared_manifest == manifest
 
 
 def test_lab_profile_loads_optional_weighted_template_regions(tmp_path: Path) -> None:

@@ -54,7 +54,5 @@
       2748
     ]
   },
-  "dataset_id": "bmw_right_0820_v1",
-  "source_manifest": "/home/yunjing/anomaly_xingtao_new/dataset/bmw_lab_prepared/bmw_right_0820_v1/manifests/dataset_manifest.csv",
-  "source_manifest_sha256": "d5af1a4bb49444c801dbd99663d7dadf16c00a6256505eb2a6fd645da00c0932"
+  "dataset_id": "bmw_right_0820_v1"
 }

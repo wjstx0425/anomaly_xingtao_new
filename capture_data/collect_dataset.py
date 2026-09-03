@@ -31,7 +31,6 @@ POSITION_CONFIG = {
     "bottom": {"exposure": 8000, "gain": 16, "fps": 10},
     "side": {"exposure": 8000, "gain": 9, "fps": 10},
     "top":{"exposure": 4000, "gain": 10, "fps":10},
-    "bottom_ZS32": {"exposure": 4000, "gain": 9, "fps": 10},
 }
 
 
@@ -325,7 +324,7 @@ def main():
 
     p.add_argument("--device", type=int, default=0)
     p.add_argument("--hand", required=True, choices=["left","right", "no_hand"])
-    p.add_argument("--position", required=True, choices=["bottom","side","top", "bottom_ZS32"])
+    p.add_argument("--position", required=True, choices=["bottom", "side", "top"])
     p.add_argument("--label", required=True, choices=["normal","defect"])
     p.add_argument("--defect-type", default="")
     p.add_argument("--part-id", default="part001")

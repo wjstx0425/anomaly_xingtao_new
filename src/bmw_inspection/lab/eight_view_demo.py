@@ -15,7 +15,7 @@ from typing import Any, Mapping
 import cv2
 import numpy as np
 
-from bmw_inspection.lab.eight_view_dataset import VIEW_ORDER
+from bmw_inspection.views import VIEW_ORDER
 from bmw_inspection.lab.efficientad_component_filter import ComponentFilterPolicy
 from bmw_inspection.lab.trusted_ok_reference import TrustedOkMatch
 
@@ -536,7 +536,11 @@ def load_demo_config(path: Path) -> EightViewDemoConfig:
         demo_id=demo_id,
         capture_config=resolve(payload.get("capture_config"), "capture_config"),
         roi_config=resolve(payload.get("roi_config"), "roi_config"),
-        prepared_manifest=resolve(payload.get("prepared_manifest"), "prepared_manifest"),
+        prepared_manifest=resolve(
+            payload.get("prepared_manifest"),
+            "prepared_manifest",
+            must_exist=False,
+        ),
         result_root=resolve(payload.get("result_root"), "result_root", must_exist=False),
         template_models=template_models,
         template_thresholds=template_thresholds,

@@ -1,7 +1,0 @@
-{
-  "schema_version": 1,
-  "policy_id": "zs32-strict-fusion-v1",
-  "no_majority_vote": true,
-  "all_required_clear_for_ok": true,
-  "strong_priority": ["anomaly", "yolo"]
-}

@@ -18,7 +18,7 @@ from bmw_inspection.lab.bright_streak_rotated_roi import (
     RotatedBrightStreakRoi,
     rectify_bright_streak_roi,
 )
-from bmw_inspection.lab.eight_view_dataset import VIEW_ORDER
+from bmw_inspection.views import VIEW_ORDER
 from bmw_inspection.lab.eight_view_demo import (
     BranchStatus,
     DemoBranch,
@@ -27,7 +27,8 @@ from bmw_inspection.lab.eight_view_demo import (
     EightViewInspection,
 )
 from bmw_inspection.lab.live_cycle_timing import LiveCycleTiming
-from bmw_inspection.lab.ui import _fit_image, _rgb_to_bgr
+from bmw_inspection.lab.image_utils import fit_image as _fit_image
+from bmw_inspection.lab.image_utils import rgb_to_bgr as _rgb_to_bgr
 
 
 class DemoUiPhase(str, Enum):
@@ -325,7 +326,7 @@ def _trusted_reference_details(state: EightViewUiState) -> tuple[tuple[str, str]
 
 
 def _experiment_threshold_details(row: DemoBranchResult) -> tuple[tuple[str, str], ...]:
-    """Expose candidate threshold provenance without turning it into an asset check."""
+    """Expose the configured candidate threshold in experiment mode."""
     rows: list[tuple[str, str]] = []
     for label, key in (
         ("阈值来源", "threshold_source"),

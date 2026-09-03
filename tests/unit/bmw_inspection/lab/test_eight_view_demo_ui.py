@@ -6,7 +6,7 @@ from dataclasses import replace
 
 import numpy as np
 
-from bmw_inspection.lab.eight_view_dataset import VIEW_ORDER
+from bmw_inspection.views import VIEW_ORDER
 from bmw_inspection.lab.bright_streak_rotated_roi import (
     RotatedBrightStreakRoi,
     rectify_bright_streak_roi,

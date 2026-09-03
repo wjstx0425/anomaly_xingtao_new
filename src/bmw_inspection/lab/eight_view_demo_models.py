@@ -17,7 +17,20 @@ from typing import Any
 import cv2
 import numpy as np
 
-from bmw_inspection.lab.eight_view_dataset import VIEW_ORDER
+from bmw_inspection.views import VIEW_ORDER
+
+
+_MIN_ACTIVE_THRESHOLD = 1e-3
+
+
+def _validated_thresholds(thresholds: Mapping[str, float]) -> dict[str, float]:
+    values: dict[str, float] = {}
+    for view in VIEW_ORDER:
+        value = float(thresholds[view])
+        if not math.isfinite(value) or 0 <= value < _MIN_ACTIVE_THRESHOLD:
+            raise ValueError(f"threshold for {view} is not active")
+        values[view] = value
+    return values
 from bmw_inspection.lab.efficientad_analysis import fixed_scale_heatmap
 from bmw_inspection.lab.efficientad_component_filter import (
     ComponentFilterPolicy,
@@ -827,10 +840,8 @@ class EightViewEfficientAdPredictor:
             raise ValueError("EfficientAD阈值必须按标准顺序覆盖八个视角")
         if any(isinstance(value, bool) or not isinstance(value, Real) for value in thresholds.values()):
             raise ValueError("EfficientAD阈值必须是有限数值")
-        from bmw_inspection.lab.efficientad_thresholds import _validated_thresholds
-
         try:
-            _views, threshold_values = _validated_thresholds(thresholds)
+            threshold_values = _validated_thresholds(thresholds)
         except ValueError as error:
             raise ValueError("EfficientAD阈值必须是有限数值") from error
         self._thresholds = MappingProxyType(threshold_values)
@@ -838,7 +849,7 @@ class EightViewEfficientAdPredictor:
         if tuple(base_input) != VIEW_ORDER:
             raise ValueError("EfficientAD基础阈值必须按标准顺序覆盖八个视角")
         try:
-            _base_views, base_values = _validated_thresholds(base_input)
+            base_values = _validated_thresholds(base_input)
         except ValueError as error:
             raise ValueError("EfficientAD基础阈值必须是有限数值") from error
         if isinstance(threshold_margin, bool) or not isinstance(threshold_margin, Real):

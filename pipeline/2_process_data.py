@@ -15,7 +15,7 @@ Quick crop commands:
     .venv/bin/python pipeline/2_process_data.py auto \
       --data-root dataset/c789 \
       --output-root dataset/c789_left_bottom_parts \
-      --hand left --position bottom --output-position bottom_ZS32 \
+      --hand left --position bottom --output-position bottom \
       --preset c789_left_bottom_3x2 \
       --hole-mask-method inpaint --overwrite
 
@@ -68,10 +68,10 @@ Examples:
     --preview-overlay results/c789/left_top_part_crop_preview.png \
     --overwrite
 
-  # C789 left/bottom. Output position is bottom_ZS32 for workflow compatibility:
+  # C789 left/bottom:
   .venv/bin/python pipeline/2_process_data.py auto \
     --data-root dataset/c789 --output-root dataset/c789_left_bottom_parts \
-    --hand left --position bottom --output-position bottom_ZS32 \
+    --hand left --position bottom --output-position bottom \
     --preset c789_left_bottom_3x2 \
     --preview-overlay results/c789/left_bottom_part_crop_preview.png \
     --overwrite

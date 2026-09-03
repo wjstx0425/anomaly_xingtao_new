@@ -1,20 +1,5 @@
-"""BMW single-camera bright-streak Demo."""
+"""BMW four-camera, left/right eight-view inspection."""
 
-from .contracts import (
-    BrightStreakConfig,
-    BrightStreakMetrics,
-    BrightStreakResult,
-    DemoStatus,
-    load_config,
-)
-from .roi_selector import save_roi, select_roi
+__version__ = "0.1.0"
 
-__all__ = [
-    "BrightStreakConfig",
-    "BrightStreakMetrics",
-    "BrightStreakResult",
-    "DemoStatus",
-    "load_config",
-    "save_roi",
-    "select_roi",
-]
+__all__ = ["__version__"]

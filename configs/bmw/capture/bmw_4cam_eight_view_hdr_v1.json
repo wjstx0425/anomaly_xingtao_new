@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "profile_id": "bmw-4cam-eight-view-hdr-v1",
-  "bootstrap_topology_path": "../../zs32/topology/zs32_4cam_double_side_v1.json",
+  "bootstrap_topology_path": "../topology/bmw_4cam_eight_view_v1.json",
   "slots": [
     {"slot_id": "center", "serial": "DA9805574", "front_view": "front", "back_view": "back"},
     {"slot_id": "left", "serial": "DA9625347", "front_view": "front_left", "back_view": "back_left"},

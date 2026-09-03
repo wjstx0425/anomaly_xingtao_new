@@ -147,7 +147,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stress-split-root", type=Path, required=True, help="Output root from prepare_stress_splits.py.")
     parser.add_argument("--output-root", type=Path, required=True, help="Output hardened Folder dataset root.")
     parser.add_argument("--hand", default="left", help="View hand directory.")
-    parser.add_argument("--position", default="top", help="View position directory, e.g. top or bottom_ZS32.")
+    parser.add_argument("--position", default="top", help="View position directory, e.g. top or bottom.")
     parser.add_argument(
         "--link-mode",
         choices=("copy", "hardlink", "symlink"),

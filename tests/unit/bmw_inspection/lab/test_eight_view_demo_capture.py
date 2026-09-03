@@ -7,7 +7,7 @@ from types import MappingProxyType, SimpleNamespace
 import numpy as np
 
 from bmw_inspection.lab import eight_view_demo_capture as capture_module
-from bmw_inspection.lab.eight_view_dataset import VIEW_ORDER
+from bmw_inspection.views import VIEW_ORDER
 from bmw_inspection.lab.eight_view_demo_capture import FourCameraHdrSession
 
 
@@ -37,7 +37,7 @@ def test_capture_round_returns_fused_images_and_caches_all_hdr_sources(monkeypat
             for index in range(4)
         ]
 
-    import capture_data.collect_multicamera_dataset as multicamera
+    import bmw_inspection.capture.hardware as multicamera
 
     monkeypatch.setattr(multicamera, "capture_hdr_round", fake_capture)
     front = session.capture_round("front")

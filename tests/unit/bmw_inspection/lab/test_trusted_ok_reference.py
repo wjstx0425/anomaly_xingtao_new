@@ -9,7 +9,7 @@ import cv2
 import numpy as np
 import pytest
 
-from bmw_inspection.lab.eight_view_dataset import VIEW_ORDER
+from bmw_inspection.views import VIEW_ORDER
 from bmw_inspection.lab.trusted_ok_reference import TrustedOkMatcher
 
 

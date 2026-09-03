@@ -1,8 +1,0 @@
-{
-  "topology_id": "bmw-3cam-double-side-v1",
-  "camera_slots": [
-    {"slot_id": "center", "serial": "DA9805574", "front": "front", "back": "back"},
-    {"slot_id": "left", "serial": "DA9625347", "front": "front_left", "back": "back_left"},
-    {"slot_id": "right", "serial": "DB0968108", "front": "front_right", "back": "back_right"}
-  ]
-}

@@ -41,74 +41,38 @@
 >
 > We value your input! Please share feedback via [GitHub Issues](https://github.com/open-edge-platform/anomalib/issues) or our [Discussions](https://github.com/open-edge-platform/anomalib/discussions)
 
-# Custom Industrial Defect Pipeline
+# BMW Four-Camera Inspection
 
-This fork is migrating to a ZS32-only, topology-driven inspection system. The
-legacy C789/FX11 workflow remains temporarily for Phase 0 golden parity and
-must not receive new features. It is deleted only after Linux + NVIDIA replay
-acceptance.
-
-Authoritative design and execution documents:
-
-- [ZS32 refactor blueprint](docs/ZS32_REFACTOR_BLUEPRINT.md)
-- [Phase 0 Linux freeze runbook](docs/PHASE0_LINUX_RUNBOOK.md)
-- [ZS32 Linux refactor runbook](docs/ZS32_LINUX_REFACTOR_RUNBOOK.md)
-- [ZS32 3/4-camera topology and four-camera commissioning](configs/zs32/topology/README.md)
-- [ZS32 four-camera collection and eight-view Demo guide](docs/ZS32_FOUR_CAMERA_END_TO_END_README.md)
-
-Current ZS32 online inspection is an explicitly non-production Demo. Operators
-edit only [`configs/zs32/zs32_demo.json`](configs/zs32/zs32_demo.json); threshold
-changes apply to the next part, while model, ROI, topology, or inference-setting
-changes require restarting the Dashboard. The only supported online entry is:
+BMW is the only product-specific inspection workflow retained in this fork.
+Four fixed cameras capture the front side, the operator flips the same part,
+and the same cameras capture the back side, producing eight semantic views.
+Left-hand and right-hand parts always use separate explicit configurations.
 
 ```bash
-UV_CACHE_DIR=/tmp/uv-cache \
-PYTHONPATH=/opt/MVS/Samples/64/Python/MvImport:. \
-uv run --no-sync python \
-  pipeline/36_zs32_inspection_dashboard.py \
-  --live \
-  --demo-config configs/zs32/zs32_demo.json \
-  --part-id zs32_demo_001
+uv sync --extra cu126 --extra bmw-lab
+
+uv run bmw-inspect \
+  --config configs/bmw/experiments/bmw_eight_view_demo_left_0820_mixed_v1.json
+
+uv run bmw-inspect \
+  --config configs/bmw/experiments/bmw_eight_view_demo_right_0820_mixed_v1.json
 ```
 
-This path first runs Template for all eight views, including both secondary
-views. If any Template result is NG, the whole part ends as `NG_TEMPLATE` and
-PatchCore/YOLO are explicitly skipped; only an all-PASS Template gate runs the
-remaining 16 branches. It does not read a runtime bundle, threshold artifact,
-SHA publication, or Stage 18 fusion profile. Historical strict commissioning
-scripts and artifacts remain only for replay and must not be used as the online
-entry.
+For offline validation, add `--capture-set <directory> --no-gui`; the directory
+must contain exactly one image named for each of the eight configured views.
+The Hikvision SDK path is configurable through `BMW_MVS_SDK_PATH`.
 
-Mac is edit-only. Camera work, tests, training, calibration, inference and
-deployment are accepted only on the Linux + NVIDIA host. The new business
-implementation lives under `src/zs32_inspection`; `pipeline/zs32_*.py` files
-are thin command wrappers.
-
-Run the following only after pulling the reviewed commit onto Linux + NVIDIA:
+Collection is also BMW-owned and requires an explicit hand:
 
 ```bash
-uv lock --check
-uv sync --frozen --extra cu126 --extra test
-uv run zs32-capture --help
-uv run zs32-bootstrap-capture --help
+uv run bmw-collect --list-devices
+uv run bmw-collect --hand left --label normal --part-id bmw_left_normal
 ```
 
-The four-camera collector has an explicit `--legacy-layout` mode that writes
-the historical per-hand/per-view tree and one unchanged 25-column CSV manifest.
-Use the copy-paste [one-group acceptance command first, then the 120-group
-command](configs/zs32/topology/README.md#3-采集四机-legacy-数据). One complete group is
-8 PNGs plus 9 manifest data rows; 120 complete groups are 960 image rows plus
-120 complete sample rows. Stage 2 can discover all 8 view directories, but
-Stage 3, YOLO, Label Studio and parts of training remain six-view-only.
-
-Large or station-specific artifacts are intentionally excluded from Git. Keep
-datasets, raw images, checkpoints, model/source bundles, generated
-publications and Linux evidence on the Linux asset volume. Git contains source,
-documentation, reviewed small configs, the tracked `uv.lock`, and lightweight
-`baselines/zs32/*.pointer.json` trust anchors only. Linux must pull an explicitly
-communicated commit, verify its tree and `uv.lock` SHA256, keep a clean worktree,
-and use `uv sync --frozen`; see the Linux runbook for the handoff record and
-evidence-return checklist.
+Runtime profiles and all referenced BMW assets use relative paths. Content
+release receipts and the retired camera runtime
+are not part of the BMW startup contract. Missing files, invalid configs,
+missing cameras, and incomplete eight-view inputs still stop the run clearly.
 
 # 👋 Introduction
 

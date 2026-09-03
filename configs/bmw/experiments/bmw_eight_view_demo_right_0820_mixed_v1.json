@@ -103,6 +103,6 @@
     "imgsz": 640
   },
   "trusted_ok_reference": {
-    "index": "/home/yunjing/anomaly_xingtao_new/dataset/bmw_trusted_ok_reference/bmw_right_0820_train_normal_v1/reference_index.json"
+    "index": "../../../dataset/bmw_trusted_ok_reference/bmw_right_0820_train_normal_v1/reference_index.json"
   }
 }

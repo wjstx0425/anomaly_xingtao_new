@@ -32,7 +32,7 @@ class C789PositionConfig:
 
 C789_POSITION_CONFIGS = {
     "top": C789PositionConfig(preset="c789_left_top_3x2", output_position="top"),
-    "bottom": C789PositionConfig(preset="c789_left_bottom_3x2", output_position="bottom_ZS32"),
+    "bottom": C789PositionConfig(preset="c789_left_bottom_3x2", output_position="bottom"),
 }
 
 

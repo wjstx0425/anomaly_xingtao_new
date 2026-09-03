@@ -154,7 +154,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--input-root", type=Path, required=True, help="Cropped stress-normal dataset root.")
     parser.add_argument("--output-root", type=Path, required=True, help="Output root for train/locked stress splits.")
     parser.add_argument("--hand", default="left", help="View hand directory.")
-    parser.add_argument("--position", default="top", help="View position directory, e.g. top or bottom_ZS32.")
+    parser.add_argument("--position", default="top", help="View position directory, e.g. top or bottom.")
     parser.add_argument("--train-ratio", type=float, default=0.7, help="Fraction of groups assigned to stress train.")
     parser.add_argument("--seed", type=int, default=0, help="Random seed for group assignment.")
     parser.add_argument(

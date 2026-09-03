@@ -7,10 +7,6 @@ from pathlib import Path
 #侧面4000 9
 #底部 6000 15
 
-#ZS32
-#
-
-
 import cv2
 import numpy as np
 

@@ -1,7 +1,7 @@
 # Copyright (C) 2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for the ZS32 single-part crop preparation helper."""
+"""Tests for the single-part crop preparation helper."""
 
 from __future__ import annotations
 

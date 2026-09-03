@@ -187,8 +187,6 @@ def resolve_view_label_root(data_root: Path, view: str, label: str) -> Path:
         return data_root
     hand, position = view.split("_", maxsplit=1)
     candidates = [data_root / hand / position / label]
-    if position == "bottom":
-        candidates.append(data_root / hand / "bottom_ZS32" / label)
     candidates.append(data_root / label)
     for candidate in candidates:
         if candidate.is_dir():

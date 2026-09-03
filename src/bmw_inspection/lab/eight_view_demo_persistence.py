@@ -13,7 +13,7 @@ import cv2
 import numpy as np
 
 from bmw_inspection.capture.config import load_capture_profile
-from bmw_inspection.lab.eight_view_dataset import VIEW_ORDER
+from bmw_inspection.views import VIEW_ORDER
 from bmw_inspection.lab.eight_view_demo import EightViewDemoConfig, EightViewInspection
 from bmw_inspection.lab.eight_view_demo_capture import HdrSourceImages
 from bmw_inspection.lab.eight_view_demo_models import load_part_rois
