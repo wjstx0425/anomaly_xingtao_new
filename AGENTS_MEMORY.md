@@ -1,5 +1,44 @@
 # AGENTS Memory
 
+## BMW cleanup publication preparation (2026-09-09)
+
+- User authorized organizing, committing and pushing the current changes to `origin/feat/bmw-four-camera-runtime-cleanup`. Remote tip was checked live and matched local base `56f429c462536f9a45a6a247845c371448e6aa3c` before commit.
+- Scope: existing 80 legacy-file removals, pipeline documentation, current project memory and `docs/bmw/contour_feasibility_20260908.md`. The contour report is now tracked documentation; its contact sheets/source-path manifests remain local under ignored `artifacts/`. Raw datasets, models and runtime outputs remain excluded.
+- Fresh verification: `UV_CACHE_DIR=/tmp/bmw-uv-cache MPLCONFIGDIR=/tmp/bmw-mpl-cache uv run --no-sync pytest -q tests/unit/bmw_inspection tests/unit/pipeline/test_bmw_lab_eight_view_demo.py` returned **147 passed**, with one NVML initialization warning. Both packaged BMW CLI module help commands and `git diff --check` passed. Independent deletion-reference review found no BMW runtime dependency on removed legacy files. No GPU/camera acceptance was performed.
+
+## BMW left contour feasibility image review (2026-09-08)
+
+- Reviewed `dataset/bmw_lab_raw_clean_0820/left/front_left` and `front_secondary`: each has 179 normal fused images (90 from 0820 plus 47/42 from two 0823 retake sessions) and 32 generic `defect/defect` images. No deformation-specific directory label; image counts do not prove physical-part counts.
+- Visually checked all 32 defect images and 12 sampled normals per view in contact sheets, plus six enlarged examples. Evidence and source manifests: `artifacts/bmw_contour_review_20260908/README.md`, `image_manifest.json`, `selected_comparison.jpg`, `selected_comparison.json`.
+- Useful contour examples: front_left defect group020 bottom-tab bending, group027 top-tab bending; front_secondary group014 irregular lower edge, group019 changed lower-right outline. Existing front_left public ROI clips extreme tabs in group020/group027; a future contour branch needs its own expanded search region.
+- Suggested experiment: stable-body rigid alignment, separate tab/side/lower-arc contour regions, normal tolerance envelope and local edge deviation. Interior surface defects are outside silhouette coverage. Do not count every generic defect as a contour positive or use same-number normal/defect groups as before/after pairs. Include session in retake identities.
+- Review only: no contour algorithm execution, threshold calibration, accuracy result or runtime changes. Original data preserved.
+
+## BMW current workflow orientation (2026-09-07)
+
+- Re-read the active checkout after the cleanup. Runtime entrypoints are `bmw-inspect` / `bmw-collect` in `src/bmw_inspection/cli/`; the two `pipeline/bmw_lab_*` scripts are compatibility wrappers. Operational guides are `bmw_runtime/README.md` and `pipeline/README.md`.
+- Select the explicit left/right `configs/bmw/experiments/bmw_eight_view_demo_*_0820_mixed_v1.json` profile. JSON input paths resolve relative to their containing config. Left `front_right` uses the 0823 Template and EfficientAD checkpoint paths; the EfficientAD experiment note still says 0820, so use checkpoint paths as truth.
+- Four serial-bound cameras produce front/front_left/front_right/front_secondary, then the matching four back views after manually flipping the same part. Capture uses 1500/6000 us HDR, gain 0, 0.2 s trigger interval and one settle frame per exposure (`configs/bmw/capture/bmw_4cam_eight_view_hdr_v1.json`).
+- `EightViewModelSuite.inspect_round` crops public per-view ROIs for Template, YOLO and EfficientAD. Each branch runs on all eight views; bright-streak runs once on the full `front_left` image with its dedicated rotated ROI. There are 25 branch/view checks. Calls run in sequence within each round.
+- `finalize_rounds` merges complete front/back results. Fusion prioritizes ERROR, then NG, otherwise OK. Trusted-OK matching runs on NG/ERROR comparisons after fusion and supplies diagnostic reference/alignment/difference images without changing final status.
+- Live GUI accepts Space for front capture, overlaps front inference with manual flip/back capture through a single model worker, then displays the complete result before background persistence. Another capture waits for saving to finish. `inspection.elapsed_ms` is model/finalization time; live `cycle_timing.json` measures first accepted Space to first RESULT display and records persistence separately.
+- `persist_inspection` writes per-capture short/long/HDR images, public ROI crops, branch overlays, trusted-OK evidence and `inspection.json`, plus root `inspection_index.csv`. Offline `--capture-set` accepts eight named view images; `--sample-id` additionally needs the prepared manifest.
+- This orientation was a code/config/documentation review only. No model inference, fresh accuracy evaluation, GPU validation, camera capture or GUI acceptance was performed; existing unrelated modifications/deletions were preserved.
+
+## BMW low-risk code cleanup (2026-09-07)
+
+- Removed 80 tracked legacy files: the unused C789/FX11 `capture_data` implementations, numbered/standalone pipeline tools, their capture-data tests and configs, and obsolete training/worktree handoff documents. Their previous contents are recoverable from Git commit `56f429c462536f9a45a6a247845c371448e6aa3c`.
+- Current operational instructions are `bmw_runtime/README.md` and `pipeline/README.md`. Older memory entries below are historical and may reference removed files.
+- Verification: the retained BMW tests plus pipeline entrypoint integration passed (`147 passed`); both packaged CLI module `--help` commands and `git diff --check` passed. No GPU, camera capture or live GUI acceptance was performed.
+- Retained both BMW pipeline compatibility wrappers, the packaged CLIs, all BMW source/config/tests, Anomalib dependencies, and the pre-existing 2026-09-05 startup note. Label Studio databases, local backup snapshots, raw/training datasets, models, masks, reference images, inspection output and virtual environments are outside this code cleanup.
+
+## BMW 最新左手八视图程序启动（2026-09-05）
+
+- 原 `.worktrees/bmw-eight-view-handoff` 已于 2026-09-03 合并并移除；当前入口是主目录兼容脚本 `pipeline/bmw_lab_eight_view_demo.py`，实际实现位于 `src/bmw_inspection/cli/eight_view_demo.py`。
+- 当前可运行左手配置是 `configs/bmw/experiments/bmw_eight_view_demo_left_0820_mixed_v1.json`。它使用联合左右 YOLO 0820 v2，并在 `front_right` 接入左手 0823 Template 与 EfficientAD；其他视角继续使用左手 0820 模型，且加权 Template、左手 ROI/mask/光痕 ROI/可信 OK 均保持独立。
+- 2026-09-05 已用主仓库 uv 环境启动该配置，控制台确认“可信OK参考库预热完成”和“模型加载完成”。宿主机进程为 uv PID `165708`、Python PID `165714`。Qt font-directory 输出仅为 OpenCV Qt 字体警告，窗口进程仍在运行。
+- 启动命令：`UV_CACHE_DIR=/tmp/bmw-uv-cache MPLCONFIGDIR=/tmp/bmw-mpl-cache PYTHONPATH=/home/yunjing/anomaly_xingtao_new/src uv run --project /home/yunjing/anomaly_xingtao_new --no-sync python pipeline/bmw_lab_eight_view_demo.py --config configs/bmw/experiments/bmw_eight_view_demo_left_0820_mixed_v1.json --experiment-mode`。
+
 ## BMW right multisource Demo integration lives on the BMW worktree (2026-08-11)
 
 - The newly trained assets under `results/bmw_lab_one_click/bmw_right_multisource_left_yolo_v1` are integrated in

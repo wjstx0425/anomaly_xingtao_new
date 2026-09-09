@@ -48,3 +48,9 @@ receipts.
 
 The files under `pipeline/bmw_lab_*` are compatibility wrappers. Packaged entry
 points live under `bmw_inspection.cli`.
+
+The retired numbered pipeline, C789/FX11 tools, and their `capture_data`
+implementations were removed during the BMW cleanup. Their source remains in
+Git history at commit `56f429c462536f9a45a6a247845c371448e6aa3c`.
+For environment setup and the required external assets, see
+[the BMW runtime guide](../bmw_runtime/README.md).
