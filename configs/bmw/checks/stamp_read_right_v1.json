@@ -1,0 +1,26 @@
+{
+  "hand": "right",
+  "view_id": "back",
+  "reference_image_size": [
+    4024,
+    3036
+  ],
+  "roi_xyxy": [
+    1300,
+    1100,
+    1980,
+    1830
+  ],
+  "rotation_clockwise_degrees": 90,
+  "code_region_xyxy": [
+    235,
+    70,
+    730,
+    290
+  ],
+  "min_score": 0.95,
+  "border_margin_px": 3,
+  "min_code_width_fraction": 0.7,
+  "intra_op_num_threads": 2,
+  "inter_op_num_threads": 2
+}

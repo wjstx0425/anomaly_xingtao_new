@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "status": "draft",
+  "part_id": null,
+  "hand": null,
+  "feature_id": null,
+  "view_id": null,
+  "source_channel": null,
+  "pixel_channel": null,
+  "reference_image_size": null,
+  "coordinate_space": "full_image",
+  "roi_xyxy": null,
+  "expected_mask": null,
+  "registration": {
+    "mode": "fixture_fixed",
+    "validated": false,
+    "evidence": null
+  },
+  "association": {
+    "exclusive_search_confirmed": false,
+    "evidence": null
+  },
+  "segmentation": {
+    "threshold": null,
+    "polarity": null,
+    "stability_delta": null,
+    "max_changed_fraction": null
+  },
+  "limits": {
+    "pass_min_open_fraction": null,
+    "ng_max_open_fraction": null,
+    "pass_max_area_difference": null,
+    "ng_min_area_difference": null,
+    "pass_max_shape_difference": null,
+    "ng_min_shape_difference": null,
+    "pass_max_position_px": null,
+    "ng_min_position_px": null
+  },
+  "validation_evidence": null
+}

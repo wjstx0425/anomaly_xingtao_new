@@ -43,6 +43,8 @@
 
 # BMW Four-Camera Inspection
 
+BMW 项目目录、模块入口和离线工具见 [BMW 开发导航](docs/bmw/README.md)；独立运行环境见 [运行说明](bmw_runtime/README.md)。
+
 BMW is the only product-specific inspection workflow retained in this fork.
 Four fixed cameras capture the front side, the operator flips the same part,
 and the same cameras capture the back side, producing eight semantic views.

@@ -1,0 +1,133 @@
+# V1.1配置草稿；status=draft，只允许审计。命令/Schema待Codex实现。
+schema_version: 1
+status: draft
+plan_id: bmw_req01_10_benchmark_v1_1_efficientad_fixed
+scope:
+  requirement_ids:
+  - 1
+  - 2
+  - 3
+  - 4
+  - 5
+  - 6
+  - 7
+  - 8
+  - 9
+  - 10
+  stage_limit: E2
+  operating_mode: offline_only
+  preserve_stamp: true
+  modify_online_profiles: false
+  preserve_existing_tools: true
+  new_deep_anomaly_models: false
+repository:
+  owner_name: wjstx0425/anomaly_xingtao_new
+  branch: feat/bmw-four-camera-runtime-cleanup
+  reviewed_commit: c59c33ceae8a1e394995ee426c8b06e8eb78610b
+  require_review_local_changes: true
+  reset_to_reviewed_commit: false
+  reviewed_commit_origin: inherited_from_V1_0_not_rechecked_in_V1_1
+paths:
+  image_manifest: null
+  approved_label_mapping: null
+  baseline_profile: null
+  split_manifest: null
+  contour_config: null
+  line_rule_config: null
+  output_root: null
+  yolo_input_ablation_config: null
+selection:
+  part_number: null
+  hand: null
+  view_ids: null
+  condition_id: null
+  source_kind: fused_only
+  first_wave_max_views: 2
+data_policy:
+  split_before_tiling_or_augmentation: true
+  grouping_fields:
+  - lineage_id
+  - physical_part_id
+  missing_physical_identity: block_clean_leaderboard
+  unknown_annotation: not_negative
+  known_notch_pair_role: development_regression
+  locked_test_access: blocked_until_E5
+  thresholds_fit_split: dev
+  old_weights_provenance: must_audit
+  traditional_reference_fit_split: train
+  efficientad_missing_or_contaminated: block_clean_claim_do_not_retrain_without_confirmation
+initial_candidates:
+- baseline_system
+- baseline_template
+- baseline_efficientad
+- baseline_yolo26n
+- R01_contour
+- R02a_morph_lines
+- D01_yolo_input_ablation
+resources:
+  allow_normal_reference_fitting: true
+  allow_supervised_training: false
+  allow_hardware_capture: false
+  require_inspect_available_gpus: true
+  max_concurrent_jobs_per_gpu: 1
+  max_new_candidate_runs_E2: 6
+  max_single_job_minutes: 90
+  benchmark_exclusive_device: true
+  preview_seed: 42
+  finalist_seeds:
+  - 42
+  - 43
+  - 44
+  warmup_iterations: 10
+  timing_iterations: 100
+  allow_new_unsupervised_deep_training: false
+  allow_efficientad_retraining: false
+  reuse_existing_benchmark_tools: true
+comparison:
+  primary_unit: physical_part_and_defect_instance
+  normal_nonrelease_research_targets:
+  - 0.01
+  - 0.03
+  - 0.05
+  targets_are_customer_acceptance: false
+  lock_thresholds_before_test: true
+  report_actual_test_nonrelease: true
+  report_ng_review_error_separately: true
+  localization_protocol: null
+  max_registered_fusion_combinations: 10
+  raw_score_averaging: forbidden
+  freeze_efficientad_during_fusion_calibration: true
+  unreachable_target_policy: report_infeasible_not_silently_change_baseline
+  yolo_variant_comparison: replace_baseline_yolo_branch_not_stack_by_default
+  stamp_ng_counts_as_requirement_01_10_hit: false
+outputs:
+  case_gallery: true
+  raw_predictions: true
+  per_requirement_metrics: true
+  coverage_and_blockers: true
+  delta_hits_and_false_alarms: true
+  hardware_and_commands: true
+revision: '1.1'
+algorithm_policy:
+  normal_only_deep_model_allowlist:
+  - EfficientAD
+  discover_additional_ad_models: false
+  reject_unlisted_deep_anomaly_model: true
+  retrain_efficientad: false
+  efficientad_baseline_is_frozen: true
+  missing_supervision_must_not_trigger_new_AD: true
+  preserve_historical_code_and_weights: true
+  parallel_evidence_not_efficientad_positive_gate: true
+yolo_diagnostic:
+  weights: existing_frozen_checkpoint
+  evaluation_track: inference_only
+  read_actual_baseline_imgsz: true
+  proposed_high_imgsz_if_baseline_640: 1280
+  optional_tiling:
+    strategy: fixed_grid_without_ground_truth
+    proposed_tile_size: 640
+    proposed_overlap_ratio: 0.2
+    must_map_and_merge_in_original_coordinates: true
+  initial_max_input_variants: 3
+  parameters_are_development_starting_points: true
+  do_not_claim_absence_of_gain_proves_training_variant_useless: true

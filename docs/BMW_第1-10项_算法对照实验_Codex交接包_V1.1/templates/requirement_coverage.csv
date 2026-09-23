@@ -1,0 +1,11 @@
+requirement_id,requirement_name,subscope,independent_normal_parts,independent_defect_parts,visible_instances,bbox_instances,mask_instances,unconfirmed_instances,missing_modalities,coverage_status,notes
+1,开裂,,,,,,,,,,
+2,隐裂（微裂）,,,,,,,,,,
+3,划痕,,,,,,,,,,
+4,毛刺,,,,,,,,,,
+5,变形,,,,,,,,,,
+6,压伤,,,,,,,,,,
+7,油污,,,,,,,,,,
+8,表面氧化,,,,,,,,,,
+9,成型挤料,,,,,,,,,,
+10,多料/少料,,,,,,,,,,

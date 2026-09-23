@@ -1,0 +1,1448 @@
+{
+  "scope": "stamp_reading_only",
+  "source_root": "repository_root",
+  "selection": "60 new paths, exclude prior8; evenly spaced sorted paths within each hand/class/session; left normal6 per3 sessions, right normal9 per2 sessions; defect12 per hand.",
+  "reference_source": "assistant_visual_transcription_from_original_crops_without_ocr_outputs; not enterprise ground_truth",
+  "samples": [
+    {
+      "index": 0,
+      "source": "dataset/bmw_lab_raw_clean_0820/left/back/normal/20260820_162040_682498/images/left_back_normal_bmw_left_normal_group003_000001_fused.png",
+      "hand": "left",
+      "label": "normal",
+      "session": "20260820_162040_682498",
+      "source_size": [
+        4024,
+        3036
+      ],
+      "roi_xyxy": [
+        1260,
+        1450,
+        1900,
+        1980
+      ],
+      "visual_reference": {
+        "text": "5A9D6B3 02",
+        "legibility": "clear",
+        "roi_clipped": false,
+        "note": ""
+      },
+      "source_kind": "fused_only"
+    },
+    {
+      "index": 1,
+      "source": "dataset/bmw_lab_raw_clean_0820/left/back/normal/20260820_162040_682498/images/left_back_normal_bmw_left_normal_group020_000001_fused.png",
+      "hand": "left",
+      "label": "normal",
+      "session": "20260820_162040_682498",
+      "source_size": [
+        4024,
+        3036
+      ],
+      "roi_xyxy": [
+        1260,
+        1450,
+        1900,
+        1980
+      ],
+      "visual_reference": {
+        "text": "5A9D6B3 02",
+        "legibility": "clear",
+        "roi_clipped": false,
+        "note": ""
+      },
+      "source_kind": "fused_only"
+    },
+    {
+      "index": 2,
+      "source": "dataset/bmw_lab_raw_clean_0820/left/back/normal/20260820_162040_682498/images/left_back_normal_bmw_left_normal_group038_000001_fused.png",
+      "hand": "left",
+      "label": "normal",
+      "session": "20260820_162040_682498",
+      "source_size": [
+        4024,
+        3036
+      ],
+      "roi_xyxy": [
+        1260,
+        1450,
+        1900,
+        1980
+      ],
+      "visual_reference": {
+        "text": "5A9D6B3 02",
+        "legibility": "clear",
+        "roi_clipped": false,
+        "note": ""
+      },
+      "source_kind": "fused_only"
+    },
+    {
+      "index": 3,
+      "source": "dataset/bmw_lab_raw_clean_0820/left/back/normal/20260820_162040_682498/images/left_back_normal_bmw_left_normal_group055_000001_fused.png",
+      "hand": "left",
+      "label": "normal",
+      "session": "20260820_162040_682498",
+      "source_size": [
+        4024,
+        3036
+      ],
+      "roi_xyxy": [
+        1260,
+        1450,
+        1900,
+        1980
+      ],
+      "visual_reference": {
+        "text": "5A9D6B3 02",
+        "legibility": "clear",
+        "roi_clipped": false,
+        "note": ""
+      },
+      "source_kind": "fused_only"
+    },
+    {
+      "index": 4,
+      "source": "dataset/bmw_lab_raw_clean_0820/left/back/normal/20260820_162040_682498/images/left_back_normal_bmw_left_normal_group073_000001_fused.png",
+      "hand": "left",
+      "label": "normal",
+      "session": "20260820_162040_682498",
+      "source_size": [
+        4024,
+        3036
+      ],
+      "roi_xyxy": [
+        1260,
+        1450,
+        1900,
+        1980
+      ],
+      "visual_reference": {
+        "text": "5A9D6B3 02",
+        "legibility": "clear",
+        "roi_clipped": false,
+        "note": ""
+      },
+      "source_kind": "fused_only"
+    },
+    {
+      "index": 5,
+      "source": "dataset/bmw_lab_raw_clean_0820/left/back/normal/20260820_162040_682498/images/left_back_normal_bmw_left_normal_group090_000001_fused.png",
+      "hand": "left",
+      "label": "normal",
+      "session": "20260820_162040_682498",
+      "source_size": [
+        4024,
+        3036
+      ],
+      "roi_xyxy": [
+        1260,
+        1450,
+        1900,
+        1980
+      ],
+      "visual_reference": {
+        "text": "5A9D6B3 02",
+        "legibility": "clear",
+        "roi_clipped": false,
+        "note": ""
+      },
+      "source_kind": "fused_only"
+    },
+    {
+      "index": 6,
+      "source": "dataset/bmw_lab_raw_clean_0820/left/back/normal/20260823_161606_428291/images/left_back_normal_bmw_left_normal_retake_group001_000001_fused.png",
+      "hand": "left",
+      "label": "normal",
+      "session": "20260823_161606_428291",
+      "source_size": [
+        4024,
+        3036
+      ],
+      "roi_xyxy": [
+        1260,
+        1450,
+        1900,
+        1980
+      ],
+      "visual_reference": {
+        "text": "5A9D6B3 02",
+        "legibility": "clear",
+        "roi_clipped": false,
+        "note": ""
+      },
+      "source_kind": "fused_only"
+    },
+    {
+      "index": 7,
+      "source": "dataset/bmw_lab_raw_clean_0820/left/back/normal/20260823_161606_428291/images/left_back_normal_bmw_left_normal_retake_group010_000001_fused.png",
+      "hand": "left",
+      "label": "normal",
+      "session": "20260823_161606_428291",
+      "source_size": [
+        4024,
+        3036
+      ],
+      "roi_xyxy": [
+        1260,
+        1450,
+        1900,
+        1980
+      ],
+      "visual_reference": {
+        "text": "5A9D6B3 02",
+        "legibility": "clear",
+        "roi_clipped": false,
+        "note": ""
+      },
+      "source_kind": "fused_only"
+    },
+    {
+      "index": 8,
+      "source": "dataset/bmw_lab_raw_clean_0820/left/back/normal/20260823_161606_428291/images/left_back_normal_bmw_left_normal_retake_group019_000001_fused.png",
+      "hand": "left",
+      "label": "normal",
+      "session": "20260823_161606_428291",
+      "source_size": [
+        4024,
+        3036
+      ],
+      "roi_xyxy": [
+        1260,
+        1450,
+        1900,
+        1980
+      ],
+      "visual_reference": {
+        "text": "5A9D6B3 02",
+        "legibility": "clear",
+        "roi_clipped": false,
+        "note": ""
+      },
+      "source_kind": "fused_only"
+    },
+    {
+      "index": 9,
+      "source": "dataset/bmw_lab_raw_clean_0820/left/back/normal/20260823_161606_428291/images/left_back_normal_bmw_left_normal_retake_group028_000001_fused.png",
+      "hand": "left",
+      "label": "normal",
+      "session": "20260823_161606_428291",
+      "source_size": [
+        4024,
+        3036
+      ],
+      "roi_xyxy": [
+        1260,
+        1450,
+        1900,
+        1980
+      ],
+      "visual_reference": {
+        "text": "5A9D6B3 02",
+        "legibility": "clear",
+        "roi_clipped": false,
+        "note": ""
+      },
+      "source_kind": "fused_only"
+    },
+    {
+      "index": 10,
+      "source": "dataset/bmw_lab_raw_clean_0820/left/back/normal/20260823_161606_428291/images/left_back_normal_bmw_left_normal_retake_group037_000001_fused.png",
+      "hand": "left",
+      "label": "normal",
+      "session": "20260823_161606_428291",
+      "source_size": [
+        4024,
+        3036
+      ],
+      "roi_xyxy": [
+        1260,
+        1450,
+        1900,
+        1980
+      ],
+      "visual_reference": {
+        "text": "5A9D6B3 02",
+        "legibility": "clear",
+        "roi_clipped": false,
+        "note": ""
+      },
+      "source_kind": "fused_only"
+    },
+    {
+      "index": 11,
+      "source": "dataset/bmw_lab_raw_clean_0820/left/back/normal/20260823_161606_428291/images/left_back_normal_bmw_left_normal_retake_group046_000001_fused.png",
+      "hand": "left",
+      "label": "normal",
+      "session": "20260823_161606_428291",
+      "source_size": [
+        4024,
+        3036
+      ],
+      "roi_xyxy": [
+        1260,
+        1450,
+        1900,
+        1980
+      ],
+      "visual_reference": {
+        "text": "5A9D6B3 02",
+        "legibility": "clear",
+        "roi_clipped": false,
+        "note": ""
+      },
+      "source_kind": "fused_only"
+    },
+    {
+      "index": 12,
+      "source": "dataset/bmw_lab_raw_clean_0820/left/back/normal/20260823_164432_522052/images/left_back_normal_bmw_left_normal_retake_group001_000001_fused.png",
+      "hand": "left",
+      "label": "normal",
+      "session": "20260823_164432_522052",
+      "source_size": [
+        4024,
+        3036
+      ],
+      "roi_xyxy": [
+        1260,
+        1450,
+        1900,
+        1980
+      ],
+      "visual_reference": {
+        "text": "5A9D6B3 02",
+        "legibility": "clear",
+        "roi_clipped": false,
+        "note": ""
+      },
+      "source_kind": "fused_only"
+    },
+    {
+      "index": 13,
+      "source": "dataset/bmw_lab_raw_clean_0820/left/back/normal/20260823_164432_522052/images/left_back_normal_bmw_left_normal_retake_group009_000001_fused.png",
+      "hand": "left",
+      "label": "normal",
+      "session": "20260823_164432_522052",
+      "source_size": [
+        4024,
+        3036
+      ],
+      "roi_xyxy": [
+        1260,
+        1450,
+        1900,
+        1980
+      ],
+      "visual_reference": {
+        "text": "5A9D6B3 02",
+        "legibility": "clear",
+        "roi_clipped": false,
+        "note": ""
+      },
+      "source_kind": "fused_only"
+    },
+    {
+      "index": 14,
+      "source": "dataset/bmw_lab_raw_clean_0820/left/back/normal/20260823_164432_522052/images/left_back_normal_bmw_left_normal_retake_group017_000001_fused.png",
+      "hand": "left",
+      "label": "normal",
+      "session": "20260823_164432_522052",
+      "source_size": [
+        4024,
+        3036
+      ],
+      "roi_xyxy": [
+        1260,
+        1450,
+        1900,
+        1980
+      ],
+      "visual_reference": {
+        "text": "5A9D6B3 02",
+        "legibility": "clear",
+        "roi_clipped": false,
+        "note": ""
+      },
+      "source_kind": "fused_only"
+    },
+    {
+      "index": 15,
+      "source": "dataset/bmw_lab_raw_clean_0820/left/back/normal/20260823_164432_522052/images/left_back_normal_bmw_left_normal_retake_group026_000001_fused.png",
+      "hand": "left",
+      "label": "normal",
+      "session": "20260823_164432_522052",
+      "source_size": [
+        4024,
+        3036
+      ],
+      "roi_xyxy": [
+        1260,
+        1450,
+        1900,
+        1980
+      ],
+      "visual_reference": {
+        "text": "5A9D6B3 02",
+        "legibility": "clear",
+        "roi_clipped": false,
+        "note": ""
+      },
+      "source_kind": "fused_only"
+    },
+    {
+      "index": 16,
+      "source": "dataset/bmw_lab_raw_clean_0820/left/back/normal/20260823_164432_522052/images/left_back_normal_bmw_left_normal_retake_group034_000001_fused.png",
+      "hand": "left",
+      "label": "normal",
+      "session": "20260823_164432_522052",
+      "source_size": [
+        4024,
+        3036
+      ],
+      "roi_xyxy": [
+        1260,
+        1450,
+        1900,
+        1980
+      ],
+      "visual_reference": {
+        "text": "5A9D6B3 02",
+        "legibility": "clear",
+        "roi_clipped": false,
+        "note": ""
+      },
+      "source_kind": "fused_only"
+    },
+    {
+      "index": 17,
+      "source": "dataset/bmw_lab_raw_clean_0820/left/back/normal/20260823_164432_522052/images/left_back_normal_bmw_left_normal_retake_group042_000001_fused.png",
+      "hand": "left",
+      "label": "normal",
+      "session": "20260823_164432_522052",
+      "source_size": [
+        4024,
+        3036
+      ],
+      "roi_xyxy": [
+        1260,
+        1450,
+        1900,
+        1980
+      ],
+      "visual_reference": {
+        "text": "5A9D6B3 02",
+        "legibility": "clear",
+        "roi_clipped": false,
+        "note": ""
+      },
+      "source_kind": "fused_only"
+    },
+    {
+      "index": 18,
+      "source": "dataset/bmw_lab_raw_clean_0820/left/back/defect/defect/20260820_155511_803522/images/left_back_defect_defect_bmw_left_defect_group003_000001_fused.png",
+      "hand": "left",
+      "label": "defect",
+      "session": "20260820_155511_803522",
+      "source_size": [
+        4024,
+        3036
+      ],
+      "roi_xyxy": [
+        1260,
+        1450,
+        1900,
+        1980
+      ],
+      "visual_reference": {
+        "text": "5A9D6B3 02",
+        "legibility": "clear",
+        "roi_clipped": false,
+        "note": ""
+      },
+      "source_kind": "fused_only"
+    },
+    {
+      "index": 19,
+      "source": "dataset/bmw_lab_raw_clean_0820/left/back/defect/defect/20260820_155511_803522/images/left_back_defect_defect_bmw_left_defect_group006_000001_fused.png",
+      "hand": "left",
+      "label": "defect",
+      "session": "20260820_155511_803522",
+      "source_size": [
+        4024,
+        3036
+      ],
+      "roi_xyxy": [
+        1260,
+        1450,
+        1900,
+        1980
+      ],
+      "visual_reference": {
+        "text": "5A9D6B3 02",
+        "legibility": "clear",
+        "roi_clipped": false,
+        "note": ""
+      },
+      "source_kind": "fused_only"
+    },
+    {
+      "index": 20,
+      "source": "dataset/bmw_lab_raw_clean_0820/left/back/defect/defect/20260820_155511_803522/images/left_back_defect_defect_bmw_left_defect_group008_000001_fused.png",
+      "hand": "left",
+      "label": "defect",
+      "session": "20260820_155511_803522",
+      "source_size": [
+        4024,
+        3036
+      ],
+      "roi_xyxy": [
+        1260,
+        1450,
+        1900,
+        1980
+      ],
+      "visual_reference": {
+        "text": "5A9D6B3 02",
+        "legibility": "clear",
+        "roi_clipped": false,
+        "note": ""
+      },
+      "source_kind": "fused_only"
+    },
+    {
+      "index": 21,
+      "source": "dataset/bmw_lab_raw_clean_0820/left/back/defect/defect/20260820_155511_803522/images/left_back_defect_defect_bmw_left_defect_group011_000001_fused.png",
+      "hand": "left",
+      "label": "defect",
+      "session": "20260820_155511_803522",
+      "source_size": [
+        4024,
+        3036
+      ],
+      "roi_xyxy": [
+        1260,
+        1450,
+        1900,
+        1980
+      ],
+      "visual_reference": {
+        "text": "5A9D6B3 02",
+        "legibility": "clear",
+        "roi_clipped": false,
+        "note": ""
+      },
+      "source_kind": "fused_only"
+    },
+    {
+      "index": 22,
+      "source": "dataset/bmw_lab_raw_clean_0820/left/back/defect/defect/20260820_155511_803522/images/left_back_defect_defect_bmw_left_defect_group014_000001_fused.png",
+      "hand": "left",
+      "label": "defect",
+      "session": "20260820_155511_803522",
+      "source_size": [
+        4024,
+        3036
+      ],
+      "roi_xyxy": [
+        1260,
+        1450,
+        1900,
+        1980
+      ],
+      "visual_reference": {
+        "text": "5A9D6B3 02",
+        "legibility": "clear",
+        "roi_clipped": false,
+        "note": ""
+      },
+      "source_kind": "fused_only"
+    },
+    {
+      "index": 23,
+      "source": "dataset/bmw_lab_raw_clean_0820/left/back/defect/defect/20260820_155511_803522/images/left_back_defect_defect_bmw_left_defect_group016_000001_fused.png",
+      "hand": "left",
+      "label": "defect",
+      "session": "20260820_155511_803522",
+      "source_size": [
+        4024,
+        3036
+      ],
+      "roi_xyxy": [
+        1260,
+        1450,
+        1900,
+        1980
+      ],
+      "visual_reference": {
+        "text": "5A9D6B3 02",
+        "legibility": "clear",
+        "roi_clipped": false,
+        "note": ""
+      },
+      "source_kind": "fused_only"
+    },
+    {
+      "index": 24,
+      "source": "dataset/bmw_lab_raw_clean_0820/left/back/defect/defect/20260820_155511_803522/images/left_back_defect_defect_bmw_left_defect_group019_000001_fused.png",
+      "hand": "left",
+      "label": "defect",
+      "session": "20260820_155511_803522",
+      "source_size": [
+        4024,
+        3036
+      ],
+      "roi_xyxy": [
+        1260,
+        1450,
+        1900,
+        1980
+      ],
+      "visual_reference": {
+        "text": "5A9D6B3 02",
+        "legibility": "clear",
+        "roi_clipped": false,
+        "note": ""
+      },
+      "source_kind": "fused_only"
+    },
+    {
+      "index": 25,
+      "source": "dataset/bmw_lab_raw_clean_0820/left/back/defect/defect/20260820_155511_803522/images/left_back_defect_defect_bmw_left_defect_group021_000001_fused.png",
+      "hand": "left",
+      "label": "defect",
+      "session": "20260820_155511_803522",
+      "source_size": [
+        4024,
+        3036
+      ],
+      "roi_xyxy": [
+        1260,
+        1450,
+        1900,
+        1980
+      ],
+      "visual_reference": {
+        "text": "5A9D6B3 02",
+        "legibility": "clear",
+        "roi_clipped": false,
+        "note": ""
+      },
+      "source_kind": "fused_only"
+    },
+    {
+      "index": 26,
+      "source": "dataset/bmw_lab_raw_clean_0820/left/back/defect/defect/20260820_155511_803522/images/left_back_defect_defect_bmw_left_defect_group024_000001_fused.png",
+      "hand": "left",
+      "label": "defect",
+      "session": "20260820_155511_803522",
+      "source_size": [
+        4024,
+        3036
+      ],
+      "roi_xyxy": [
+        1260,
+        1450,
+        1900,
+        1980
+      ],
+      "visual_reference": {
+        "text": "5A9D6B3 02",
+        "legibility": "clear",
+        "roi_clipped": false,
+        "note": ""
+      },
+      "source_kind": "fused_only"
+    },
+    {
+      "index": 27,
+      "source": "dataset/bmw_lab_raw_clean_0820/left/back/defect/defect/20260820_155511_803522/images/left_back_defect_defect_bmw_left_defect_group027_000001_fused.png",
+      "hand": "left",
+      "label": "defect",
+      "session": "20260820_155511_803522",
+      "source_size": [
+        4024,
+        3036
+      ],
+      "roi_xyxy": [
+        1260,
+        1450,
+        1900,
+        1980
+      ],
+      "visual_reference": {
+        "text": "5A9D6B3 02",
+        "legibility": "clear",
+        "roi_clipped": false,
+        "note": ""
+      },
+      "source_kind": "fused_only"
+    },
+    {
+      "index": 28,
+      "source": "dataset/bmw_lab_raw_clean_0820/left/back/defect/defect/20260820_155511_803522/images/left_back_defect_defect_bmw_left_defect_group029_000001_fused.png",
+      "hand": "left",
+      "label": "defect",
+      "session": "20260820_155511_803522",
+      "source_size": [
+        4024,
+        3036
+      ],
+      "roi_xyxy": [
+        1260,
+        1450,
+        1900,
+        1980
+      ],
+      "visual_reference": {
+        "text": null,
+        "legibility": "uncertain",
+        "roi_clipped": false,
+        "note": "Physical damage crosses B and final character; visible final fragment resembles 3 but complete transcription is uncertain."
+      },
+      "source_kind": "fused_only"
+    },
+    {
+      "index": 29,
+      "source": "dataset/bmw_lab_raw_clean_0820/left/back/defect/defect/20260820_155511_803522/images/left_back_defect_defect_bmw_left_defect_group032_000001_fused.png",
+      "hand": "left",
+      "label": "defect",
+      "session": "20260820_155511_803522",
+      "source_size": [
+        4024,
+        3036
+      ],
+      "roi_xyxy": [
+        1260,
+        1450,
+        1900,
+        1980
+      ],
+      "visual_reference": {
+        "text": "5A9D6B3 02",
+        "legibility": "clear",
+        "roi_clipped": false,
+        "note": ""
+      },
+      "source_kind": "fused_only"
+    },
+    {
+      "index": 30,
+      "source": "dataset/bmw_lab_raw_clean_0820/right/back/normal/20260820_145055_678929/images/right_back_normal_bmw_right_normal_group003_000001_fused.png",
+      "hand": "right",
+      "label": "normal",
+      "session": "20260820_145055_678929",
+      "source_size": [
+        4024,
+        3036
+      ],
+      "roi_xyxy": [
+        1300,
+        1100,
+        1980,
+        1830
+      ],
+      "visual_reference": {
+        "text": "5A9D6B4 02",
+        "legibility": "clear",
+        "roi_clipped": false,
+        "note": ""
+      },
+      "source_kind": "fused_only"
+    },
+    {
+      "index": 31,
+      "source": "dataset/bmw_lab_raw_clean_0820/right/back/normal/20260820_145055_678929/images/right_back_normal_bmw_right_normal_group014_000001_fused.png",
+      "hand": "right",
+      "label": "normal",
+      "session": "20260820_145055_678929",
+      "source_size": [
+        4024,
+        3036
+      ],
+      "roi_xyxy": [
+        1300,
+        1100,
+        1980,
+        1830
+      ],
+      "visual_reference": {
+        "text": "5A9D6B4 02",
+        "legibility": "clear",
+        "roi_clipped": false,
+        "note": ""
+      },
+      "source_kind": "fused_only"
+    },
+    {
+      "index": 32,
+      "source": "dataset/bmw_lab_raw_clean_0820/right/back/normal/20260820_145055_678929/images/right_back_normal_bmw_right_normal_group025_000001_fused.png",
+      "hand": "right",
+      "label": "normal",
+      "session": "20260820_145055_678929",
+      "source_size": [
+        4024,
+        3036
+      ],
+      "roi_xyxy": [
+        1300,
+        1100,
+        1980,
+        1830
+      ],
+      "visual_reference": {
+        "text": "5A9D6B4 02",
+        "legibility": "clear",
+        "roi_clipped": false,
+        "note": ""
+      },
+      "source_kind": "fused_only"
+    },
+    {
+      "index": 33,
+      "source": "dataset/bmw_lab_raw_clean_0820/right/back/normal/20260820_145055_678929/images/right_back_normal_bmw_right_normal_group035_000001_fused.png",
+      "hand": "right",
+      "label": "normal",
+      "session": "20260820_145055_678929",
+      "source_size": [
+        4024,
+        3036
+      ],
+      "roi_xyxy": [
+        1300,
+        1100,
+        1980,
+        1830
+      ],
+      "visual_reference": {
+        "text": "5A9D6B4 02",
+        "legibility": "clear",
+        "roi_clipped": false,
+        "note": ""
+      },
+      "source_kind": "fused_only"
+    },
+    {
+      "index": 34,
+      "source": "dataset/bmw_lab_raw_clean_0820/right/back/normal/20260820_145055_678929/images/right_back_normal_bmw_right_normal_group046_000001_fused.png",
+      "hand": "right",
+      "label": "normal",
+      "session": "20260820_145055_678929",
+      "source_size": [
+        4024,
+        3036
+      ],
+      "roi_xyxy": [
+        1300,
+        1100,
+        1980,
+        1830
+      ],
+      "visual_reference": {
+        "text": "5A9D6B4 02",
+        "legibility": "clear",
+        "roi_clipped": false,
+        "note": ""
+      },
+      "source_kind": "fused_only"
+    },
+    {
+      "index": 35,
+      "source": "dataset/bmw_lab_raw_clean_0820/right/back/normal/20260820_145055_678929/images/right_back_normal_bmw_right_normal_group057_000001_fused.png",
+      "hand": "right",
+      "label": "normal",
+      "session": "20260820_145055_678929",
+      "source_size": [
+        4024,
+        3036
+      ],
+      "roi_xyxy": [
+        1300,
+        1100,
+        1980,
+        1830
+      ],
+      "visual_reference": {
+        "text": "5A9D6B4 02",
+        "legibility": "clear",
+        "roi_clipped": false,
+        "note": ""
+      },
+      "source_kind": "fused_only"
+    },
+    {
+      "index": 36,
+      "source": "dataset/bmw_lab_raw_clean_0820/right/back/normal/20260820_145055_678929/images/right_back_normal_bmw_right_normal_group067_000001_fused.png",
+      "hand": "right",
+      "label": "normal",
+      "session": "20260820_145055_678929",
+      "source_size": [
+        4024,
+        3036
+      ],
+      "roi_xyxy": [
+        1300,
+        1100,
+        1980,
+        1830
+      ],
+      "visual_reference": {
+        "text": "5A9D6B4 02",
+        "legibility": "clear",
+        "roi_clipped": false,
+        "note": ""
+      },
+      "source_kind": "fused_only"
+    },
+    {
+      "index": 37,
+      "source": "dataset/bmw_lab_raw_clean_0820/right/back/normal/20260820_145055_678929/images/right_back_normal_bmw_right_normal_group078_000001_fused.png",
+      "hand": "right",
+      "label": "normal",
+      "session": "20260820_145055_678929",
+      "source_size": [
+        4024,
+        3036
+      ],
+      "roi_xyxy": [
+        1300,
+        1100,
+        1980,
+        1830
+      ],
+      "visual_reference": {
+        "text": "5A9D6B4 02",
+        "legibility": "clear",
+        "roi_clipped": false,
+        "note": ""
+      },
+      "source_kind": "fused_only"
+    },
+    {
+      "index": 38,
+      "source": "dataset/bmw_lab_raw_clean_0820/right/back/normal/20260820_145055_678929/images/right_back_normal_bmw_right_normal_group089_000001_fused.png",
+      "hand": "right",
+      "label": "normal",
+      "session": "20260820_145055_678929",
+      "source_size": [
+        4024,
+        3036
+      ],
+      "roi_xyxy": [
+        1300,
+        1100,
+        1980,
+        1830
+      ],
+      "visual_reference": {
+        "text": "5A9D6B4 02",
+        "legibility": "clear",
+        "roi_clipped": false,
+        "note": ""
+      },
+      "source_kind": "fused_only"
+    },
+    {
+      "index": 39,
+      "source": "dataset/bmw_lab_raw_clean_0820/right/back/normal/20260823_144248_477990/images/right_back_normal_bmw_right_normal_retake_group001_000001_fused.png",
+      "hand": "right",
+      "label": "normal",
+      "session": "20260823_144248_477990",
+      "source_size": [
+        4024,
+        3036
+      ],
+      "roi_xyxy": [
+        1300,
+        1100,
+        1980,
+        1830
+      ],
+      "visual_reference": {
+        "text": "5A9D6B4 02",
+        "legibility": "clear",
+        "roi_clipped": false,
+        "note": ""
+      },
+      "source_kind": "fused_only"
+    },
+    {
+      "index": 40,
+      "source": "dataset/bmw_lab_raw_clean_0820/right/back/normal/20260823_144248_477990/images/right_back_normal_bmw_right_normal_retake_group012_000001_fused.png",
+      "hand": "right",
+      "label": "normal",
+      "session": "20260823_144248_477990",
+      "source_size": [
+        4024,
+        3036
+      ],
+      "roi_xyxy": [
+        1300,
+        1100,
+        1980,
+        1830
+      ],
+      "visual_reference": {
+        "text": "5A9D6B4 02",
+        "legibility": "clear",
+        "roi_clipped": false,
+        "note": ""
+      },
+      "source_kind": "fused_only"
+    },
+    {
+      "index": 41,
+      "source": "dataset/bmw_lab_raw_clean_0820/right/back/normal/20260823_144248_477990/images/right_back_normal_bmw_right_normal_retake_group023_000001_fused.png",
+      "hand": "right",
+      "label": "normal",
+      "session": "20260823_144248_477990",
+      "source_size": [
+        4024,
+        3036
+      ],
+      "roi_xyxy": [
+        1300,
+        1100,
+        1980,
+        1830
+      ],
+      "visual_reference": {
+        "text": "5A9D6B4 02",
+        "legibility": "clear",
+        "roi_clipped": false,
+        "note": ""
+      },
+      "source_kind": "fused_only"
+    },
+    {
+      "index": 42,
+      "source": "dataset/bmw_lab_raw_clean_0820/right/back/normal/20260823_144248_477990/images/right_back_normal_bmw_right_normal_retake_group033_000001_fused.png",
+      "hand": "right",
+      "label": "normal",
+      "session": "20260823_144248_477990",
+      "source_size": [
+        4024,
+        3036
+      ],
+      "roi_xyxy": [
+        1300,
+        1100,
+        1980,
+        1830
+      ],
+      "visual_reference": {
+        "text": "5A9D6B4 02",
+        "legibility": "clear",
+        "roi_clipped": false,
+        "note": ""
+      },
+      "source_kind": "fused_only"
+    },
+    {
+      "index": 43,
+      "source": "dataset/bmw_lab_raw_clean_0820/right/back/normal/20260823_144248_477990/images/right_back_normal_bmw_right_normal_retake_group044_000001_fused.png",
+      "hand": "right",
+      "label": "normal",
+      "session": "20260823_144248_477990",
+      "source_size": [
+        4024,
+        3036
+      ],
+      "roi_xyxy": [
+        1300,
+        1100,
+        1980,
+        1830
+      ],
+      "visual_reference": {
+        "text": "5A9D6B4 02",
+        "legibility": "clear",
+        "roi_clipped": false,
+        "note": ""
+      },
+      "source_kind": "fused_only"
+    },
+    {
+      "index": 44,
+      "source": "dataset/bmw_lab_raw_clean_0820/right/back/normal/20260823_144248_477990/images/right_back_normal_bmw_right_normal_retake_group055_000001_fused.png",
+      "hand": "right",
+      "label": "normal",
+      "session": "20260823_144248_477990",
+      "source_size": [
+        4024,
+        3036
+      ],
+      "roi_xyxy": [
+        1300,
+        1100,
+        1980,
+        1830
+      ],
+      "visual_reference": {
+        "text": "5A9D6B4 02",
+        "legibility": "clear",
+        "roi_clipped": false,
+        "note": ""
+      },
+      "source_kind": "fused_only"
+    },
+    {
+      "index": 45,
+      "source": "dataset/bmw_lab_raw_clean_0820/right/back/normal/20260823_144248_477990/images/right_back_normal_bmw_right_normal_retake_group065_000001_fused.png",
+      "hand": "right",
+      "label": "normal",
+      "session": "20260823_144248_477990",
+      "source_size": [
+        4024,
+        3036
+      ],
+      "roi_xyxy": [
+        1300,
+        1100,
+        1980,
+        1830
+      ],
+      "visual_reference": {
+        "text": "5A9D6B4 02",
+        "legibility": "clear",
+        "roi_clipped": false,
+        "note": ""
+      },
+      "source_kind": "fused_only"
+    },
+    {
+      "index": 46,
+      "source": "dataset/bmw_lab_raw_clean_0820/right/back/normal/20260823_144248_477990/images/right_back_normal_bmw_right_normal_retake_group076_000001_fused.png",
+      "hand": "right",
+      "label": "normal",
+      "session": "20260823_144248_477990",
+      "source_size": [
+        4024,
+        3036
+      ],
+      "roi_xyxy": [
+        1300,
+        1100,
+        1980,
+        1830
+      ],
+      "visual_reference": {
+        "text": "5A9D6B4 02",
+        "legibility": "clear",
+        "roi_clipped": false,
+        "note": ""
+      },
+      "source_kind": "fused_only"
+    },
+    {
+      "index": 47,
+      "source": "dataset/bmw_lab_raw_clean_0820/right/back/normal/20260823_144248_477990/images/right_back_normal_bmw_right_normal_retake_group087_000001_fused.png",
+      "hand": "right",
+      "label": "normal",
+      "session": "20260823_144248_477990",
+      "source_size": [
+        4024,
+        3036
+      ],
+      "roi_xyxy": [
+        1300,
+        1100,
+        1980,
+        1830
+      ],
+      "visual_reference": {
+        "text": "5A9D6B4 02",
+        "legibility": "clear",
+        "roi_clipped": false,
+        "note": ""
+      },
+      "source_kind": "fused_only"
+    },
+    {
+      "index": 48,
+      "source": "dataset/bmw_lab_raw_clean_0820/right/back/defect/defect/20260820_153342_329257/images/right_back_defect_defect_bmw_right_defect_group003_000001_fused.png",
+      "hand": "right",
+      "label": "defect",
+      "session": "20260820_153342_329257",
+      "source_size": [
+        4024,
+        3036
+      ],
+      "roi_xyxy": [
+        1300,
+        1100,
+        1980,
+        1830
+      ],
+      "visual_reference": {
+        "text": "5A9D6B4 02",
+        "legibility": "clear",
+        "roi_clipped": false,
+        "note": ""
+      },
+      "source_kind": "fused_only"
+    },
+    {
+      "index": 49,
+      "source": "dataset/bmw_lab_raw_clean_0820/right/back/defect/defect/20260820_153342_329257/images/right_back_defect_defect_bmw_right_defect_group006_000001_fused.png",
+      "hand": "right",
+      "label": "defect",
+      "session": "20260820_153342_329257",
+      "source_size": [
+        4024,
+        3036
+      ],
+      "roi_xyxy": [
+        1300,
+        1100,
+        1980,
+        1830
+      ],
+      "visual_reference": {
+        "text": "5A9D6B4 02",
+        "legibility": "clear",
+        "roi_clipped": false,
+        "note": ""
+      },
+      "source_kind": "fused_only"
+    },
+    {
+      "index": 50,
+      "source": "dataset/bmw_lab_raw_clean_0820/right/back/defect/defect/20260820_153342_329257/images/right_back_defect_defect_bmw_right_defect_group009_000001_fused.png",
+      "hand": "right",
+      "label": "defect",
+      "session": "20260820_153342_329257",
+      "source_size": [
+        4024,
+        3036
+      ],
+      "roi_xyxy": [
+        1300,
+        1100,
+        1980,
+        1830
+      ],
+      "visual_reference": {
+        "text": "5A9D6B4 02",
+        "legibility": "clear",
+        "roi_clipped": false,
+        "note": ""
+      },
+      "source_kind": "fused_only"
+    },
+    {
+      "index": 51,
+      "source": "dataset/bmw_lab_raw_clean_0820/right/back/defect/defect/20260820_153342_329257/images/right_back_defect_defect_bmw_right_defect_group012_000001_fused.png",
+      "hand": "right",
+      "label": "defect",
+      "session": "20260820_153342_329257",
+      "source_size": [
+        4024,
+        3036
+      ],
+      "roi_xyxy": [
+        1300,
+        1100,
+        1980,
+        1830
+      ],
+      "visual_reference": {
+        "text": "5A9D6B4 02",
+        "legibility": "clear",
+        "roi_clipped": false,
+        "note": "Blue mark across D6B, still visually legible."
+      },
+      "source_kind": "fused_only"
+    },
+    {
+      "index": 52,
+      "source": "dataset/bmw_lab_raw_clean_0820/right/back/defect/defect/20260820_153342_329257/images/right_back_defect_defect_bmw_right_defect_group015_000001_fused.png",
+      "hand": "right",
+      "label": "defect",
+      "session": "20260820_153342_329257",
+      "source_size": [
+        4024,
+        3036
+      ],
+      "roi_xyxy": [
+        1300,
+        1100,
+        1980,
+        1830
+      ],
+      "visual_reference": {
+        "text": "5A9D6B4 02",
+        "legibility": "clear",
+        "roi_clipped": false,
+        "note": ""
+      },
+      "source_kind": "fused_only"
+    },
+    {
+      "index": 53,
+      "source": "dataset/bmw_lab_raw_clean_0820/right/back/defect/defect/20260820_153342_329257/images/right_back_defect_defect_bmw_right_defect_group018_000001_fused.png",
+      "hand": "right",
+      "label": "defect",
+      "session": "20260820_153342_329257",
+      "source_size": [
+        4024,
+        3036
+      ],
+      "roi_xyxy": [
+        1300,
+        1100,
+        1980,
+        1830
+      ],
+      "visual_reference": {
+        "text": "5A9D6B4 02",
+        "legibility": "clear",
+        "roi_clipped": false,
+        "note": ""
+      },
+      "source_kind": "fused_only"
+    },
+    {
+      "index": 54,
+      "source": "dataset/bmw_lab_raw_clean_0820/right/back/defect/defect/20260820_153342_329257/images/right_back_defect_defect_bmw_right_defect_group021_000001_fused.png",
+      "hand": "right",
+      "label": "defect",
+      "session": "20260820_153342_329257",
+      "source_size": [
+        4024,
+        3036
+      ],
+      "roi_xyxy": [
+        1300,
+        1100,
+        1980,
+        1830
+      ],
+      "visual_reference": {
+        "text": "5A9D6B4 02",
+        "legibility": "clear",
+        "roi_clipped": false,
+        "note": ""
+      },
+      "source_kind": "fused_only"
+    },
+    {
+      "index": 55,
+      "source": "dataset/bmw_lab_raw_clean_0820/right/back/defect/defect/20260820_153342_329257/images/right_back_defect_defect_bmw_right_defect_group024_000001_fused.png",
+      "hand": "right",
+      "label": "defect",
+      "session": "20260820_153342_329257",
+      "source_size": [
+        4024,
+        3036
+      ],
+      "roi_xyxy": [
+        1300,
+        1100,
+        1980,
+        1830
+      ],
+      "visual_reference": {
+        "text": "5A9D6B4 02",
+        "legibility": "clear",
+        "roi_clipped": false,
+        "note": ""
+      },
+      "source_kind": "fused_only"
+    },
+    {
+      "index": 56,
+      "source": "dataset/bmw_lab_raw_clean_0820/right/back/defect/defect/20260820_153342_329257/images/right_back_defect_defect_bmw_right_defect_group027_000001_fused.png",
+      "hand": "right",
+      "label": "defect",
+      "session": "20260820_153342_329257",
+      "source_size": [
+        4024,
+        3036
+      ],
+      "roi_xyxy": [
+        1300,
+        1100,
+        1980,
+        1830
+      ],
+      "visual_reference": {
+        "text": "5A9D6B4 02",
+        "legibility": "uncertain",
+        "roi_clipped": false,
+        "note": "Dark region over 5A and line crossing A9; tentative transcription only."
+      },
+      "source_kind": "fused_only"
+    },
+    {
+      "index": 57,
+      "source": "dataset/bmw_lab_raw_clean_0820/right/back/defect/defect/20260820_153342_329257/images/right_back_defect_defect_bmw_right_defect_group030_000001_fused.png",
+      "hand": "right",
+      "label": "defect",
+      "session": "20260820_153342_329257",
+      "source_size": [
+        4024,
+        3036
+      ],
+      "roi_xyxy": [
+        1300,
+        1100,
+        1980,
+        1830
+      ],
+      "visual_reference": {
+        "text": "5A9D6B4 02",
+        "legibility": "clear",
+        "roi_clipped": false,
+        "note": ""
+      },
+      "source_kind": "fused_only"
+    },
+    {
+      "index": 58,
+      "source": "dataset/bmw_lab_raw_clean_0820/right/back/defect/defect/20260820_153342_329257/images/right_back_defect_defect_bmw_right_defect_group033_000001_fused.png",
+      "hand": "right",
+      "label": "defect",
+      "session": "20260820_153342_329257",
+      "source_size": [
+        4024,
+        3036
+      ],
+      "roi_xyxy": [
+        1300,
+        1100,
+        1980,
+        1830
+      ],
+      "visual_reference": {
+        "text": "5A9D6B4 02",
+        "legibility": "clear",
+        "roi_clipped": false,
+        "note": ""
+      },
+      "source_kind": "fused_only"
+    },
+    {
+      "index": 59,
+      "source": "dataset/bmw_lab_raw_clean_0820/right/back/defect/defect/20260820_153342_329257/images/right_back_defect_defect_bmw_right_defect_group036_000001_fused.png",
+      "hand": "right",
+      "label": "defect",
+      "session": "20260820_153342_329257",
+      "source_size": [
+        4024,
+        3036
+      ],
+      "roi_xyxy": [
+        1300,
+        1100,
+        1980,
+        1830
+      ],
+      "visual_reference": {
+        "text": "5A9D6B4 02",
+        "legibility": "clear",
+        "roi_clipped": false,
+        "note": ""
+      },
+      "source_kind": "fused_only"
+    }
+  ]
+}

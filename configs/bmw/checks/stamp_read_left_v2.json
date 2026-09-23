@@ -1,0 +1,50 @@
+{
+  "hand": "left",
+  "view_id": "back",
+  "reference_image_size": [
+    4024,
+    3036
+  ],
+  "roi_xyxy": [
+    1260,
+    1450,
+    1900,
+    1980
+  ],
+  "rotation_clockwise_degrees": 90,
+  "code_region_xyxy": [
+    20,
+    80,
+    530,
+    265
+  ],
+  "min_score": 0.95,
+  "border_margin_px": 3,
+  "min_code_width_fraction": 0.7,
+  "normalization_policy": "ascii_alphanumeric",
+  "line_quad_xy": [
+    [
+      55,
+      148
+    ],
+    [
+      498,
+      98
+    ],
+    [
+      510,
+      205
+    ],
+    [
+      67,
+      255
+    ]
+  ],
+  "line_image_size": [
+    450,
+    104
+  ],
+  "consensus_min_score": 0.9,
+  "intra_op_num_threads": 4,
+  "inter_op_num_threads": 2
+}

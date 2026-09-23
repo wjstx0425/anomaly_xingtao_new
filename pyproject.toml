@@ -141,7 +141,9 @@ dev = ["anomalib[full,docs,test]"]
 [project.scripts]
 anomalib = "anomalib.cli.cli:main"
 bmw-inspect = "bmw_inspection.cli.eight_view_demo:main"
+bmw-contour = "bmw_inspection.cli.contour:main"
 bmw-collect = "bmw_inspection.cli.collect:main"
+bmw-exposure-test = "bmw_inspection.cli.exposure_test:main"
 
 [tool.hatch.version]
 path = "src/anomalib/__init__.py"

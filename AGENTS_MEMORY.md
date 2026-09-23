@@ -1,5 +1,179 @@
 # AGENTS Memory
 
+## Repository organization and GitHub publication preparation — 2026-09-23
+
+- User authorized organizing this folder and uploading to its corresponding GitHub repository. Retain current branch `feat/bmw-four-camera-runtime-cleanup` in `wjstx0425/anomaly_xingtao_new`; no main merge or force push.
+- Consolidated pending BMW checks, benchmark, exposure, CLI, configurations, tests and handoff docs. Added `docs/bmw/README.md` navigation linked from root README and expanded `tools/bmw/README.md`. Kept module layout and algorithm behavior intact during this organization pass.
+- Validation: `uv run --no-sync python -m pytest tests/unit/bmw_inspection -q`: 587 passed. Pending 65 Python files parse and 17 JSON files load; new navigation targets exist; diff whitespace check passes. Text-only publication audit found no common credential patterns or large/binary assets. No full upstream test suite, hardware or production acceptance performed.
+- Raw images, datasets, weights and generated artifacts remain ignored and local. SSH remote branch was verified at pre-publication HEAD c59c33ce; use SSH transport if HTTPS credentials are unavailable. Commit/push result must be verified separately against remote HEAD.
+
+## Front contour Python integration API — 2026-09-23
+
+- User requested modularization for later integration. Public `FrontContourInspector` / `FrontContourResult` / `ContourInputError` now exported from `bmw_inspection.checks.contour_compare`; `api.py` caches copied reference/config, processes arrays without file/camera I/O, returns pose/geometry/mask/current outline. The existing geometry report script delegates to this API. See `docs/bmw/front_contour_api.md` for usage, dependencies, outputs and failure handling.
+- Preserve diagnostic REVIEW/whole_part_release=None; this is independent acquisition, not strict fixed-reference inspection or a trained dark-face model. No runtime/PLC integration, new-camera validation or contour-coverage improvement claimed. Returned parameter snapshots and pose ROIs are deep-copied to avoid corrupting cached reference on caller mutation.
+- Verification: 240 contour tests passed (17 API tests), one existing NVML warning. Two actual images replayed in `artifacts/bmw_front_contour_api_20260923/replay`; verification.json confirms original source SHA, geometry parity at 1e-10, exact masks and all contour NPZ arrays against Sept15 evidence. Unrelated dirty files preserved; no commit/push.
+
+## HDR inputs and proposed 5 MP camera — 2026-09-15
+
+- Verified left 0820 demo config points to prepared manifest with 976/976 `_fused.png` sources; sampled front normal is 4024×3036. Front EfficientAD training metrics record 256×256 input and external validation pending; demo YOLO input is 640. Current capture profile uses 1500/6000 us selective exposure fusion into uint8 (not calibrated radiometric HDR); exact historical exposure settings were not audited per session.
+- User asks about reuse on a new 5 MP camera, not confirmed deployment. Existing models retain baseline value, but no new-camera accuracy is established. Reconfigure full-image ROIs/masks/contour reference and pixel tolerances; compare same parts under final lighting/background and HDR/single-exposure choice. Resolution alone does not establish defect visibility. Current contour/GrabCut workflow has no newly trained body-segmentation model. No training or camera testing performed this turn.
+
+## Current illumination and context preference — 2026-09-15
+
+- Latest user clarification: front capture has light directly above and a black conveyor background. Use this as current design condition; glass/backlight is only an earlier alternative. Camera pose, exact light type/size and permission to change illumination remain unspecified. Prefer image-supported edge recovery and test overhead diffuse/multidirectional options conditionally; do not assume below-belt backlighting.
+- User notices context progress fills quickly. Reduce repeated whole-document reads, large tool outputs and redundant summaries; consult targeted project-background notes. No verified account/model context-capacity reduction; do not invent a limit. This turn is explanation/planning only, no new algorithm or hardware changes.
+
+## Project background and handoff scope — 2026-09-15
+
+- Read the full22-item customer requirement DOCX (including tables/LH-RH illustrations), V top-level contour memo, and the two-person README/WP00–05/templates/start instructions. Authoritative background summary: `docs/bmw/project_background_20260915.md`. Source/extracted evidence: `artifacts/bmw_project_background_20260915/`.
+- Top-level `V/发生器支架_自动检测_需求建议 2026-9-9.docx` is byte-identical to the handoff package reference copy (SHA256 ba2b2b6ed990a4b968d1f0008cf851a9f6592d366c784f97cd642cb713577597). Filename9/9, body9/7; no new content revision inferred from the new location.
+- Overall customer goal: generator bracket inspection,22requirements plus line takt/online-offline integration/NG reject or stop alarm/SPC/traceability. Current two-person scope is only1–10 offline algorithm evaluation.11hole-blockage,12–14fullmetrology,15–18poka-yoke,19–22stamp business checks remain overall requirements, not all current-stage deliverables.
+- Owner maintains WP01data/baseline/interfaces, WP02contour(highest technical priority), WP05evaluation/integration; collaborator first WP03R02a then WP04old-YOLO input diagnosis; supervised training is conditional. EfficientAD remains frozen sole unsupervised deep branch. Source documents do not authorize automatic retraining or deployment.
+- WP04S01 defaults to defect masks; whole-part material segmentation for dark-edge contour acquisition is a separate task and must preserve real notches. Prior100train+30val+50test was only an assistant pilot estimate for body segmentation, not customer minimum/approved dataset.
+- Stable-hole pose references cannot validate those same holes' position tolerances by self-alignment. Pixel projection distances do not establish3Dflatness/contour tolerances. Handoff says preserve completed stamp work, but current runtime docs say standalone OCR is not connected to work-order/main verdict; do not infer19–22fullyaccepted.
+- Glass/conveyor background is a user-proposed future condition, not fixed by the original requirement. Precise takt/tolerances/minimum defect sizes/physical ground truth and line/SPC/stamp interfaces remain to be specified. This update is documentation only; no new training, parameter changes or acceptance claim.
+
+## Generalization requirement — 2026-09-13
+
+- User explicitly wants general improvement, not tuning only017/018/031. These samples remain development examples, never independenttest. Proposed plan docs/bmw/scratch_generalization_plan_20260913.md: fixed full-coverage overlapping tiles + whole-image context, mature multiscale dark/bright ridge candidates, structure-aware normal context without hard masking allfolds/edges, then supervisedtile segmentation when real annotations andentitysplits exist. Match training/inference scales; hard negatives include folds/highlights/oil/texture/fibers. Compare at fixednormalfalsealarm/reviewbudget usinglocalizedinstances,coverage,latency andnewpart/newbatchheldout. No inference that3imagesproveuniversality; no newimplementation/training claimed by thisplan. CurrentE0–E2 doesn'tautomaticallyauthorizeE3training.
+
+
+## Scratch samples017/018/031 — 2026-09-13
+
+- User supplied three additional left/front fusedimages, confirming each contains scratches (requirement3), not exactinstance/masks. Replayed frozenTemplate,EffAD,YOLO640/1280,R02a with sameparameters; 3scratch+2confirmednormal=25predictions,0ERROR,5warmups. Source/80asset/codeSHAunchanged and10normalpredictions exactlymatchprevious scores/decisions. No algorithm/runtimechanges,training,newADorlocked_test; currentverificationisrealreplay,not rerun546tests.
+- Results results/bmw_benchmark/scratch_review_20260913/replay; executable localrun_replay.py onefolderup; docs/bmw/scratch_review_20260913.md. Template3/3NGglobal;EffADonly018NG (.3993),017/031PASS. YOLO640 and1280both017/018NG,031PASS. IMPORTANT017finalboxesareedge-notch (~2795,1717,2847,1792),not full diagonal scratch.018640highscoreleftdent,upperrightmark.2147below.25;1280upperright.2819/.2571finalboxespartiallocalization. Do notcall imageNGscratchrecall.
+- Independent original-only visual_review.json:017diagonal[2390,1550,2865,1905];018upperrightgouges[3100,900,3255,1080] plusotherhypotheses;031threefaintcurvesA[2535,1195,2620,1360],B[2495,1810,2615,1895],C[2695,1745,2810,1845],scratchvsfiberambiguity. AllhypothesesnonGT. R02candidatecounts1606/1700/1546,normal1313/1211;densematerialtextureconfounding,allREVIEW.
+- User clarified031 “零件原图右上角（圆孔/小脚附近）”, NOT confirmation ofdetailC. CurrentreviewD[3040,580,3270,730] isassistantwindowarounddarkshortgrooveaboveroundhole/nearouteredge; userconfirmedvicinity,notpixelbbox. ABCremainunconfirmed,notnegativeGT. BothYOLOsizeshaveNOcandidateinD;onlyupperfootcandidate.1084/.1991. EffADPASS.3453;ignorefractionD0%,notignoreblocked. R02respondsonshortgrooveplusnearbytexture,stillREVIEW. See031_confirmed_location.jpg,031_confirmed_upper_right_crop.png,user_location_confirmation.json. Preserve priorfixtureBconfirmationunrelatedtotheseABC.
+
+
+## BMW E0–E2 algorithm comparison (2026-09-12)
+
+- Completed the V1.1 first development replay after contour improvements: results/bmw_benchmark/left_front_e2_20260912,8images×6branches=48records/0ERROR. Template andYOLO640/1280each5/5defect-imageNG,EfficientAD1/5;R01/R02allREVIEW. Two confirmednormals0modelNG butR01still5bottomfootcandidates andbothrules2/2nonrelease. Unknown003excludednegatives. No clean/localization/ten-itemcoverage claim. 1280no incrementalimageNG vs640 andlost020upperfootbox; keepcurrentbaseline. 546tests+artifactSHA/link/coverageauditpassed. No training/newAD/locked_test/deployment changes. Detailed guide docs/bmw/algorithm_comparison_e2_20260912.md; module memory src/bmw_inspection/benchmark/AGENTS_MEMORY.md records contracts,coordinatefixes,andnextrequireddata.
+
+## BMW continuous contour extraction (2026-09-12)
+
+- Opt-in continuous_v3 now calibrates reference image edges within6px using material/intensity context, selects jointly continuous supported candidates, and tracks persistent corners through actual supported dense edge chains. Default independent_v2 remains. No interpolation over unknown, global tolerance changes or reference geometry changes. Required9485 samples and49unsupported reference normals retained; fixture B stays excluded, A and bright end face retained.
+- Final complete runs: artifacts/bmw_contour_continuous_20260912/{normals_final_v2,defects_final_v2}. Earlier *_final failed overlay export and are not complete results. All8 sourceSHA,reference arrays andcomparisonparams verified unchanged. Self coverage84.84→89.05%,00175.35→82.84%,00375.15→80.93%; defect002/005/007/015/02075.65/72.47/75.67/76.83/75.71%. All formalREVIEW. Confirmed-normal001 still5 bottomfoot NG candidate records, not5 defects. Eight posthoc visual boxes retain candidates, not measured recall/precision. See docs/bmw/contour_continuous_20260912.md and module memory.
+- User next authorized E0–E2 experiments from docs/BMW_第1-10项_算法对照实验_Codex交接包_V1.1 after current contour improvements. Freeze existing runtime/weights, no training/newAD/locked_test; actual current plan left/front8 development images. Category5 image-level truth only; physical identity/completebbox/mask absent. Read benchmark module memory for final experimental results when available.
+
+## Fixture B resolved (2026-09-12, latest)
+
+- User explicitly answered “我说的是B”: fixture is the black region beneath the bright bottom foot, not left dark protrusion A. Preserve A and bright foot end face. Region [2450,2873,2630,2895] has0mask foreground pixels; no further mask edits required. Reference remains folds_only mask with9485samples/49unsupported normals, not approved production reference. Do not ask A/B again.
+- normal001 is user-confirmed normal. SixNG candidate records represent3spatial regions with overlapping fine/coarse evidence (5.6-7.0px); gaps/unknowns prevent safe event fusion. See normal001_event_audit.json. Raw geometric variation does not establish physical nonconformance. Comparison-only local foot sensitivity completed in artifacts/bmw_contour_fixture_B_20260912: thresholds4/6/8/10 give normal001 NG6/1/0/0; fixed reference ROI[2400,2840,2650,2890], others4px. At8px prior8visual defect regions retain candidates, but015bottom count9->6, no small-defect sensitivity guarantee. All coverage unchanged and formal REVIEW;001still51REVIEW and2338pxunknown.32cases,8baseline event lists exactly match except arc_ids,sourceSHA verified,compile/diff checks pass. See docs/bmw/contour_fixture_B_20260912.md. This is a development sensitivity study; production config and extraction remain unchanged.
+
+
+## User physical-boundary clarification (2026-09-12)
+
+- User confirmed small-foot dark lines are folds in continuous material; lowest dark sidewall is fixture, not material outer contour. User also confirmed extra normal001 may be treated as normal. This supersedes the pending questions and directory-only status for001 in older entries;003 remains directory-labeled only.
+- Update reference teaching accordingly, preserve original mask/version and all test images. Normal001 is a development known-good, not independent validation or authority for arbitrary global tolerance increases. Exact permissible physical tolerances and repeat-placement variation remain unestablished.
+- Applied only confirmed fold repairs: `artifacts/bmw_contour_reference_20260912/reference_mask_folds_only.png`,548added/0removed pixels in4localROIs, external components1. Required samples9485 (was9787 because false slit outlines removed),49invalid normals. All remain draft. Precise fixture location pending A/B clarification in fixture_location_confirmation.png: A left dark protrusion, B below bright bottom foot. Neither was guessed/removed; B was already outside mask. v1/v2 dark-region difference is not a valid fixture mask.
+- New folds-only normals: self0NG/0REVIEW,84.84%coverage,1437.9pxunknown; user-confirmed0016NG/58REVIEW,75.35%coverage,2337.9pxunknown;0030NG/50REVIEW,75.15%coverage,2356.9pxunknown.0016candidates at lower foot5.6-7.0px are known-normal rule conflicts, not physical defect truth. Keep4px development tolerance unchanged pending actual boundary/normal variation validation. See normal001_rule_conflict.json; latest report docs/bmw/contour_reference_20260912.md. Eight-image folds-only replay completed; all source SHA unchanged and all formal REVIEW. Defect002/005/007/015/020 NG candidate counts34/34/69/42/52, coverage64.29-68.87%; no accuracy claim. mask_checks, summary and report written; helper help/compile and diff-check passed, core suite not rerun because only reference/labels/metadata changed.
+
+
+
+## BMW real reflection-template subtraction (2026-09-12)
+
+- User pair201543028 HAS PART,201549452 reflection-only. Actual1:1subtraction implemented in `tools/bmw/subtract_reflection_template.py`, outputs `results/bmw_reflection_template/20260912_2015_measured/index.html`. Backgroundmean42.95->.63 supports removal of fixed veil; preserve source originals.
+- Source19.08%all255 causes inverted bright-ring artifacts after subtraction; not recovered metal detail. Red masks mark uncertain source pixels. Need matched unoverexposed pair for better central result. Guide `docs/bmw/measured_reflection_template_20260912.md` and tools-local memory record exact verification/limits.
+
+## BMW fixed white-frame model correction (2026-09-12)
+
+- User's fixed-pattern observation led to targeted additive soft-rectangle fit; unlike generic CLAHE trial, this demonstrably suppresses frame. Same template fitA/appliedB, right background86->17 guarded. Full subtraction wrongly blacks dark circle/scene; guarded max(I-R,.2I) is appearance correction, not full surface recovery.
+- Report `docs/bmw/glare_fixed_field_20260912.md`, actual results `artifacts/bmw_glare_fixed_field_20260912/outputs/index.html`;8outputs/formulas/hashes verified, originals unchanged. Pending whether frame fixed across part motion; no reflection calibration reference or production acceptance. Read tools-local memory for exact metrics.
+
+## BMW white rectangular glare trial (2026-09-12)
+
+- Two user1955 BMPs tested offline with traditional illumination normalization and CLAHE. Glare can be dimmed, stamp contrast enhanced, but rectangle/circle remain; no restored-surface or defect-acceptance claim. Both4.82%all255 and97%clipped overlap, so pair fusion lacks complementary data.
+- Report `docs/bmw/glare_trial_20260912.md`; actual comparisons `artifacts/bmw_glare_trial_20260912/outputs/index.html`. Original hashes unchanged; no inpainting or camera changes. Details tools/bmw/AGENTS_MEMORY.md.
+
+## BMW new camera exposure testing (2026-09-12)
+
+- Fixed exposure CLI rejection of explicit unconfigured serial DB1624062. New serials enumerated normally, saved under positional `camera_01_front/back`; selected slot/serial mappings recorded. Known views/default configured four preserved, production profiles unchanged.
+-45 capture tests passed plus help; no real new-camera capture claim. See capture-local memory and `docs/bmw/exposure_test.md`.
+
+## BMW additional motion blur images (2026-09-12)
+
+- User requested6/8/10px, same source and rightward direction. Added `--pixels` to simulation helper; generated `results/bmw_motion_blur/20260912_front_750us_right_6_8_10px/` with originals/full PNG/4x comparison/HTML. Source hash,output kernels/shapes and synthetic direction verified. Read tools/bmw/AGENTS_MEMORY.md for details; earlier1..5results retained.
+
+## BMW 1–5 pixel rightward motion simulation (2026-09-12)
+
+- User selected `results/bmw_exposure/20260912_173223_066379/raw/front/r001_e01.png` and confirmed horizontal right.4024x3036,750us/gain5. Added numerical helper `tools/bmw/simulate_motion_blur.py`; read tools-local `AGENTS_MEMORY.md` for exact kernel/reproduction.
+- Outputs `results/bmw_motion_blur/20260912_front_750us_right_1to5px/`:original+5full PNGs,2local4x comparison sheets,HTML/manifest/verification. Uniform travel0..L,1px [.5,.5] blur; source checksum unchanged and synthetic kernel tests pass. Saved-image additional blur only, not real flying-shot or defect-detection acceptance.
+
+## BMW front yellow image diagnosis (2026-09-11)
+
+- User session20260911_161054_385521 gain12/exposures300400us: only front is color camera MV-CU120-10UC; other3 UM grayscale. Yellow-green in raw; previous155941 same400us/gain12 more neutral, so gain/exposure alone not established cause.8 source hashes verified.
+- Missing WB/PixelType logs prevent attribution. Independent synthetic test confirms conditional BayerRG8 conversion R/B swap in hardware.py, but actual session branch unknown; no conversion changes during diagnosis. See `docs/bmw/exposure_color_review_20260911.md` and capture-local memory. No live camera configuration read or altered.
+
+## Contour false-alarm fixes and eight-image replay (2026-09-11, latest)
+
+- Read `docs/bmw/contour_fix_20260911.md`; final evidence is `artifacts/bmw_contour_fix_20260911/{run_v5,extra_normals_v5,review.html,artifact_checks.json,posthoc_v5.json}`. Earlier runs are historical. User six-image manifest plus two same-session normal-directory samples; all eight source SHA unchanged.
+- Added OpenCV GrabCut component ownership via deep-reference-core overlap, deterministic seed, identical reference/current profile candidates, material-transition support and ambiguous-candidate texture matching, multi-distance reference normals, isolated-point rejection and explicit unconfirmed coarse-region evidence. Keep raw components/curves; unknowns block PASS. Public inspector validates config and all reference normals. No mask/tolerance/required-denominator adjustment, no label-conditioned prediction or same-image shortcut.
+- Self now0NG/0measured REVIEW (was6/58), but83.31%coverage and6unconfirmed coarse regions; reference50/9787normals unsupported, stays draft. Defects coverage61.09-68.33% and many candidates. Eight prior defect-region candidates retained, NOT accuracy proof. Extra normal0014NG/72REVIEW at75.47%, normal0030NG/55REVIEW at75.52%; normal directory labels not individually confirmed by user. All formal REVIEW, no full-perimeter pass.
+- normal001 bottom foot4NG reflects visible aligned lower-edge shift about5px (candidate5-7px); current4px development threshold triggers. See normal001_bottom_comparison.jpg/.json. Not enough to determine tolerance/pose/physical defect. Pending user clarification: fold/shadow versus physical gaps, inclusion of dark bottom sidewall, normal001 qualification and acceptable variation. Do not silently modify reference semantics or tune away this sample.
+- Replayer `tools/bmw/validate_contour_real_samples.py`; config `configs/bmw/checks/contour/left_front_4024_development_v2.json`; previous reference_mask_candidate_v2.png retained. Final suite436passed1existingNVMLwarning;8artifact checks pass. No camera/GPU/GUI/Windows/production accuracy acceptance. Preserve unrelated exposure/stamp/hole work.
+
+
+## BMW exposure scan and HDR comparison (2026-09-11)
+
+- Added independent `python -m bmw_inspection.cli.exposure_test` / future installed `bmw-exposure-test`, reusing existing capture SDK/pacing/settle frames/selective fusion. Supports configured camera subsets, exposure lists/pairs, repeats, ROI, Mertens comparison, lossless originals, readbacks, SHA256 manifests and offline replay. Default workflow is CLI plus local HTML side-by-side report.
+- Guide `docs/bmw/exposure_test.md`; detailed module memory `src/bmw_inspection/capture/AGENTS_MEMORY.md`. Before related changes read this module memory; original collector settings and inspection contracts remain unchanged.
+- Fresh BMW suite401 passed (29 new exposure/report tests), existing NVML warning; CLI help and actual synthetic offline replay completed at `artifacts/bmw_exposure_synthetic_20260911/replay/index.html`. No real camera/Windows/live preview/HDR quality acceptance. Device ExposureTime readback is a setting, not proof of per-frame physical exposure. No commit/push.
+
+## BMW six user-selected real contour images (2026-09-11 follow-up)
+
+- User selected full-resolution left/front normal group002 from session20260823_164432_522052 and defect groups002/005/007/015/020 from20260820_155511_803522, explicitly labeled contour deformation. This supersedes the earlier pending request for input selection. Manifest `docs/bmw/contour_real_samples_20260911.json`; actual report `docs/bmw/contour_real_review_20260911.md`.
+- Tested all six4024x3036 images using existing algorithm through an explicitly diagnostic draft-reference runner; main runtime/algorithm unchanged. Reference-only GrabCut annotations corrected dark bottom interior, but313/9787 reference normals remain unsupported, so reference stays draft and all formal results REVIEW/diagnostic_only. No exclusions, rescaling, test-image manual tracing or label-conditioned prediction.
+- Two normal-image dark-hole ROIs [[2940,650,3210,920],[2430,2200,2720,2570]] localized all6 with RMS<=.818px. Two anchors do not validate3D pose. Existing development angle2/motion25/spacing3 plus rms1.5 sufficed; avoid reusing exploration script broader values.
+- Actual real self-test failed: normal has6NG+58REVIEW raw candidates, coverage87.87%; five defects coverage72.48-75.77%, all many false candidates. Major failures background screw/edge components, dark lower-edge missegmentation, ambiguous corners/profiles. Some true local candidate locations match all5 user positives, but DO NOT claim5/5accuracy or production usability. Formal full_perimeter_pass false for all.
+- Evidence `artifacts/bmw_contour_real_20260911/{review.html,contact_sheet.jpg,baseline,reference_draft,baseline_summary.json,posthoc_review.json,artifact_checks.json}`; source hashes unchanged. One-pass algorithm24.73-35.64s excluding I/O/save, not benchmark. Full scripts archived there. Next priority foreground-component attribution and dark-edge/normal support, normal self and multi-normal verification before accuracy claims. No core changes or new software test claims this turn.
+
+## BMW full-perimeter contour offline development (2026-09-11)
+
+- User requested implementation of `docs/BMW_整圈外轮廓检测_Codex文档交接包_V1.0/`; implemented C0–C3 offline development framework under `src/bmw_inspection/checks/contour_compare/`, CLI `python -m bmw_inspection.cli.contour` (teach/inspect/evaluate), registered future installed `bmw-contour` entry in root pyproject. Existing uv root env used without sync/upgrades; console script not refreshed locally. Original stamp/hole/runtime/camera work preserved; no commit/push.
+- Read `docs/bmw/contour_compare.md` and module-local `AGENTS_MEMORY.md` before changes. Reference masks support once-only interactive teaching or confirmed headless input; strict version/shape/ROI/arc/material normal/checksum validation. Offline inspect uses rigid dark-hole anchors, mutable-probability whole-image GrabCut, image-supported full-perimeter profiles and conservative 2D corners, bidirectional segment distance, fixed reference coverage, periodic events and atomic evidence.
+- Never nominate default PASS for unknown/dark/ambiguous edges, use reference interpolation to complete test contours, scale-align defects away, or reuse 4024x3036 ROI for 2047x1545 inputs. Current corner shift >1.5px is conservatively UNKNOWN. Third independent pose-check regions and nonzero gap merging unsupported; config rejects. Two-hole pose does not establish 3D pose validity; development only and whole_part_release=null.
+- Exact target two2047x1545 RGBA input SHA files and old local-notch zip are absent in checked project paths. Same basename images in raw data are4024x3036 RGB with different hashes and two normal sessions; do not resize/substitute them silently. Details `docs/bmw/contour_c0_audit_20260911.md`. User was asked for target paths or explicit full-resolution reference selection; awaiting input for real regression.
+- Final software regression385 passed(102 new contour+283 existing), one NVML warning; module help/compileall passed. Synthetic end-to-end final `artifacts/bmw_contour_synthetic_20260911_final/`: self PASS(max7.1e-14px), four12px notches each one NG event, all coverage100%, unknown0. Gradient-centroid/reference pixel-convention correction fixes V1 systematic1px bias; quarter-pixel shift retained in synthetic unit test. V1/V2 artifacts remain historical, use final. Not BMW real-image, GUI interaction, camera/GPU/Windows or production acceptance; C4/C5 deferred.
+
+## BMW stamp reader public API handoff (2026-09-10)
+
+- User accepted the current reader and asked to organize code with integration interfaces. Public `from bmw_inspection.checks import StampReader, StampReaderConfig, StampReadResult`; configuration/result extracted into `stamp_config.py`/`stamp_result.py`, old `stamp_reader` imports remain compatible. Recognition logic/thresholds/ROI unchanged.
+- `initialize()` loads and caches backend without inference; reuse one reader per worker. `read(uint8_bgr, *, capture_id=None, inspection_id=None, source_kind="unknown")` accepts caller identities (nonempty if provided), source kind unknown/fused_only. Returns readonly convenience properties plus JSON-ready independent `to_dict()`; optional `save()` refuses existing directory. Old mutable payload retained. No main runtime integration or business verdict.
+- Adopted previously compared intra4/inter2 in V2 and config defaults; V1 JSON explicitly retains2/2. Engine metadata records execution settings. Isolated OCR dependencies remain `bmw_runtime/requirements-stamp-ocr.txt`; dependency locks unchanged.
+- Canonical guide `docs/bmw/stamp_reader.md`, helper index `tools/bmw/README.md`. Public CLI keeps old arguments and adds optional context. Validation helper uses public API; reusable `tools/bmw/benchmark_stamp_reading.py` supports manifests, threads and repetitions, loads/warms before timers and keeps inter2 fixed for comparison.
+- Fresh237 tests passed (90 stamp +147 retained BMW/pipeline), one existing NVML warning. Real CPU84 replay: every non-timing/non-added-context/non-thread field exactly matches prior V2 outputs; original60 remains55 readable/5 review, new24 remains24 readable. Evidence `artifacts/bmw_stamp_handoff_20260910/{original60,new24,parity.json}`. Real24-image benchmark-tool smoke and single-image CLI context persistence passed. Independent static review addressed misleading hardcoded inter-thread reporting by explicitly setting execution inter2. No camera/GPU/Windows acceptance, commit or push.
+
+## BMW stamp CPU speed comparison (2026-09-10)
+
+- User asked about faster recognition without losing accuracy. Ran a comparison only; `StampReader` default intra/inter2 remains unchanged. On Intel Core Ultra7 265K, same V2 model/preprocessing/thresholds with intra4/inter2 reduced OCR median123.61->78.02ms, P95143.81->91.38ms (36.88% median reduction). Whole read median124.09->78.51ms, excluding load/I/O/capture/save.
+- 84 images,4 warmups then2 measured passes per config, sequential separate processes.168 paired payloads identical after removing timing fields, including scores/boxes/raw and normalized text/states/fallbacks. This supports local candidate4 threads, not arbitrary-image accuracy or concurrent25-model cycle guarantees.
+- Evidence `artifacts/bmw_stamp_speed_20260910/{benchmark_threads.py,threads2.json,threads4.json,comparison.json}`, CSV `results/bmw_stamp_speed_20260910/cpu_threads.csv`; guide `docs/bmw/stamp_reading_speed_20260910.md`. No runtime/default parameter changes, no GPU/camera validation. Historical stage medians det92.15ms/cls1.81ms/rec28.26ms; cached model loading already exists.
+
+## BMW alphanumeric stamp reading V2 (2026-09-09)
+
+- User explicitly confirmed codes contain letters/digits only and no punctuation, and authorized changes. Use new `configs/bmw/checks/stamp_read_{left,right}_v2.json`; V1 remains for baseline comparison. `normalized_code` removes whitespace/punctuation with per-character audit; `raw_code`/OCR lines remain intact. Never substitute B8/O0/D0 or infer expected strings; unsupported non-ASCII letters/digits/symbols remain review.
+- Optional review-only rectified line reading uses fixed450x104 quadrilateral crops, original+CLAHE, same RapidOCR CPU engine with detection/classification disabled. Both normalized reads must agree at >=.90 and match/strictly extend compatible primary evidence; original main threshold.95 remains. Overlapping/narrow fragments, unchanged truncated consensus and contradictory characters cannot clear review. Global direct recognition was rejected after observed B8/D0 regressions in exploration.
+- Original60: review10->5, alphanumeric match55/58->57/58 clear references;55 readable. Remaining10/28/46/51/56 preserve uncertainty. Additional24 previously unused paths: V1review3->V2review0, normalized24/24 match assistant visual references. Same sessions/two codes, possible repeat physical parts; no100%production accuracy claim.
+- Final artifacts `artifacts/bmw_stamp_alphanumeric_20260909/final_original60/` and `final_new24/`, each includes review.html/results/summary and images. Extra manifest `docs/bmw/stamp_reading_holdout_20260909_manifest.json`. Latest guide `docs/bmw/stamp_reading_alphanumeric_v2_20260909.md`; batch tool selects `--config-version v2`.
+- Fresh212 tests passed (65 stamp tests plus147 retained), existing NVML warning; live CPU CLI tested normalization, split rescue and continued review. No runtime/camera/model/dependency-lock changes, business rules, commit or push. Generic source kind unknown unless supplied by manifest; same-image processing variants are not independent exposures.
+
+## BMW standalone stamp reader and 60-image validation (2026-09-09)
+
+- User approved extending reading-only work to about60 back images and a standalone command; business rules and main runtime integration remain deferred. New core `src/bmw_inspection/checks/stamp_reader.py`, CLI `python -m bmw_inspection.cli.read_stamp --image ... --config ... --output NEW_DIR`, explicit independent configs `configs/bmw/checks/stamp_read_{left,right}_v1.json`. CPU OCR environment stays isolated; reproducible pins `bmw_runtime/requirements-stamp-ocr.txt`.
+- Selected60 new image paths excluding prior8: left/right30 each, normal18 and defect12 each,7 sessions across0820/0823. Assistant visual review found no clipped main codes with unchanged full-image ROIs; labels are visual references, not customer truth or distinct-part counts. Uncertain physical damage/shadow cases28/56 are separately tracked; manifest `docs/bmw/stamp_reading_validation_20260909_manifest.json`.
+- Final outcomes50 readable/10 review;58 clear visual references:51 raw exact,55 alphanumeric matches. Raw punctuation errors0/21/26 remain readable; leading space14 retained. Multiple candidates28/31/46 review; high-confidence truncations42/56 caught by provisional code-box width fraction .70. Low-score threshold .95 is uncalibrated, and readable is not correctness/quality acceptance. Geometry guard was added after observing this set; not independent validation.
+- Evidence `artifacts/bmw_stamp_validation_20260909/reader_final/{review.html,results.json,summary.json,sample_*}`. OCR call median122.6ms/P95137.9ms, excludes startup/I/O/capture/save; no dedicated performance benchmark. Replayer `tools/bmw/validate_stamp_reading.py`; guide `docs/bmw/stamp_reading_validation_20260909.md`.
+- Fresh regression172 passed (25 new plus147 retained), one existing NVML warning; real single-image CLI readable returns0 and review returns3, help runs without OCR; errors/16bit rejection tested. Pixels, models, original25 checks, root/runtime dependency locks unchanged. Generic CLI source_kind unknown; fused_only only from reviewed manifest. No camera/GPU/business-rule acceptance or commit/push.
+
+## BMW back stamp reading sample experiment (2026-09-09)
+
+- Latest user scope supersedes the handoff implementation sequence: only read stamp numbers/codes from a few `dataset/bmw_lab_raw_clean_0820` back-view images; defer all business rules and runtime integration.
+- Read eight real fused images: left/right, normal/defect, first two sorted paths per group. RapidOCR ONNX Runtime 1.4.4 ran in isolated `/tmp/bmw-stamp-ocr-env`; existing BMW environment/config/model assets remain unchanged.
+- Raw code outputs: left sample0 `5A9D6B3.02`, other three left samples `5A9D6B3 02`; all four right samples `5A9D6B4 02`. Independent visual inspection agrees on alphanumerics, but sample0 punctuation differs; right sample4 auxiliary BMW text was misread as BMAN. Do not claim perfect OCR or business acceptance.
+- Local reproducible script, manifest, pinned requirements and evidence: `artifacts/bmw_stamp_read_20260909/`; final output `run_01/result.json` and `run_01/comparison.jpg`. Details: `docs/bmw/stamp_reading_samples_20260909.md`.
+- Manually configured full-image xyxy ROI left `[1260,1450,1900,1980]`, right `[1300,1100,1980,1830]`, 4024x3036 source, clockwise90 crop rotation. These are eight-sample experimental regions, not validated production ROIs. OCR calls measured 111-168ms excluding startup/I/O/capture; no BMW runtime tests or hardware validation performed.
+
 ## BMW cleanup publication preparation (2026-09-09)
 
 - User authorized organizing, committing and pushing the current changes to `origin/feat/bmw-four-camera-runtime-cleanup`. Remote tip was checked live and matched local base `56f429c462536f9a45a6a247845c371448e6aa3c` before commit.
@@ -2350,3 +2524,37 @@
 - GitHub publication preflight restored `.label-studio/zs32_defect_840` so raw annotation history is not part of the code deletion. It also removed orphaned numbered training/fusion/inference/Demo wrappers, strict fusion/audit libraries, and tests whose generic filenames still depended on the retired ZS32 workflow. Remaining Python/Shell code has zero `ZS32` or six-view references. The final combined BMW/capture/pipeline suite passed with `212 passed`.
 - `prepared_manifest` path resolution is now lazy: a profile can load for live cameras or `--capture-set` when the training manifest is absent, while `--sample-id` still fails at the manifest read boundary. The external BMW asset directory contract is documented in `bmw_runtime/README.md`.
 - The dedicated `bmw_runtime/uv.lock` was generated online and `uv lock --project bmw_runtime --check` resolved 121 packages successfully. The GitHub code checkout still requires the documented external model, ROI, mask, and trusted-OK asset trees before real inspection can start.
+
+## BMW B4 single-hole offline diagnostics (2026-09-10)
+
+- Added `checks/hole.py`, `cli/check_hole.py`, `configs/bmw/checks/hole_single_draft.json`, focused tests and `tools/bmw/validate_hole.py`; user requested no commit/push. Existing dirty stamp work and 25-check runtime remain unchanged.
+- Audit found raw 4024x3036 fused images and public/Template ROI assets, but no confirmed target hole ID/ROI/internal mask, exclusive search region, fixture validation or approved geometric limits. Generic NG labels do not prove missing punching or blocked holes. Draft stays null and cannot run.
+- Single fixed-fixture ROI only; explicit part/view/exposure/pixel channel; no hole-based registration, neighbor search or ignore-mask inheritance. Per-capture caller evidence must confirm unmasked source, independent fixture pose and observability. Unknown pose/occlusion or unstable segmentation is REVIEW. This is not automatic fixture/occlusion detection.
+- Four-state offline output includes open/blocked fractions, area/shape/position differences, masks and full-image/ROI overlays. Certain non-opening is NG `HOLE_NOT_OPEN` with “孔未正常开放，原因待确认”; requirement 11/15 process causes remain NOT_DETERMINED. Main fusion/UI integration deferred to B7.
+- Verification: `UV_CACHE_DIR=/tmp/b4-uv-cache uv run --no-sync python -m pytest tests/unit/bmw_inspection -q`: 256 passed, existing NVML warning. Eight real CLI invocations over synthetic fixtures verified all four states at `results/bmw_hole_b4_synthetic_20260910_v2/summary.json`. No real-hole acceptance, GPU or camera evidence; do not expand to multiple holes yet.
+- Full input contract, commands, limitations and outstanding real data: `docs/bmw/hole_single_b4.md`. Reuse this folder memory for subsequent B4 work; do not substitute unrelated workspace memories.
+
+## BMW B4 real-image candidate review (2026-09-10 follow-up)
+
+- User authorized selecting a few images from `dataset/bmw_lab_raw_clean_0820`. Six real full-frame fused left/front images selected: four normal from 0820/0823 sessions, two generic-defect from 0820. Exact selection in `docs/bmw/hole_real_samples_20260910.json`; session/sample/view is identity, not proof of six different physical parts.
+- Visually selected upper-right circular hole candidate, full-image xyxy `[2940,660,3200,940]`, 4024x3036 BGR converted to gray, fused_only/fused. No neighboring hole in ROI; no registration based on target. Actual part number/target acceptance remains user confirmation.
+- First normal image Otsu dark threshold=72 produces exploratory 14664px2 reference mask. Other images use unchanged threshold/coordinates. Reference overlap 95.87-100%, area difference <=0.553%, centroid deviation <=3.994px. These are measurements, not approved limits or physical-open proof. Hole interior has concentric texture possibly behind-fixture/background; unconfirmed. Generic defect samples do not prove hole defects.
+- Added explicit `status=diagnostic` to hole config: supports null limits/quality limit and unvalidated fixed fixture; always REVIEW after evidence, input errors ERROR. ready remains strict, draft rejected. No fake production tolerances or verified-observable flags.
+- Reproducer `tools/bmw/measure_hole_samples.py`; actual output `results/bmw_hole_b4_real_20260910` includes six JSON/overlay evidence sets, source SHA256/lineage, target_overview.jpg, contact_sheet.jpg, diagnostic_config.json and reference mask. Six REVIEW, zero ERROR. 270 BMW tests passed with existing NVML warning.
+- Follow `docs/bmw/hole_real_review_20260910.md`: remaining user questions are selected hole/enterprise part mapping, rear fixture/background and true blocked/missing-hole sample filenames, and approved defect/geometry boundaries. No need to ask for entire dataset again. Preserve stamp and existing runtime; no commit/push performed.
+
+## BMW front existing-image contour acquisition — 2026-09-15
+
+- Read Markdown in `/home/yunjing/MVI_xingtao_PL/V`; it contains specifications, not original images. Verified existing fused PNG inventory at `dataset/bmw_lab_raw_clean_0820/{left,right}/front/`: left 211 (179 normal,32 defect), right 212 (176 normal,36 defect).
+- Completed fresh 8-image left/front 4024x3036 offline extraction using existing continuous_v3 config and folds_only reference mask. Outputs and scoped memory: `artifacts/bmw_front_contour_20260915/{review.html,contact_sheet.jpg,README.md,AGENTS_MEMORY.md}`. Source manifests, full-resolution overlays, raw original-image XY CSV, calibrated samples, NPZ, and UNKNOWN evidence saved. This is a selected development replay, not all 423 images.
+- Report verification exit0: all8 SHA/dimensions/evidence verified, coverage72.47-89.05%, all REVIEW. No core algorithm/config/camera changes, no production acceptance. Existing unrelated changes preserved.
+
+## BMW automatic front matching — 2026-09-15
+
+- Implemented optional broad dual-hole localization, independent line/hole/foot pixel geometry, and current-image contour acquisition. Final report `artifacts/bmw_front_automatic_geometry_20260915/review.html`; guide `docs/bmw/front_automatic_geometry_20260915.md`. Added scoped artifact and module memories.
+-8/8 original images and4digitally moved/rotated cases localized;223contour tests pass. Candidate contours/CSV/masks saved, but lower-left dark-material false concavities remain; do not claim reliable full-perimeter extraction. Feet are measurements, never alignment anchors. Normal001 remains known-good despite lower-foot projected difference-4.78px.
+
+## Dark-surface explanation and prospective backgrounds — 2026-09-15
+
+- User asked how dark segmentation works, requested an explanatory image, asked new-part training sample count, and said eventual background may be glass or conveyor belt. Created real-pixel original/crop/mask figure `artifacts/bmw_dark_segmentation_explained_20260915/dark_segmentation_explanation.png`; sourceSHA and A(2200,2500) mask0 verified.
+- Current GrabCut uses per-image color models, no neural training set. New part needs its own taught mask/anchors.100train+30val+50test suggested only as a provisional pretrained-segmentation pilot budget, not proven minimum or user-approved dataset size. Glass/backlight feasibility and belt optical properties remain unknown; no lighting selection or training executed. Scoped README/memory records conditions and sources.

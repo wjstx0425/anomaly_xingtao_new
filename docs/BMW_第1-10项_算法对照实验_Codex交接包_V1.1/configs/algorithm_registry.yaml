@@ -1,0 +1,187 @@
+# V1.1候选注册草稿；不是已实现/已验证的算法程序。
+schema_version: 1
+algorithms:
+- id: baseline_system
+  family: frozen_system
+  stage: E1
+  prerequisite: actual_deployment_assets
+  output: existing_system_results
+  note: 只读回放真实部署。钢印另列保存，不算第1—10项缺陷命中；保留当前启用分支的来源与作用范围。
+- id: baseline_template
+  family: frozen_template
+  stage: E1
+  prerequisite: current_template_assets
+  output: template_evidence
+- id: baseline_efficientad
+  family: normal_only_deep_baseline
+  stage: E1
+  prerequisite: current_efficientad_assets_and_provenance
+  output: class_agnostic_anomaly_map
+  model_name: EfficientAD
+  frozen: true
+  note: 唯一允许的无监督深度分支；不自动重训或重校准。
+- id: baseline_yolo26n
+  family: frozen_supervised_detection
+  stage: E1
+  prerequisite: current_yolo_weights
+  output: boxes
+  frozen: true
+- id: R01_contour
+  family: rule_geometry
+  stage: E2
+  requirements:
+  - 4
+  - 5
+  - 10
+  prerequisite: approved_reference_and_observable_boundary
+  output: contour_events
+  note: 整圈与覆盖检查；仅可见投影子范围，不重做左右件识别。
+- id: R02a_morph_lines
+  family: rule_lines
+  stage: E2
+  requirements:
+  - 1
+  - 2
+  - 3
+  prerequisite: visible_line_signal_and_roi
+  output: line_regions
+  note: 黑帽/顶帽响应与几何描述；不能从细线响应断言内部裂纹。
+- id: R02b_ridge
+  family: rule_lines
+  stage: E3
+  requirements:
+  - 1
+  - 2
+  - 3
+  prerequisite: R02a_error_analysis
+  output: line_regions
+  note: Sato或Frangi先二选一，与R02a独立比较。
+- id: R03_reference_residual
+  family: traditional_statistics
+  stage: E3
+  requirements:
+  - 3
+  - 6
+  - 7
+  - 9
+  prerequisite: aligned_normal_train
+  output: residual_regions
+  note: 正常中位数/MAD仅由train拟合。
+- id: R04_color_region
+  family: rule_color
+  stage: E3
+  requirements:
+  - 7
+  - 8
+  prerequisite: verified_color_or_explicit_grayscale_subscope
+  output: area_and_color_difference
+  note: 灰度文件不支持真实色差；不把颜色归一化当成去缺陷。
+- id: R05_texture
+  family: traditional_statistics
+  stage: E3_conditional
+  requirements:
+  - 6
+  - 9
+  prerequisite: visible_texture_defects_and_normal_train
+  output: texture_regions
+  note: Gabor或局部梯度统计先二选一。
+- id: D01_yolo_input_ablation
+  family: supervised_detection
+  stage: E2_inference_then_E3_training
+  requirements:
+  - 1
+  - 2
+  - 3
+  - 4
+  - 5
+  - 6
+  - 7
+  - 8
+  - 9
+  - 10
+  prerequisite: existing_yolo_checkpoint_for_diagnostic_complete_bbox_for_localization_and_training
+  output: boxes
+  note: E2固定权重比较当前/高分辨率，预算允许加固定网格分块；E3再有条件匹配输入训练。缺框只能报图像级，不伪造定位成绩。
+- id: D02_yolo_capacity
+  family: supervised_detection
+  stage: E4_conditional
+  requirements:
+  - 1
+  - 2
+  - 3
+  - 4
+  - 5
+  - 6
+  - 7
+  - 8
+  - 9
+  - 10
+  prerequisite: D01_selected_input_and_complete_bbox_annotations
+  output: boxes
+  note: 只改变n/s容量，其余条件尽量匹配。
+- id: S01_unet
+  family: supervised_segmentation
+  stage: E4
+  requirements:
+  - 1
+  - 2
+  - 3
+  - 4
+  - 6
+  - 7
+  - 8
+  - 9
+  prerequisite: reviewed_pixel_masks
+  output: defect_mask
+  note: 监督分割主线；先1至2类；需审核mask，不由框涂满；缺mask记BLOCKED，不替换为新AD。
+- id: S02_segformer_b0
+  family: supervised_segmentation
+  stage: E4_conditional
+  requirements:
+  - 1
+  - 2
+  - 3
+  - 4
+  - 6
+  - 7
+  - 8
+  - 9
+  prerequisite: S01_baseline_and_same_pixel_masks
+  output: defect_mask
+  note: 作为架构对照，不预设优于U-Net。
+- id: S03_yolo_seg
+  family: supervised_instance_segmentation
+  stage: E4_conditional
+  requirements:
+  - 1
+  - 2
+  - 3
+  - 4
+  - 6
+  - 7
+  - 8
+  - 9
+  prerequisite: reviewed_instance_masks_and_explicit_instance_need
+  output: instance_masks
+  note: 明确实例需求/已有实现时可作为S01替代试点；不同时大规模启动所有分割器。
+revision: '1.1'
+policy:
+  normal_only_deep_model_allowlist:
+  - EfficientAD
+  discover_additional_ad_models: false
+  preserve_historical_assets: true
+  freeze_efficientad_components:
+  - weights
+  - input_preprocessing
+  - roi
+  - ignore_masks
+  - postprocessing
+  - thresholds
+  user_feedback: PatchCore与AnomalyDINO已尝试且差异不大；本轮不复测，不推断跨数据集排名。
+  excluded_deep_ad_examples:
+  - PatchCore
+  - AnomalyDINO
+  - PaDiM
+  - ReverseDistillation
+  - Dinomaly
+  missing_masks_fallback: continue_rules_and_bbox_supervision_not_new_AD

@@ -1,0 +1,93 @@
+{
+  "roi_xyxy": [
+    2940,
+    660,
+    3200,
+    940
+  ],
+  "coordinate_space": "full_image",
+  "feature_id": "front_upper_round_candidate",
+  "part_id": "dataset_bmw_left_unconfirmed_part_number",
+  "reference_index": 0,
+  "physical_part_identity_verified": false,
+  "samples": [
+    {
+      "path": "dataset/bmw_lab_raw_clean_0820/left/front/normal/20260820_162040_682498/images/left_front_normal_bmw_left_normal_group001_000001_fused.png",
+      "session_id": "20260820_162040_682498",
+      "sample_id": "bmw_left_normal_group001_000001",
+      "group_id": "group001",
+      "view_id": "front",
+      "camera_serial": "DA9805574",
+      "captured_at": "2026-08-20T08:20:49.848199Z",
+      "source_channel": "fused",
+      "source_kind": "fused_only",
+      "dataset_label": "normal",
+      "hole_ground_truth": null
+    },
+    {
+      "path": "dataset/bmw_lab_raw_clean_0820/left/front/normal/20260820_162040_682498/images/left_front_normal_bmw_left_normal_group020_000001_fused.png",
+      "session_id": "20260820_162040_682498",
+      "sample_id": "bmw_left_normal_group020_000001",
+      "group_id": "group020",
+      "view_id": "front",
+      "camera_serial": "DA9805574",
+      "captured_at": "2026-08-20T08:27:07.768565Z",
+      "source_channel": "fused",
+      "source_kind": "fused_only",
+      "dataset_label": "normal",
+      "hole_ground_truth": null
+    },
+    {
+      "path": "dataset/bmw_lab_raw_clean_0820/left/front/normal/20260823_161606_428291/images/left_front_normal_bmw_left_normal_retake_group001_000001_fused.png",
+      "session_id": "20260823_161606_428291",
+      "sample_id": "bmw_left_normal_retake_group001_000001",
+      "group_id": "group001",
+      "view_id": "front",
+      "camera_serial": "DA9805574",
+      "captured_at": "2026-08-23T08:28:06.433886Z",
+      "source_channel": "fused",
+      "source_kind": "fused_only",
+      "dataset_label": "normal",
+      "hole_ground_truth": null
+    },
+    {
+      "path": "dataset/bmw_lab_raw_clean_0820/left/front/normal/20260823_164432_522052/images/left_front_normal_bmw_left_normal_retake_group020_000001_fused.png",
+      "session_id": "20260823_164432_522052",
+      "sample_id": "bmw_left_normal_retake_group020_000001",
+      "group_id": "group020",
+      "view_id": "front",
+      "camera_serial": "DA9805574",
+      "captured_at": "2026-08-23T08:52:32.144347Z",
+      "source_channel": "fused",
+      "source_kind": "fused_only",
+      "dataset_label": "normal",
+      "hole_ground_truth": null
+    },
+    {
+      "path": "dataset/bmw_lab_raw_clean_0820/left/front/defect/defect/20260820_155511_803522/images/left_front_defect_defect_bmw_left_defect_group001_000001_fused.png",
+      "session_id": "20260820_155511_803522",
+      "sample_id": "bmw_left_defect_group001_000001",
+      "group_id": "group001",
+      "view_id": "front",
+      "camera_serial": "DA9805574",
+      "captured_at": "2026-08-20T07:55:37.000658Z",
+      "source_channel": "fused",
+      "source_kind": "fused_only",
+      "dataset_label": "generic_defect",
+      "hole_ground_truth": null
+    },
+    {
+      "path": "dataset/bmw_lab_raw_clean_0820/left/front/defect/defect/20260820_155511_803522/images/left_front_defect_defect_bmw_left_defect_group020_000001_fused.png",
+      "session_id": "20260820_155511_803522",
+      "sample_id": "bmw_left_defect_group020_000001",
+      "group_id": "group020",
+      "view_id": "front",
+      "camera_serial": "DA9805574",
+      "captured_at": "2026-08-20T08:02:30.968046Z",
+      "source_channel": "fused",
+      "source_kind": "fused_only",
+      "dataset_label": "generic_defect",
+      "hole_ground_truth": null
+    }
+  ]
+}

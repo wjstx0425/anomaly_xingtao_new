@@ -166,6 +166,14 @@ class HikvisionAdapter:
     def set_exposure(self, handle: CameraHandle, exposure: float) -> None:
         self._set_float(handle.cam, "ExposureTime", exposure, handle.device)
 
+    def get_exposure(self, handle: CameraHandle) -> float:
+        """Read the device exposure setting in microseconds for experiment evidence."""
+        value = self.sdk.MVCC_FLOATVALUE()
+        self._check(
+            handle.cam.MV_CC_GetFloatValue("ExposureTime", value), "GetFloatValue(ExposureTime)", handle.device
+        )
+        return float(value.fCurValue)
+
     def stop(self, handle: CameraHandle) -> None:
         self._check(handle.cam.MV_CC_StopGrabbing(), "StopGrabbing", handle.device)
         handle.started = False
@@ -258,8 +266,14 @@ def capture_hdr_round(handles: Sequence[CameraHandle], adapter: CameraAdapter, c
     return results
 
 
-def capture_single_round(handles: Sequence[CameraHandle], adapter: CameraAdapter, exposure: float, timeout_ms: int, pacer: GroupedTriggerPacer) -> list[SingleViewResult]:
-    images = _capture_pass(handles, adapter, exposure, 0, timeout_ms, pacer)
+def capture_single_round(
+    handles: Sequence[CameraHandle], adapter: CameraAdapter, exposure: float, timeout_ms: int,
+    pacer: GroupedTriggerPacer, *, settle_frames: int = 0,
+) -> list[SingleViewResult]:
+    """Capture a grouped exposure, optionally discarding transition frames first."""
+    if isinstance(settle_frames, bool) or not isinstance(settle_frames, int) or settle_frames < 0:
+        raise ValueError("settle_frames must be a non-negative integer")
+    images = _capture_pass(handles, adapter, exposure, settle_frames, timeout_ms, pacer)
     return [SingleViewResult(slot, image) for slot, image in enumerate(images)]
 
 

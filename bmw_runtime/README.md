@@ -45,3 +45,16 @@ the first missing model, ROI, mask, or trusted-OK index. The prepared dataset
 manifest is needed only for `--sample-id`; live cameras and `--capture-set` do
 not require it. Generated inspection output remains under the profile's
 `result_root`.
+
+### Optional standalone stamp reading
+
+The back-view stamp reader has a separate CPU OCR environment and public Python API.
+See [stamp reader interface](../docs/bmw/stamp_reader.md) for setup, configuration,
+and CLI examples. It is not yet connected to the main inspection verdict or work-order rules.
+
+### Exposure and HDR comparison
+
+Use `python -m bmw_inspection.cli.exposure_test` to scan exposure times on one or
+more configured cameras, retain originals, and compare existing selective fusion
+with OpenCV Mertens in a local HTML report. Saved sessions can be replayed without
+cameras. See [exposure test commands and outputs](../docs/bmw/exposure_test.md).

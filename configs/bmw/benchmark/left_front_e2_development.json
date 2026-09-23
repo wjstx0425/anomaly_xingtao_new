@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "status": "development_ready",
+  "plan_id": "left_front_e2_20260912",
+  "stage": "E2",
+  "evaluation_track": "development_only",
+  "algorithms": [
+    "baseline_template",
+    "baseline_efficientad",
+    "baseline_yolo26n",
+    "R01_contour",
+    "R02a_morph_lines",
+    "D01_yolo_high"
+  ],
+  "max_new_candidate_runs": 6,
+  "allow_training": false,
+  "locked_test_access": false,
+  "manifest": "docs/bmw/benchmark_left_front_manifest_20260912.json",
+  "baseline_profile": "configs/bmw/experiments/bmw_eight_view_demo_left_0820_mixed_v1.json",
+  "contour_config": "configs/bmw/checks/contour/left_front_4024_continuous_v3.json",
+  "contour_cached_runs": [
+    "artifacts/bmw_contour_continuous_20260912/normals_final_v2",
+    "artifacts/bmw_contour_continuous_20260912/defects_final_v2"
+  ],
+  "line_config": {
+    "image_shape_hw": [
+      3036,
+      4024
+    ],
+    "roi_xyxy": [
+      1218,
+      166,
+      3353,
+      2980
+    ],
+    "response_threshold": 20.0,
+    "min_area_px": 20,
+    "widths_px": [
+      3,
+      7,
+      15
+    ],
+    "orientations_deg": [
+      0,
+      45,
+      90,
+      135
+    ],
+    "background_sigma_px": 15.0
+  },
+  "resources": {
+    "device": "cpu",
+    "torch_num_threads": 4,
+    "torch_num_interop_threads": 2,
+    "max_concurrent_model_jobs": 1,
+    "max_single_job_minutes": 90,
+    "warmup_iterations": 1,
+    "timing_protocol": "one_measured_pass_over_all_8_development_images_per_branch; no_production_latency_claim",
+    "max_yolo_variants": 2
+  },
+  "output_dir": "results/bmw_benchmark/left_front_e2_20260912",
+  "limitations": [
+    "missing_physical_identity",
+    "unverified_weight_training_overlap",
+    "reference_fitted_on_development",
+    "no_complete_bbox_or_defect_masks",
+    "one_view_only",
+    "cpu_only"
+  ],
+  "candidate_policy": "Frozen deployment replay and 3 new candidate branches; no new AD model, no fitting, no locked_test."
+}

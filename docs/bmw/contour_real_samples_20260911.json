@@ -1,0 +1,115 @@
+{
+  "purpose": "user_selected_development_diagnostic",
+  "reference_sample_id": "reference",
+  "label_source": "user",
+  "samples": [
+    {
+      "sample_id": "reference",
+      "image_path": "dataset/bmw_lab_raw_clean_0820/left/front/normal/20260823_164432_522052/images/left_front_normal_bmw_left_normal_retake_group002_000001_fused.png",
+      "shape": [
+        3036,
+        4024,
+        3
+      ],
+      "sha256": "d1983658f1d371d7a2f4b86099628092c76c65517cf7ef894c61ca0974b988e3",
+      "ground_truth": "normal",
+      "label_source": "user",
+      "physical_part_id": null,
+      "hand": "left",
+      "view_id": "front",
+      "channel": "fused",
+      "split": "development",
+      "placement_group": null
+    },
+    {
+      "sample_id": "defect_002",
+      "image_path": "dataset/bmw_lab_raw_clean_0820/left/front/defect/defect/20260820_155511_803522/images/left_front_defect_defect_bmw_left_defect_group002_000001_fused.png",
+      "shape": [
+        3036,
+        4024,
+        3
+      ],
+      "sha256": "9756ca0392ba5a6c9755f2653bcf4f45a46254d1c27ccd68b208acf1567074c8",
+      "ground_truth": "contour_deformation",
+      "label_source": "user",
+      "physical_part_id": null,
+      "hand": "left",
+      "view_id": "front",
+      "channel": "fused",
+      "split": "development",
+      "placement_group": null
+    },
+    {
+      "sample_id": "defect_005",
+      "image_path": "dataset/bmw_lab_raw_clean_0820/left/front/defect/defect/20260820_155511_803522/images/left_front_defect_defect_bmw_left_defect_group005_000001_fused.png",
+      "shape": [
+        3036,
+        4024,
+        3
+      ],
+      "sha256": "dae78f8f77ec4bd1e6d779c956ed72d188400ba4e95e9dba63c010d5799ae991",
+      "ground_truth": "contour_deformation",
+      "label_source": "user",
+      "physical_part_id": null,
+      "hand": "left",
+      "view_id": "front",
+      "channel": "fused",
+      "split": "development",
+      "placement_group": null
+    },
+    {
+      "sample_id": "defect_007",
+      "image_path": "dataset/bmw_lab_raw_clean_0820/left/front/defect/defect/20260820_155511_803522/images/left_front_defect_defect_bmw_left_defect_group007_000001_fused.png",
+      "shape": [
+        3036,
+        4024,
+        3
+      ],
+      "sha256": "a09792469048e3025606fd981af2cab0b383f22d3fe15afc00cdc85d210aa8c6",
+      "ground_truth": "contour_deformation",
+      "label_source": "user",
+      "physical_part_id": null,
+      "hand": "left",
+      "view_id": "front",
+      "channel": "fused",
+      "split": "development",
+      "placement_group": null
+    },
+    {
+      "sample_id": "defect_015",
+      "image_path": "dataset/bmw_lab_raw_clean_0820/left/front/defect/defect/20260820_155511_803522/images/left_front_defect_defect_bmw_left_defect_group015_000001_fused.png",
+      "shape": [
+        3036,
+        4024,
+        3
+      ],
+      "sha256": "f77303d94587ea040c7f553444cec6214a3327df7168beb6f2264651da18a6ac",
+      "ground_truth": "contour_deformation",
+      "label_source": "user",
+      "physical_part_id": null,
+      "hand": "left",
+      "view_id": "front",
+      "channel": "fused",
+      "split": "development",
+      "placement_group": null
+    },
+    {
+      "sample_id": "defect_020",
+      "image_path": "dataset/bmw_lab_raw_clean_0820/left/front/defect/defect/20260820_155511_803522/images/left_front_defect_defect_bmw_left_defect_group020_000001_fused.png",
+      "shape": [
+        3036,
+        4024,
+        3
+      ],
+      "sha256": "c931473b4f129fdd0c50d72642d8f713937b5faa3776084f24358ceed13b70ae",
+      "ground_truth": "contour_deformation",
+      "label_source": "user",
+      "physical_part_id": null,
+      "hand": "left",
+      "view_id": "front",
+      "channel": "fused",
+      "split": "development",
+      "placement_group": null
+    }
+  ]
+}

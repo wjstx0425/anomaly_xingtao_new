@@ -1,0 +1,62 @@
+{
+  "purpose": "additional_normal_directory_diagnostic_not_independent_validation",
+  "reference_sample_id": "reference",
+  "label_source": "per_sample",
+  "samples": [
+    {
+      "sample_id": "reference",
+      "image_path": "dataset/bmw_lab_raw_clean_0820/left/front/normal/20260823_164432_522052/images/left_front_normal_bmw_left_normal_retake_group002_000001_fused.png",
+      "shape": [
+        3036,
+        4024,
+        3
+      ],
+      "sha256": "d1983658f1d371d7a2f4b86099628092c76c65517cf7ef894c61ca0974b988e3",
+      "ground_truth": "normal",
+      "label_source": "user",
+      "physical_part_id": null,
+      "hand": "left",
+      "view_id": "front",
+      "channel": "fused",
+      "split": "development",
+      "placement_group": null
+    },
+    {
+      "sample_id": "normal_extra_001",
+      "image_path": "dataset/bmw_lab_raw_clean_0820/left/front/normal/20260823_164432_522052/images/left_front_normal_bmw_left_normal_retake_group001_000001_fused.png",
+      "shape": [
+        3036,
+        4024,
+        3
+      ],
+      "sha256": "1f2fedfb03d804a125ace991be328489f40032c4a991de76b3a55e6378b74fc1",
+      "ground_truth": "normal",
+      "label_source": "user_confirmation_20260912",
+      "physical_part_id": null,
+      "hand": "left",
+      "view_id": "front",
+      "channel": "fused",
+      "split": "development",
+      "placement_group": null,
+      "label_confirmation": "用户确认可以认为是正常的"
+    },
+    {
+      "sample_id": "normal_extra_003",
+      "image_path": "dataset/bmw_lab_raw_clean_0820/left/front/normal/20260823_164432_522052/images/left_front_normal_bmw_left_normal_retake_group003_000001_fused.png",
+      "shape": [
+        3036,
+        4024,
+        3
+      ],
+      "sha256": "c6faca8c3fb848c01516caee41a324b5c7a0a7bfe1378e25c51cc17081fac01a",
+      "ground_truth": "normal_directory_label",
+      "label_source": "dataset_normal_directory_not_individually_user_confirmed",
+      "physical_part_id": null,
+      "hand": "left",
+      "view_id": "front",
+      "channel": "fused",
+      "split": "development",
+      "placement_group": null
+    }
+  ]
+}
